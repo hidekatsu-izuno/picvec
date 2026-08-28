@@ -182,7 +182,24 @@ and unsupported dark regions.
    Python's 189 and 48. Rust's rendered DeltaE is lower, so thresholds must
    not be altered merely to force these counts. Compare individual Paint
    model decisions and port the remaining profile/coupling details only when
-   they preserve or improve the render gate.
+   they preserve or improve the render gate. The former minimum-gradient-area
+   check returned Solid before measuring colour variation, so genuinely
+   varying faces below 64 pixels could never compete. Small faces may now
+   propose only Office-compatible gradients, with a fixed complexity charge:
+   acceptance requires at least one DeltaE00 JND of total improvement over a
+   64-pixel reference face, 12 percent lower mean error, and no p90 regression.
+   The unregularized version was rejected because it increased the car's
+   gradients from 320 to 1,301. With the total-improvement gate, car changes
+   from 320 to 352 gradients with identical path/segment counts; mean/p90/p99
+   DeltaE00 improve from 0.92866/1.69264/9.72921 to
+   0.92604/1.69014/9.67059 and SSIM from 0.996436 to 0.996480. Weighted
+   geometry units rise only 0.18 percent. Cliparts likewise improves mean and
+   p99 DeltaE00 from 0.83527/20.54527 to 0.83276/20.48336 with unchanged p90
+   and a 0.41 percent weighted-geometry increase. Dog mean DeltaE00 improves
+   from 0.388280 to 0.388233 with unchanged p90/p99 and a higher SSIM. Native
+   RGB checks against the checked-in outputs also improve normalized RMSE
+   from 0.0733765 to 0.0732282 on viewport1 and from 0.0569264 to 0.0567567 on
+   viewport2; their weighted-geometry increases are 0.09 and 0.29 percent.
 
 4. **Geometry fitting parity.**  The midpoint-based optimal polygon, Potrace
    corner construction, exact shared slicing, and bounded fairing are ported.

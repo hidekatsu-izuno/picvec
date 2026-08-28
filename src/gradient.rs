@@ -1490,6 +1490,36 @@ fn fit_region(
     )
 }
 
+fn office_gain_is_sufficient(
+    selected: ErrorStats,
+    office: ErrorStats,
+    small_region: bool,
+    selected_is_solid: bool,
+    minimum_improvement: f32,
+    region_area: usize,
+    minimum_gradient_area: usize,
+) -> bool {
+    let required_gain = if small_region {
+        // Charge every new gradient the same minimum total perceptual gain
+        // as a face at the configured area threshold.  Without this
+        // normalisation, many tiny faces can each buy an SVG definition with
+        // a small per-pixel improvement and make the vector representation
+        // substantially more complex for little image-wide benefit.
+        // One full DeltaE00 just-noticeable-difference over the minimum face
+        // area is the fixed perceptual budget for adding an SVG definition.
+        (4.0 * minimum_improvement) * minimum_gradient_area.max(1) as f32
+            / region_area.max(1) as f32
+    } else if selected_is_solid {
+        0.05 * 2.3
+    } else {
+        1e-3
+    };
+    let relative_gain = !small_region || office.mean <= selected.mean * 0.88;
+    relative_gain
+        && selected.mean - office.mean >= required_gain
+        && office.percentile <= selected.percentile + 1e-4
+}
+
 fn fit_region_samples(
     label: usize,
     source: &Raster,
@@ -1511,9 +1541,7 @@ fn fit_region_samples(
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         == Some(label);
-    if area < config.minimum_gradient_area as usize {
-        return (Paint::Solid { color: solid_color }, solid_error.mean);
-    }
+    let small_region = area < config.minimum_gradient_area as usize;
     let sample_labs: Vec<Lab> = samples.iter().map(|&index| source_labs[index]).collect();
     let median_lab = Lab {
         l: median(&mut sample_labs.iter().map(|value| value.l).collect::<Vec<_>>()),
@@ -1527,30 +1555,39 @@ fn fit_region_samples(
     if perceptual_range <= 2.3 {
         return (Paint::Solid { color: solid_color }, solid_error.mean);
     }
-    // Preserve the reference's two independent model families.  The legacy
-    // robust three-stop model competes with Solid first; only then does the
-    // richer Office-preset estimator get a chance to replace that selection.
-    let (legacy, legacy_stats) = legacy_gradient_candidate(
-        source,
-        source_labs,
-        samples,
-        region_bounds,
-        directional_only,
-    );
     let minimum_improvement = 0.25 * 2.3;
-    if trace {
-        eprintln!(
-            "paint trace label={label} area={area} samples={} solid={solid_error:?} legacy={legacy:?} legacy_stats={legacy_stats:?}",
-            samples.len(),
-        );
-    }
-    let (mut selected, mut selected_stats) = if solid_error.mean - legacy_stats.mean
-        >= minimum_improvement
-        && legacy_stats.mean <= solid_error.mean * 0.88
-    {
-        (legacy, legacy_stats)
-    } else {
+    // The area threshold is a model-complexity guard, not evidence that a
+    // small face is perceptually flat.  Keep the reference legacy fit for
+    // normal faces.  Small faces start from Solid and may only use the
+    // bounded Office model below when it passes the same strict improvement
+    // gate as a legacy Solid-to-gradient promotion.
+    let (mut selected, mut selected_stats) = if small_region {
         (Paint::Solid { color: solid_color }, solid_error)
+    } else {
+        // Preserve the reference's two independent model families.  The
+        // legacy robust three-stop model competes with Solid first; only then
+        // does the richer Office-preset estimator get a chance to replace
+        // that selection.
+        let (legacy, legacy_stats) = legacy_gradient_candidate(
+            source,
+            source_labs,
+            samples,
+            region_bounds,
+            directional_only,
+        );
+        if trace {
+            eprintln!(
+                "paint trace label={label} area={area} samples={} solid={solid_error:?} legacy={legacy:?} legacy_stats={legacy_stats:?}",
+                samples.len(),
+            );
+        }
+        if solid_error.mean - legacy_stats.mean >= minimum_improvement
+            && legacy_stats.mean <= solid_error.mean * 0.88
+        {
+            (legacy, legacy_stats)
+        } else {
+            (Paint::Solid { color: solid_color }, solid_error)
+        }
     };
     // `_fit_stops` ranks legacy geometries using its three-stop basis, then
     // `_spec_error_stats` re-samples the selected exported Paint before the
@@ -1572,14 +1609,15 @@ fn fit_region_samples(
     if let Some((office, office_stats)) = office_candidate
         .filter(|(paint, _)| !directional_only || matches!(paint, Paint::Linear { .. }))
     {
-        let required_gain = if matches!(selected, Paint::Solid { .. }) {
-            0.05 * 2.3
-        } else {
-            1e-3
-        };
-        if selected_stats.mean - office_stats.mean >= required_gain
-            && office_stats.percentile <= selected_stats.percentile + 1e-4
-        {
+        if office_gain_is_sufficient(
+            selected_stats,
+            office_stats,
+            small_region,
+            matches!(selected, Paint::Solid { .. }),
+            minimum_improvement,
+            area,
+            config.minimum_gradient_area as usize,
+        ) {
             selected = office;
             selected_stats = office_stats;
         }
@@ -4530,5 +4568,62 @@ mod tests {
         ];
         assert_eq!(interpolate(&stops, 0.0), [0.0; 3]);
         assert_eq!(interpolate(&stops, 1.0), [1.0; 3]);
+    }
+
+    #[test]
+    fn small_region_gradient_requires_strict_measured_gain() {
+        let selected = ErrorStats {
+            mean: 10.0,
+            percentile: 6.0,
+        };
+        let minimum_improvement = 0.25 * 2.3;
+        assert!(office_gain_is_sufficient(
+            selected,
+            ErrorStats {
+                mean: 7.5,
+                percentile: 6.0,
+            },
+            true,
+            true,
+            minimum_improvement,
+            60,
+            64,
+        ));
+        assert!(!office_gain_is_sufficient(
+            selected,
+            ErrorStats {
+                mean: 8.0,
+                percentile: 6.0,
+            },
+            true,
+            true,
+            minimum_improvement,
+            60,
+            64,
+        ));
+        assert!(!office_gain_is_sufficient(
+            selected,
+            ErrorStats {
+                mean: 7.5,
+                percentile: 6.1,
+            },
+            true,
+            true,
+            minimum_improvement,
+            60,
+            64,
+        ));
+        assert!(!office_gain_is_sufficient(
+            selected,
+            ErrorStats {
+                mean: 3.0,
+                percentile: 6.0,
+            },
+            true,
+            true,
+            minimum_improvement,
+            16,
+            64,
+        ));
     }
 }
