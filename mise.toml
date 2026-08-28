@@ -1,2 +1,4 @@
 [tools]
+python = "latest"
 rust = "latest"
+uv = "latest"
