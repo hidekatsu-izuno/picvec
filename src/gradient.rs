@@ -73,6 +73,31 @@ pub struct GradientSummary {
     pub maximum_stops: usize,
 }
 
+pub(crate) fn refresh_summary(summary: &mut GradientSummary, paints: &[Paint]) {
+    summary.solid_regions = 0;
+    summary.linear_regions = 0;
+    summary.radial_regions = 0;
+    summary.fitted_direction_linear_regions = 0;
+    summary.fitted_focus_radial_regions = 0;
+    summary.maximum_stops = 0;
+    for paint in paints {
+        match paint {
+            Paint::Solid { .. } => summary.solid_regions += 1,
+            Paint::Linear { preset, stops, .. } => {
+                summary.linear_regions += 1;
+                summary.fitted_direction_linear_regions +=
+                    usize::from(*preset == LinearPreset::Fitted);
+                summary.maximum_stops = summary.maximum_stops.max(stops.len());
+            }
+            Paint::Radial { origin, stops, .. } => {
+                summary.radial_regions += 1;
+                summary.fitted_focus_radial_regions += usize::from(*origin == RadialOrigin::Fitted);
+                summary.maximum_stops = summary.maximum_stops.max(stops.len());
+            }
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct Bounds {
     min_x: f32,

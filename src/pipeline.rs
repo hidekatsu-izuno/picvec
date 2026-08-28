@@ -11,19 +11,20 @@ use crate::color::{rgb_to_lab, Lab};
 use crate::config::Config;
 use crate::edge::{classify, dilate_square, perceptual_smooth, EdgeSummary};
 use crate::geometry::{build as build_geometry, GeometrySummary};
-use crate::gradient::{fit_all, merge_partition, GradientSummary};
+use crate::gradient::{fit_all, merge_partition, refresh_summary, GradientSummary, Paint};
 use crate::metrics::QualityMetrics;
 use crate::optimize::{summarize as optimization_summary, OptimizationSummary};
 use crate::raster::Raster;
 use crate::segment::{
-    refine_thin_paint_ownership, regularize_boundaries, segment, split_adaptive_paint_patches,
-    SegmentationSummary,
+    refine_thin_paint_ownership, regularize_boundaries, replace_final_exact_paint_labels, segment,
+    split_adaptive_paint_patches, Segmentation, SegmentationSummary,
 };
 use crate::structural::{
     analyse as analyse_structural, select_missing_with_junctions as select_missing_structural,
     StructuralInk, StructuralSummary,
 };
 use crate::svg::{write as write_svg, SvgSummary};
+use crate::union_find::UnionFind;
 use crate::{Error, Result};
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -89,6 +90,66 @@ fn save_pipeline_diagnostic(name: &str, image: &Raster) {
         image.width, image.height
     ));
     let _ = fs::write(raw_path, bytes);
+}
+
+fn merge_exact_final_paints(
+    source: &Raster,
+    segmentation: &mut Segmentation,
+    paints: &mut Vec<Paint>,
+) -> usize {
+    let count = segmentation.regions.len();
+    if count < 2 || paints.len() != count {
+        return 0;
+    }
+    let mut owners = UnionFind::new(count);
+    let mut accepted = 0_usize;
+    for y in 0..segmentation.height {
+        for x in 0..segmentation.width {
+            let index = y * segmentation.width + x;
+            let current = segmentation.labels[index] as usize;
+            for neighbour in [
+                (x + 1 < segmentation.width).then_some(index + 1),
+                (y + 1 < segmentation.height).then_some(index + segmentation.width),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                let following = segmentation.labels[neighbour] as usize;
+                if current == following || paints[current] != paints[following] {
+                    continue;
+                }
+                let first = owners.find(current);
+                let second = owners.find(following);
+                if first != second {
+                    owners.union(first, second);
+                    accepted += 1;
+                }
+            }
+        }
+    }
+    if accepted == 0 {
+        return 0;
+    }
+    let roots: Vec<usize> = (0..count).map(|label| owners.find(label)).collect();
+    let mut unique = roots.clone();
+    unique.sort_unstable();
+    unique.dedup();
+    let mut representative = vec![usize::MAX; count];
+    for (label, &root) in roots.iter().enumerate() {
+        representative[root] = representative[root].min(label);
+    }
+    let merged_paints = unique
+        .iter()
+        .map(|&root| paints[representative[root]].clone())
+        .collect::<Vec<_>>();
+    let labels = segmentation
+        .labels
+        .iter()
+        .map(|&label| roots[label as usize] as u32)
+        .collect::<Vec<_>>();
+    replace_final_exact_paint_labels(source, segmentation, labels, accepted);
+    *paints = merged_paints;
+    accepted
 }
 
 fn save_label_diagnostic(name: &str, labels: &[u32], width: usize, height: usize) {
@@ -237,6 +298,7 @@ fn temporary_path(output: &Path) -> Result<PathBuf> {
     Ok(output.with_file_name(format!(".{file_name}.picvec-tmp")))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_svg_preview(
     output: &Path,
     dimensions: (usize, usize),
@@ -248,6 +310,7 @@ fn render_svg_preview(
     config: &Config,
     suffix: &str,
     overlap: bool,
+    final_geometry: bool,
 ) -> Result<Raster> {
     let (width, height) = dimensions;
     let (geometry, paints) = paint_layer;
@@ -268,6 +331,7 @@ fn render_svg_preview(
         paints,
         structural,
         &base_config,
+        final_geometry,
     ) {
         let _ = fs::remove_file(&base_path);
         return Err(error);
@@ -481,9 +545,7 @@ pub fn vectorize(input: &Path, output: &Path, config: &Config) -> Result<Summary
         processing.height,
     );
     report_progress(config, "adaptive-paint-patches", started, &mut checkpoint);
-    let (geometry, geometry_report) = build_geometry(&segmentation);
-    report_progress(config, "shared-geometry", started, &mut checkpoint);
-    let (paints, gradient_report) = fit_all(
+    let (mut paints, mut gradient_report) = fit_all(
         &paint_reference,
         &processing,
         &segmentation,
@@ -491,6 +553,14 @@ pub fn vectorize(input: &Path, output: &Path, config: &Config) -> Result<Summary
         config,
     );
     report_progress(config, "paint-fitting", started, &mut checkpoint);
+    let exact_paint_merges =
+        merge_exact_final_paints(&paint_reference, &mut segmentation, &mut paints);
+    if exact_paint_merges > 0 {
+        refresh_summary(&mut gradient_report, &paints);
+    }
+    report_progress(config, "exact-paint-merge", started, &mut checkpoint);
+    let (geometry, geometry_report) = build_geometry(&segmentation);
+    report_progress(config, "shared-geometry", started, &mut checkpoint);
     let paint_render = render_svg_preview(
         output,
         (processing.width, processing.height),
@@ -498,6 +568,7 @@ pub fn vectorize(input: &Path, output: &Path, config: &Config) -> Result<Summary
         &StructuralInk::empty(),
         config,
         "base",
+        false,
         false,
     )?;
     report_progress(config, "paint-preview", started, &mut checkpoint);
@@ -517,6 +588,7 @@ pub fn vectorize(input: &Path, output: &Path, config: &Config) -> Result<Summary
         config,
         "residual-ink",
         true,
+        true,
     )?;
     report_progress(config, "residual-preview", started, &mut checkpoint);
     let quality = crate::metrics::compare(&processing, &residual_render);
@@ -535,6 +607,7 @@ pub fn vectorize(input: &Path, output: &Path, config: &Config) -> Result<Summary
         &paints,
         &structural,
         config,
+        true,
     ) {
         Ok(report) => report,
         Err(error) => {
@@ -571,6 +644,57 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn exact_final_paint_merge_compacts_adjacent_equal_owners() {
+        let source = Raster::blank(2, 1, [0.25, 0.5, 0.75]);
+        let mut segmentation = Segmentation {
+            width: 2,
+            height: 1,
+            labels: vec![0, 1],
+            paint_keys: vec![0, 1],
+            paint_samples: vec![true; 2],
+            canonical: source.clone(),
+            regions: vec![
+                crate::segment::RegionStats {
+                    id: 0,
+                    area: 1,
+                    min_x: 0,
+                    min_y: 0,
+                    max_x: 1,
+                    max_y: 1,
+                    mean_rgb: [0.25, 0.5, 0.75],
+                    mean_lab: rgb_to_lab([0.25, 0.5, 0.75]),
+                },
+                crate::segment::RegionStats {
+                    id: 1,
+                    area: 1,
+                    min_x: 1,
+                    min_y: 0,
+                    max_x: 2,
+                    max_y: 1,
+                    mean_rgb: [0.25, 0.5, 0.75],
+                    mean_lab: rgb_to_lab([0.25, 0.5, 0.75]),
+                },
+            ],
+            summary: SegmentationSummary::default(),
+        };
+        let mut paints = vec![
+            Paint::Solid {
+                color: [0.25, 0.5, 0.75],
+            },
+            Paint::Solid {
+                color: [0.25, 0.5, 0.75],
+            },
+        ];
+        assert_eq!(
+            merge_exact_final_paints(&source, &mut segmentation, &mut paints),
+            1
+        );
+        assert_eq!(segmentation.labels, vec![0, 0]);
+        assert_eq!(segmentation.regions.len(), 1);
+        assert_eq!(paints.len(), 1);
+    }
 
     #[test]
     fn conversion_writes_only_the_named_svg() {

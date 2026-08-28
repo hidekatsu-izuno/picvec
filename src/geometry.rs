@@ -43,6 +43,9 @@ pub struct RegionGeometry {
     pub region: u32,
     pub loops: Vec<Vec<Point>>,
     pub path_data: String,
+    /// Equivalent opaque painter-stack geometry with holes removed only when
+    /// every covered owner is later in the final paint order.
+    pub occlusion_path_data: Option<String>,
     pub primitive: Option<Primitive>,
 }
 
@@ -61,6 +64,10 @@ pub struct GeometrySummary {
     pub rectangles: usize,
     pub circles: usize,
     pub ellipses: usize,
+    /// Hole contours omitted because every raster owner inside the hole is
+    /// painted later.  The later opaque faces cover the underpaint exactly,
+    /// including the existing shared-boundary overlap.
+    pub covered_holes_removed: usize,
     /// Faces that could not be assembled exclusively from the canonical
     /// shared curves and therefore used the conservative grid fallback.
     pub shared_loop_fallbacks: usize,
@@ -5854,8 +5861,128 @@ fn primitive_for(
     }
 }
 
+fn paint_order_ranks(segmentation: &Segmentation) -> Vec<usize> {
+    let count = segmentation.regions.len();
+    let mut border_counts = vec![0_usize; count];
+    if segmentation.width > 0 && segmentation.height > 0 {
+        for x in 0..segmentation.width {
+            border_counts[segmentation.labels[x] as usize] += 1;
+            border_counts[segmentation.labels[(segmentation.height - 1) * segmentation.width + x]
+                as usize] += 1;
+        }
+        for y in 1..segmentation.height.saturating_sub(1) {
+            border_counts[segmentation.labels[y * segmentation.width] as usize] += 1;
+            border_counts
+                [segmentation.labels[y * segmentation.width + segmentation.width - 1] as usize] +=
+                1;
+        }
+    }
+    let background = border_counts
+        .iter()
+        .enumerate()
+        .max_by_key(|&(label, &area)| (area, std::cmp::Reverse(label)))
+        .map(|(label, _)| label)
+        .unwrap_or(0);
+    let mut order: Vec<usize> = (0..count).collect();
+    order.sort_by(
+        |&left, &right| match (left == background, right == background) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => segmentation.regions[right]
+                .area
+                .cmp(&segmentation.regions[left].area)
+                .then_with(|| left.cmp(&right)),
+        },
+    );
+    let mut ranks = vec![0_usize; count];
+    for (rank, region) in order.into_iter().enumerate() {
+        ranks[region] = rank;
+    }
+    ranks
+}
+
+fn point_in_loop(point: Point, polygon: &[Point]) -> bool {
+    let mut inside = false;
+    for index in 0..polygon.len() {
+        let first = polygon[index];
+        let second = polygon[(index + 1) % polygon.len()];
+        if (first.y > point.y) != (second.y > point.y) {
+            let crossing =
+                (second.x - first.x) * (point.y - first.y) / (second.y - first.y) + first.x;
+            if point.x < crossing {
+                inside = !inside;
+            }
+        }
+    }
+    inside
+}
+
+fn hole_is_covered_by_later_regions(
+    polygon: &[Point],
+    region: usize,
+    segmentation: &Segmentation,
+    order_ranks: &[usize],
+) -> bool {
+    if polygon.len() < 3 || segmentation.width == 0 || segmentation.height == 0 {
+        return false;
+    }
+    let minimum_x = polygon
+        .iter()
+        .map(|point| point.x)
+        .fold(f32::INFINITY, f32::min)
+        .floor()
+        .max(0.0) as usize;
+    let minimum_y = polygon
+        .iter()
+        .map(|point| point.y)
+        .fold(f32::INFINITY, f32::min)
+        .floor()
+        .max(0.0) as usize;
+    let maximum_x = (polygon
+        .iter()
+        .map(|point| point.x)
+        .fold(f32::NEG_INFINITY, f32::max)
+        .ceil()
+        .max(0.0) as usize)
+        .min(segmentation.width);
+    let maximum_y = (polygon
+        .iter()
+        .map(|point| point.y)
+        .fold(f32::NEG_INFINITY, f32::max)
+        .ceil()
+        .max(0.0) as usize)
+        .min(segmentation.height);
+    let mut covered_pixels = 0_usize;
+    let mut covering_owner = None::<usize>;
+    for y in minimum_y..maximum_y {
+        for x in minimum_x..maximum_x {
+            if !point_in_loop(
+                Point {
+                    x: x as f32 + 0.5,
+                    y: y as f32 + 0.5,
+                },
+                polygon,
+            ) {
+                continue;
+            }
+            covered_pixels += 1;
+            let owner = segmentation.labels[y * segmentation.width + x] as usize;
+            if owner == region || order_ranks[owner] <= order_ranks[region] {
+                return false;
+            }
+            match covering_owner {
+                Some(previous) if previous != owner => return false,
+                None => covering_owner = Some(owner),
+                _ => {}
+            }
+        }
+    }
+    covered_pixels > 0
+}
+
 pub fn build(segmentation: &Segmentation) -> (Vec<RegionGeometry>, GeometrySummary) {
     let count = segmentation.regions.len();
+    let order_ranks = paint_order_ranks(segmentation);
     let stride = segmentation.width + 1;
     let mut edges = vec![Vec::<GridEdge>::new(); count];
     let mut shared = 0_usize;
@@ -5966,6 +6093,8 @@ pub fn build(segmentation: &Segmentation) -> (Vec<RegionGeometry>, GeometrySumma
         let traced = trace_region_vertex_loops(region_edges, stride);
         let mut loops = Vec::<Vec<Point>>::new();
         let mut data = String::new();
+        let mut occlusion_data = String::new();
+        let mut removed_hole = false;
         for vertices in traced {
             let source_points: Vec<Point> = vertices
                 .iter()
@@ -5984,6 +6113,17 @@ pub fn build(segmentation: &Segmentation) -> (Vec<RegionGeometry>, GeometrySumma
             if source_area.abs() < 0.5 {
                 continue;
             }
+            let covered_hole = source_area < 0.0
+                && hole_is_covered_by_later_regions(
+                    &source_points,
+                    region,
+                    segmentation,
+                    &order_ranks,
+                );
+            if covered_hole {
+                summary.covered_holes_removed += 1;
+                removed_hole = true;
+            }
             match shared_region_loop(
                 &vertices,
                 &shared_chains,
@@ -5994,6 +6134,9 @@ pub fn build(segmentation: &Segmentation) -> (Vec<RegionGeometry>, GeometrySumma
                 Ok((points, path)) => {
                     loops.push(points);
                     data.push_str(&path);
+                    if !covered_hole {
+                        occlusion_data.push_str(&path);
+                    }
                     continue;
                 }
                 Err(SharedLoopFailure::MissingEdge) => summary.shared_loop_missing_edges += 1,
@@ -6025,11 +6168,15 @@ pub fn build(segmentation: &Segmentation) -> (Vec<RegionGeometry>, GeometrySumma
                 }
             };
             if points.len() >= 3 {
-                data.push_str(&closed_path_data(
+                let path = closed_path_data(
                     &points,
                     &mut summary.cubic_segments,
                     &mut summary.line_segments,
-                ));
+                );
+                data.push_str(&path);
+                if !covered_hole {
+                    occlusion_data.push_str(&path);
+                }
                 loops.push(points);
             }
         }
@@ -6053,43 +6200,19 @@ pub fn build(segmentation: &Segmentation) -> (Vec<RegionGeometry>, GeometrySumma
             region: region as u32,
             loops,
             path_data: data,
+            occlusion_path_data: removed_hole.then_some(occlusion_data),
             primitive,
         });
     }
     // Python serializes the dominant border face first, then all remaining
     // faces by descending raster area with the label as the stable tie-break.
     // Preserve that order before any render-dependent structural selection.
-    let mut border_counts = vec![0_usize; count];
-    if segmentation.width > 0 && segmentation.height > 0 {
-        for x in 0..segmentation.width {
-            border_counts[segmentation.labels[x] as usize] += 1;
-            border_counts[segmentation.labels[(segmentation.height - 1) * segmentation.width + x]
-                as usize] += 1;
-        }
-        for y in 1..segmentation.height.saturating_sub(1) {
-            border_counts[segmentation.labels[y * segmentation.width] as usize] += 1;
-            border_counts
-                [segmentation.labels[y * segmentation.width + segmentation.width - 1] as usize] +=
-                1;
-        }
-    }
-    let background = border_counts
-        .iter()
-        .enumerate()
-        .max_by_key(|&(label, &area)| (area, std::cmp::Reverse(label)))
-        .map(|(label, _)| label)
-        .unwrap_or(0);
     geometries.sort_by(|left, right| {
         let left_region = left.region as usize;
         let right_region = right.region as usize;
-        match (left_region == background, right_region == background) {
-            (true, false) => std::cmp::Ordering::Less,
-            (false, true) => std::cmp::Ordering::Greater,
-            _ => segmentation.regions[right_region]
-                .area
-                .cmp(&segmentation.regions[left_region].area)
-                .then_with(|| left_region.cmp(&right_region)),
-        }
+        order_ranks[left_region]
+            .cmp(&order_ranks[right_region])
+            .then_with(|| left_region.cmp(&right_region))
     });
     (geometries, summary)
 }
@@ -6133,6 +6256,70 @@ mod tests {
         let (geometry, _) = build(&segmentation);
         assert!(geometry[0].primitive.is_none());
         assert!(!geometry[0].path_data.is_empty());
+    }
+
+    #[test]
+    fn only_holes_owned_entirely_by_later_faces_are_removed() {
+        let polygon = vec![
+            Point { x: 1.0, y: 1.0 },
+            Point { x: 1.0, y: 4.0 },
+            Point { x: 4.0, y: 4.0 },
+            Point { x: 4.0, y: 1.0 },
+        ];
+        let mut labels = vec![0_u32; 25];
+        for y in 1..4 {
+            for x in 1..4 {
+                labels[y * 5 + x] = 1;
+            }
+        }
+        let segmentation = Segmentation {
+            width: 5,
+            height: 5,
+            labels,
+            paint_keys: vec![0, 1],
+            paint_samples: vec![true; 25],
+            canonical: Raster::blank(5, 5, [0.0; 3]),
+            regions: vec![
+                RegionStats {
+                    id: 0,
+                    area: 16,
+                    min_x: 0,
+                    min_y: 0,
+                    max_x: 5,
+                    max_y: 5,
+                    mean_rgb: [0.0; 3],
+                    mean_lab: rgb_to_lab([0.0; 3]),
+                },
+                RegionStats {
+                    id: 1,
+                    area: 9,
+                    min_x: 1,
+                    min_y: 1,
+                    max_x: 4,
+                    max_y: 4,
+                    mean_rgb: [1.0; 3],
+                    mean_lab: rgb_to_lab([1.0; 3]),
+                },
+            ],
+            summary: SegmentationSummary::default(),
+        };
+        assert!(hole_is_covered_by_later_regions(
+            &polygon,
+            0,
+            &segmentation,
+            &[0, 1]
+        ));
+        assert!(!hole_is_covered_by_later_regions(
+            &polygon,
+            0,
+            &segmentation,
+            &[1, 0]
+        ));
+        let (geometry, summary) = build(&segmentation);
+        let outer = geometry.iter().find(|item| item.region == 0).unwrap();
+        assert_eq!(summary.covered_holes_removed, 1);
+        assert!(outer.occlusion_path_data.is_some());
+        assert!(outer.occlusion_path_data.as_ref().unwrap().len() < outer.path_data.len());
     }
 
     #[test]

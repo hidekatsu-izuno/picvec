@@ -792,42 +792,75 @@ fn fit_circle(subpath: &Subpath) -> Option<(f64, f64, f64, f64)> {
 }
 
 fn path_bbox(subpaths: &[Subpath]) -> Option<(f64, f64, f64, f64)> {
-    if subpaths.len() != 1 || !subpaths[0].closed {
+    if subpaths.is_empty() || subpaths.iter().any(|subpath| !subpath.closed) {
         return None;
     }
     // Python's batching pass reparses the already optimized path with the
     // original M/L/H/V/C/Z-only parser.  An analytic A command therefore
     // makes that path ineligible for compound-path batching.
-    if subpaths[0]
-        .segments
-        .iter()
-        .any(|segment| segment.kind == SegmentKind::Arc)
-    {
+    if subpaths.iter().any(|subpath| {
+        subpath
+            .segments
+            .iter()
+            .any(|segment| segment.kind == SegmentKind::Arc)
+    }) {
         return None;
     }
-    let mut points = vec![subpaths[0].start];
-    for segment in &subpaths[0].segments {
-        if segment.kind == SegmentKind::Cubic {
-            points.extend([segment.first, segment.second]);
+    let boxes = subpaths
+        .iter()
+        .map(|subpath| {
+            let mut points = vec![subpath.start];
+            for segment in &subpath.segments {
+                if segment.kind == SegmentKind::Cubic {
+                    points.extend([segment.first, segment.second]);
+                }
+                points.push(segment.end);
+            }
+            (
+                points
+                    .iter()
+                    .map(|point| point.x)
+                    .fold(f64::INFINITY, f64::min),
+                points
+                    .iter()
+                    .map(|point| point.y)
+                    .fold(f64::INFINITY, f64::min),
+                points
+                    .iter()
+                    .map(|point| point.x)
+                    .fold(f64::NEG_INFINITY, f64::max),
+                points
+                    .iter()
+                    .map(|point| point.y)
+                    .fold(f64::NEG_INFINITY, f64::max),
+            )
+        })
+        .collect::<Vec<_>>();
+    for first in 0..boxes.len() {
+        for second in first + 1..boxes.len() {
+            // Overlapping subpath boxes may encode an even-odd hole.  Such a
+            // path is deliberately ineligible for paint-order batching.
+            if !separated_bboxes(boxes[first], boxes[second], 1.0) {
+                return None;
+            }
         }
-        points.push(segment.end);
     }
     Some((
-        points
+        boxes
             .iter()
-            .map(|point| point.x)
+            .map(|bbox| bbox.0)
             .fold(f64::INFINITY, f64::min),
-        points
+        boxes
             .iter()
-            .map(|point| point.y)
+            .map(|bbox| bbox.1)
             .fold(f64::INFINITY, f64::min),
-        points
+        boxes
             .iter()
-            .map(|point| point.x)
+            .map(|bbox| bbox.2)
             .fold(f64::NEG_INFINITY, f64::max),
-        points
+        boxes
             .iter()
-            .map(|point| point.y)
+            .map(|bbox| bbox.3)
             .fold(f64::NEG_INFINITY, f64::max),
     ))
 }
@@ -910,6 +943,19 @@ pub fn separated_bboxes(
         || second.2 + padding < first.0 - padding
         || first.3 + padding < second.1 - padding
         || second.3 + padding < first.1 - padding
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn disjoint_compound_path_remains_batchable_but_nested_path_does_not() {
+        let disjoint = parse_path("M0 0L4 0L4 4L0 4Z M10 0L14 0L14 4L10 4Z").unwrap();
+        assert_eq!(path_bbox(&disjoint), Some((0.0, 0.0, 14.0, 4.0)));
+        let nested = parse_path("M0 0L14 0L14 14L0 14Z M4 4L10 4L10 10L4 10Z").unwrap();
+        assert!(path_bbox(&nested).is_none());
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize)]

@@ -23,6 +23,9 @@ pub struct SegmentationSummary {
     pub paint_aware_region_merge_proposals: usize,
     pub paint_aware_region_merges: usize,
     pub paint_aware_merge_render_rejected: bool,
+    /// Adjacent final regions whose serialized Paint is exactly identical
+    /// and can therefore share one topology owner without a colour change.
+    pub exact_paint_region_merges: usize,
     pub preserved_independent_materials: usize,
     pub antialias_pixels: usize,
     pub core_sampled_regions: usize,
@@ -1750,6 +1753,7 @@ pub fn segment(image: &Raster, roles: &EdgeRoles, config: &Config) -> Segmentati
             paint_aware_region_merge_proposals: 0,
             paint_aware_region_merges: 0,
             paint_aware_merge_render_rejected: false,
+            exact_paint_region_merges: 0,
             preserved_independent_materials: preserved,
             antialias_pixels: correction.antialias_pixels,
             core_sampled_regions: correction.core_sampled_regions,
@@ -1799,6 +1803,27 @@ pub(crate) fn replace_merged_labels(
     segmentation.summary.merged_regions = count;
     segmentation.summary.paint_aware_region_merge_proposals += accepted_merges;
     segmentation.summary.paint_aware_region_merges += accepted_merges;
+}
+
+/// Compact a final exact-Paint ownership partition without changing the
+/// canonical raster that positioned its external shared boundaries.
+///
+/// This is deliberately separate from `replace_merged_labels`: the latter is
+/// an earlier perceptual merge and must recompute region prototypes, whereas
+/// this final pass only removes interfaces between already identical Paints.
+pub(crate) fn replace_final_exact_paint_labels(
+    image: &Raster,
+    segmentation: &mut Segmentation,
+    labels: Vec<u32>,
+    accepted_merges: usize,
+) {
+    assert_eq!(labels.len(), segmentation.labels.len());
+    let (labels, count) = compact_values(&labels);
+    segmentation.labels = labels;
+    segmentation.paint_keys = (0..count as u32).collect();
+    segmentation.regions = region_stats(image, &segmentation.labels, count);
+    segmentation.summary.merged_regions = count;
+    segmentation.summary.exact_paint_region_merges += accepted_merges;
 }
 
 /// Split only long Paint faces that participate in a source-smooth false
