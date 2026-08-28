@@ -13,7 +13,7 @@ use crate::edge::{
 };
 use crate::geometry::Point;
 use crate::raster::{percentile, Raster};
-use crate::segment::{replace_merged_labels, Segmentation};
+use crate::segment::{replace_merged_labels, replace_source_supported_paint_labels, Segmentation};
 use crate::union_find::UnionFind;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -70,6 +70,8 @@ pub struct GradientSummary {
     pub fitted_direction_linear_regions: usize,
     pub fitted_focus_radial_regions: usize,
     pub coupled_linear_regions: usize,
+    pub source_supported_paint_merges: usize,
+    pub source_supported_boundary_edges_removed: usize,
     pub maximum_stops: usize,
 }
 
@@ -4359,6 +4361,231 @@ fn couple_adjacent_paints(
     accepted
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SupportedPaintMergeReport {
+    pub merges: usize,
+    pub boundary_edges_removed: usize,
+}
+
+/// Remove a final Paint interface only when both its geometry and colour are
+/// unsupported by the native source.
+///
+/// This is intentionally downstream of Paint fitting.  Quantizer labels are
+/// topology owners, so mere colour similarity is insufficient: every
+/// connected interface must be below a native-source JND, the two emitted
+/// Paints must already agree at that interface, and a single Office-compatible
+/// candidate must preserve the measured error on both incident faces.  The
+/// accepted labels are compacted before shared geometry is rebuilt, which
+/// removes the obsolete master curve instead of hiding it with an overlay.
+pub(crate) fn merge_source_supported_paints(
+    source: &Raster,
+    boundary_source: &Raster,
+    segmentation: &mut Segmentation,
+    paints: &mut Vec<Paint>,
+    config: &Config,
+) -> SupportedPaintMergeReport {
+    let count = segmentation.regions.len();
+    if count < 2
+        || paints.len() != count
+        || source.width != segmentation.width
+        || source.height != segmentation.height
+        || boundary_source.width != segmentation.width
+        || boundary_source.height != segmentation.height
+    {
+        return SupportedPaintMergeReport::default();
+    }
+
+    #[derive(Default)]
+    struct BoundaryEvidence {
+        length: usize,
+        maximum_median: f32,
+        maximum_p90: f32,
+        points: Vec<Point>,
+    }
+
+    let mut evidence = HashMap::<(usize, usize), BoundaryEvidence>::new();
+    for boundary in smooth_paint_boundaries(boundary_source, segmentation, 2, true) {
+        let entry = evidence
+            .entry(pair(boundary.left, boundary.right))
+            .or_default();
+        entry.length += boundary.length;
+        entry.maximum_median = entry.maximum_median.max(boundary.median_delta_e);
+        entry.maximum_p90 = entry.maximum_p90.max(boundary.percentile_delta_e);
+        entry.points.extend(boundary.points);
+    }
+    let mut candidates = evidence.into_iter().collect::<Vec<_>>();
+    candidates.sort_by(|left, right| {
+        left.1
+            .maximum_p90
+            .total_cmp(&right.1.maximum_p90)
+            .then_with(|| left.1.maximum_median.total_cmp(&right.1.maximum_median))
+            .then_with(|| right.1.length.cmp(&left.1.length))
+            .then_with(|| left.0.cmp(&right.0))
+    });
+
+    let mut region_pixels = vec![Vec::<usize>::new(); count];
+    let mut region_samples = vec![Vec::<usize>::new(); count];
+    for (index, &label) in segmentation.labels.iter().enumerate() {
+        let label = label as usize;
+        region_pixels[label].push(index);
+        if segmentation.paint_samples[index] {
+            region_samples[label].push(index);
+        }
+    }
+    for label in 0..count {
+        if region_samples[label].is_empty() {
+            region_samples[label] = region_pixels[label].clone();
+        }
+        region_samples[label] = sampled_indices(&region_samples[label], 768);
+    }
+    let source_labs = lab_pixels(source);
+    let mut used = vec![false; count];
+    let mut accepted = Vec::<(usize, usize, Paint, usize)>::new();
+    for ((left, right), boundary) in candidates {
+        // All disconnected contacts of the label pair must lack a material
+        // transition.  One supported contact makes the labels independent.
+        if used[left]
+            || used[right]
+            || paints[left] == paints[right]
+            || boundary.maximum_median > 0.60
+            || boundary.maximum_p90 > 1.20
+            || boundary.points.is_empty()
+        {
+            continue;
+        }
+        let seam_errors = seam_errors_at_points(&paints[left], &paints[right], &boundary.points);
+        if percentile(seam_errors, 0.90) > 0.75 {
+            continue;
+        }
+        let left_region = MergeRegion {
+            labels: HashSet::from([left]),
+            pixels: region_pixels[left].clone(),
+            samples: region_samples[left].clone(),
+            bounds: bounds(&region_pixels[left], source.width),
+            paint: paints[left].clone(),
+        };
+        let right_region = MergeRegion {
+            labels: HashSet::from([right]),
+            pixels: region_pixels[right].clone(),
+            samples: region_samples[right].clone(),
+            bounds: bounds(&region_pixels[right], source.width),
+            paint: paints[right].clone(),
+        };
+        let proposal = merge_proposal(source, &left_region, &right_region, config);
+        if !proposal.score.is_finite() {
+            continue;
+        }
+        let left_baseline = paint_stats_against_labs(
+            &source_labs,
+            &region_samples[left],
+            source.width,
+            &paints[left],
+        );
+        let right_baseline = paint_stats_against_labs(
+            &source_labs,
+            &region_samples[right],
+            source.width,
+            &paints[right],
+        );
+        let left_candidate = paint_stats_against_labs(
+            &source_labs,
+            &region_samples[left],
+            source.width,
+            &proposal.paint,
+        );
+        let right_candidate = paint_stats_against_labs(
+            &source_labs,
+            &region_samples[right],
+            source.width,
+            &proposal.paint,
+        );
+        if left_candidate.mean > left_baseline.mean + 0.02
+            || right_candidate.mean > right_baseline.mean + 0.02
+            || left_candidate.percentile > left_baseline.percentile + 0.05
+            || right_candidate.percentile > right_baseline.percentile + 0.05
+        {
+            continue;
+        }
+        let mut baseline_errors = errors_for_indices(
+            &source_labs,
+            &region_samples[left],
+            source.width,
+            &paints[left],
+        );
+        baseline_errors.extend(errors_for_indices(
+            &source_labs,
+            &region_samples[right],
+            source.width,
+            &paints[right],
+        ));
+        let mut candidate_errors = errors_for_indices(
+            &source_labs,
+            &region_samples[left],
+            source.width,
+            &proposal.paint,
+        );
+        candidate_errors.extend(errors_for_indices(
+            &source_labs,
+            &region_samples[right],
+            source.width,
+            &proposal.paint,
+        ));
+        let baseline_mean = numpy_sum_f32(&baseline_errors) / baseline_errors.len().max(1) as f32;
+        let candidate_mean =
+            numpy_sum_f32(&candidate_errors) / candidate_errors.len().max(1) as f32;
+        if candidate_mean > baseline_mean + 0.005
+            || percentile(candidate_errors, 0.90) > percentile(baseline_errors, 0.90) + 0.02
+        {
+            continue;
+        }
+        used[left] = true;
+        used[right] = true;
+        accepted.push((left, right, proposal.paint, boundary.length));
+    }
+    if accepted.is_empty() {
+        return SupportedPaintMergeReport::default();
+    }
+
+    let mut owners = UnionFind::new(count);
+    for &(left, right, _, _) in &accepted {
+        owners.union(left, right);
+    }
+    let roots = (0..count)
+        .map(|label| owners.find(label))
+        .collect::<Vec<_>>();
+    let mut replacement = HashMap::<usize, Paint>::new();
+    for (left, _, paint, _) in &accepted {
+        replacement.insert(roots[*left], paint.clone());
+    }
+    let mut unique = roots.clone();
+    unique.sort_unstable();
+    unique.dedup();
+    let mut representative = vec![usize::MAX; count];
+    for (label, &root) in roots.iter().enumerate() {
+        representative[root] = representative[root].min(label);
+    }
+    let merged_paints = unique
+        .iter()
+        .map(|&root| {
+            replacement
+                .get(&root)
+                .cloned()
+                .unwrap_or_else(|| paints[representative[root]].clone())
+        })
+        .collect::<Vec<_>>();
+    let labels = segmentation
+        .labels
+        .iter()
+        .map(|&label| roots[label as usize] as u32)
+        .collect::<Vec<_>>();
+    replace_source_supported_paint_labels(source, segmentation, labels, accepted.len());
+    *paints = merged_paints;
+    SupportedPaintMergeReport {
+        merges: accepted.len(),
+        boundary_edges_removed: accepted.iter().map(|value| value.3).sum(),
+    }
+}
+
 pub fn fit_all(
     source: &Raster,
     boundary_source: &Raster,
@@ -4579,6 +4806,45 @@ fn save_paint_details(path: &str, paints: &[Paint]) {
 mod tests {
     use super::*;
 
+    fn two_face_segmentation(source: &Raster) -> Segmentation {
+        let labels = (0..source.height)
+            .flat_map(|_| (0..source.width).map(|x| u32::from(x >= source.width / 2)))
+            .collect::<Vec<_>>();
+        let half = source.width / 2;
+        let area = half * source.height;
+        Segmentation {
+            width: source.width,
+            height: source.height,
+            labels,
+            paint_keys: vec![0, 1],
+            paint_samples: vec![true; source.width * source.height],
+            canonical: source.clone(),
+            regions: vec![
+                crate::segment::RegionStats {
+                    id: 0,
+                    area,
+                    min_x: 0,
+                    min_y: 0,
+                    max_x: half,
+                    max_y: source.height,
+                    mean_rgb: source.pixels[0],
+                    mean_lab: rgb_to_lab(source.pixels[0]),
+                },
+                crate::segment::RegionStats {
+                    id: 1,
+                    area,
+                    min_x: half,
+                    min_y: 0,
+                    max_x: source.width,
+                    max_y: source.height,
+                    mean_rgb: source.pixels[half],
+                    mean_lab: rgb_to_lab(source.pixels[half]),
+                },
+            ],
+            summary: crate::segment::SegmentationSummary::default(),
+        }
+    }
+
     #[test]
     fn interpolation_hits_endpoints() {
         let stops = vec![
@@ -4593,6 +4859,53 @@ mod tests {
         ];
         assert_eq!(interpolate(&stops, 0.0), [0.0; 3]);
         assert_eq!(interpolate(&stops, 1.0), [1.0; 3]);
+    }
+
+    #[test]
+    fn source_supported_merge_removes_only_an_unsupported_paint_interface() {
+        let source = Raster::blank(8, 8, [0.5; 3]);
+        let mut segmentation = two_face_segmentation(&source);
+        let mut paints = vec![
+            Paint::Solid { color: [0.498; 3] },
+            Paint::Solid { color: [0.502; 3] },
+        ];
+        let report = merge_source_supported_paints(
+            &source,
+            &source,
+            &mut segmentation,
+            &mut paints,
+            &Config::default(),
+        );
+        assert_eq!(report.merges, 1);
+        assert_eq!(report.boundary_edges_removed, 8);
+        assert_eq!(segmentation.regions.len(), 1);
+        assert_eq!(paints, vec![Paint::Solid { color: [0.5; 3] }]);
+    }
+
+    #[test]
+    fn source_supported_merge_preserves_a_native_material_transition() {
+        let mut pixels = vec![[0.2; 3]; 8 * 8];
+        for y in 0..8 {
+            for x in 4..8 {
+                pixels[y * 8 + x] = [0.8; 3];
+            }
+        }
+        let source = Raster::new(8, 8, pixels);
+        let mut segmentation = two_face_segmentation(&source);
+        let mut paints = vec![
+            Paint::Solid { color: [0.2; 3] },
+            Paint::Solid { color: [0.8; 3] },
+        ];
+        let report = merge_source_supported_paints(
+            &source,
+            &source,
+            &mut segmentation,
+            &mut paints,
+            &Config::default(),
+        );
+        assert_eq!(report, SupportedPaintMergeReport::default());
+        assert_eq!(segmentation.regions.len(), 2);
+        assert_eq!(paints.len(), 2);
     }
 
     #[test]

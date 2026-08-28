@@ -26,6 +26,10 @@ pub struct SegmentationSummary {
     /// Adjacent final regions whose serialized Paint is exactly identical
     /// and can therefore share one topology owner without a colour change.
     pub exact_paint_region_merges: usize,
+    /// Adjacent final regions merged only after the native source proves that
+    /// their interface has no material support and one emitted Paint explains
+    /// both sides without a measured fidelity regression.
+    pub source_supported_paint_merges: usize,
     pub preserved_independent_materials: usize,
     pub antialias_pixels: usize,
     pub core_sampled_regions: usize,
@@ -1754,6 +1758,7 @@ pub fn segment(image: &Raster, roles: &EdgeRoles, config: &Config) -> Segmentati
             paint_aware_region_merges: 0,
             paint_aware_merge_render_rejected: false,
             exact_paint_region_merges: 0,
+            source_supported_paint_merges: 0,
             preserved_independent_materials: preserved,
             antialias_pixels: correction.antialias_pixels,
             core_sampled_regions: correction.core_sampled_regions,
@@ -1824,6 +1829,25 @@ pub(crate) fn replace_final_exact_paint_labels(
     segmentation.regions = region_stats(image, &segmentation.labels, count);
     segmentation.summary.merged_regions = count;
     segmentation.summary.exact_paint_region_merges += accepted_merges;
+}
+
+/// Compact a final approximate-Paint partition after a native-source gate.
+///
+/// As with exact-Paint compaction, the canonical raster and Paint samples are
+/// retained: the accepted candidate changes only final topology ownership.
+pub(crate) fn replace_source_supported_paint_labels(
+    image: &Raster,
+    segmentation: &mut Segmentation,
+    labels: Vec<u32>,
+    accepted_merges: usize,
+) {
+    assert_eq!(labels.len(), segmentation.labels.len());
+    let (labels, count) = compact_values(&labels);
+    segmentation.labels = labels;
+    segmentation.paint_keys = (0..count as u32).collect();
+    segmentation.regions = region_stats(image, &segmentation.labels, count);
+    segmentation.summary.merged_regions = count;
+    segmentation.summary.source_supported_paint_merges += accepted_merges;
 }
 
 /// Split only long Paint faces that participate in a source-smooth false

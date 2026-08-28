@@ -11,18 +11,19 @@ use crate::color::{rgb_to_lab, Lab};
 use crate::config::Config;
 use crate::edge::{classify, dilate_square, perceptual_smooth, EdgeSummary};
 use crate::geometry::{build as build_geometry, GeometrySummary};
-use crate::gradient::{fit_all, merge_partition, refresh_summary, GradientSummary, Paint};
+use crate::gradient::{
+    fit_all, merge_partition, merge_source_supported_paints, refresh_summary, GradientSummary,
+    Paint,
+};
 use crate::metrics::QualityMetrics;
 use crate::optimize::{summarize as optimization_summary, OptimizationSummary};
+use crate::ownership::{resolve as resolve_boundary_ownership, BoundaryOwnershipSummary};
 use crate::raster::Raster;
 use crate::segment::{
     refine_thin_paint_ownership, regularize_boundaries, replace_final_exact_paint_labels, segment,
     split_adaptive_paint_patches, Segmentation, SegmentationSummary,
 };
-use crate::structural::{
-    analyse as analyse_structural, select_missing_with_junctions as select_missing_structural,
-    StructuralInk, StructuralSummary,
-};
+use crate::structural::{analyse as analyse_structural, StructuralInk, StructuralSummary};
 use crate::svg::{write as write_svg, SvgSummary};
 use crate::union_find::UnionFind;
 use crate::{Error, Result};
@@ -53,6 +54,7 @@ pub struct Summary {
     pub edge_roles: EdgeSummary,
     pub segmentation: SegmentationSummary,
     pub structural: StructuralSummary,
+    pub ownership: BoundaryOwnershipSummary,
     pub gradients: GradientSummary,
     pub geometry: GeometrySummary,
     pub optimization: OptimizationSummary,
@@ -307,9 +309,8 @@ fn render_svg_preview(
         &[crate::gradient::Paint],
     ),
     structural: &StructuralInk,
-    config: &Config,
     suffix: &str,
-    overlap: bool,
+    paint_overlap: f32,
     final_geometry: bool,
 ) -> Result<Raster> {
     let (width, height) = dimensions;
@@ -319,10 +320,6 @@ fn render_svg_preview(
         .and_then(|value| value.to_str())
         .ok_or_else(|| -> Error { "output path must have a UTF-8 file name".into() })?;
     let base_path = output.with_file_name(format!(".{file_name}.picvec-{suffix}.svg"));
-    let mut base_config = config.clone();
-    if !overlap {
-        base_config.shared_boundary_overlap = 0.0;
-    }
     if let Err(error) = write_svg(
         &base_path,
         width,
@@ -330,7 +327,7 @@ fn render_svg_preview(
         geometry,
         paints,
         structural,
-        &base_config,
+        paint_overlap,
         final_geometry,
     ) {
         let _ = fs::remove_file(&base_path);
@@ -553,41 +550,59 @@ pub fn vectorize(input: &Path, output: &Path, config: &Config) -> Result<Summary
         config,
     );
     report_progress(config, "paint-fitting", started, &mut checkpoint);
+    let supported_paint_merges = merge_source_supported_paints(
+        &paint_reference,
+        &processing,
+        &mut segmentation,
+        &mut paints,
+        config,
+    );
+    report_progress(
+        config,
+        "source-supported-paint-merge",
+        started,
+        &mut checkpoint,
+    );
     let exact_paint_merges =
         merge_exact_final_paints(&paint_reference, &mut segmentation, &mut paints);
-    if exact_paint_merges > 0 {
+    if supported_paint_merges.merges > 0 || exact_paint_merges > 0 {
         refresh_summary(&mut gradient_report, &paints);
     }
+    gradient_report.source_supported_paint_merges = supported_paint_merges.merges;
+    gradient_report.source_supported_boundary_edges_removed =
+        supported_paint_merges.boundary_edges_removed;
     report_progress(config, "exact-paint-merge", started, &mut checkpoint);
     let (geometry, geometry_report) = build_geometry(&segmentation);
     report_progress(config, "shared-geometry", started, &mut checkpoint);
+    // Resolve source ownership against the exact shared Paint partition.
+    // Overlap is deliberately absent here: it is a seam underpaint, not an
+    // authored Paint or structural owner.
     let paint_render = render_svg_preview(
         output,
         (processing.width, processing.height),
         (&geometry, &paints),
         &StructuralInk::empty(),
-        config,
         "base",
-        false,
+        0.0,
         false,
     )?;
     report_progress(config, "paint-preview", started, &mut checkpoint);
     let optimization = optimization_summary(&geometry, &paints, &geometry_report);
-    let residual_structural = select_missing_structural(
+    let ownership = resolve_boundary_ownership(
         &processing,
         &paint_render,
         &structural_candidates,
         &geometry_report.paint_junctions,
+        config.shared_boundary_overlap,
     );
     report_progress(config, "structural-selection", started, &mut checkpoint);
     let residual_render = render_svg_preview(
         output,
         (processing.width, processing.height),
         (&geometry, &paints),
-        &residual_structural,
-        config,
+        &ownership.structural,
         "residual-ink",
-        true,
+        ownership.paint_overlap,
         true,
     )?;
     report_progress(config, "residual-preview", started, &mut checkpoint);
@@ -597,7 +612,9 @@ pub fn vectorize(input: &Path, output: &Path, config: &Config) -> Result<Summary
     // A global mean-error contest against the complete candidate overlay can
     // prefer hundreds of duplicate boundary strokes because they improve a
     // few dark pixels while visibly thickening otherwise correct interfaces.
-    let structural = residual_structural;
+    let ownership_summary = ownership.summary.clone();
+    let paint_overlap = ownership.paint_overlap;
+    let structural = ownership.structural;
     let temporary = temporary_path(output)?;
     let svg_report = match write_svg(
         &temporary,
@@ -606,7 +623,7 @@ pub fn vectorize(input: &Path, output: &Path, config: &Config) -> Result<Summary
         &geometry,
         &paints,
         &structural,
-        config,
+        paint_overlap,
         true,
     ) {
         Ok(report) => report,
@@ -631,6 +648,7 @@ pub fn vectorize(input: &Path, output: &Path, config: &Config) -> Result<Summary
         edge_roles: roles.summary,
         segmentation: segmentation.summary,
         structural: structural.summary,
+        ownership: ownership_summary,
         gradients: gradient_report,
         geometry: geometry_report,
         optimization,

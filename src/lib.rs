@@ -11,6 +11,7 @@ pub mod geometry;
 pub mod gradient;
 pub mod metrics;
 pub mod optimize;
+pub mod ownership;
 pub mod pipeline;
 pub mod raster;
 pub mod ridge;

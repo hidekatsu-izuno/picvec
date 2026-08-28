@@ -6,7 +6,6 @@ use std::path::Path;
 use serde::Serialize;
 
 use crate::color::rgb_hex;
-use crate::config::Config;
 use crate::geometry::{open_path_data, Primitive, RegionGeometry};
 use crate::gradient::{ColorStop, Paint};
 use crate::optimize::{format_number, optimize_path, separated_bboxes, OptimizedElement};
@@ -335,7 +334,7 @@ pub fn write(
     geometries: &[RegionGeometry],
     paints: &[Paint],
     structural: &StructuralInk,
-    config: &Config,
+    paint_overlap: f32,
     final_geometry: bool,
 ) -> Result<SvgSummary> {
     let mut gradient_ids = HashMap::<String, String>::new();
@@ -375,7 +374,7 @@ pub fn write(
     for geometry in geometries {
         let paint = &paints[geometry.region as usize];
         let fill = fill_value(paint, &gradient_ids);
-        let attributes = paint_attributes(&fill, config.shared_boundary_overlap);
+        let attributes = paint_attributes(&fill, paint_overlap);
         let optimized = match &geometry.primitive {
             Some(Primitive::Rect {
                 x,
