@@ -43,6 +43,21 @@ Useful controls:
 `--verbose` prints the in-memory timing and complexity report to stderr for
 development; it still writes no sidecar files.
 
+## x4 evaluation
+
+`scripts/evaluate.py` evaluates a completed SVG against a Real-ESRGAN x4
+reference without feeding that image back into vectorization. A standalone x4
+PNG can be created with SVGDeck's migrated PyTorch/Spandrel generator:
+
+```bash
+timeout 600s nice -n 10 mise x -- uv run scripts/generate_realesrgan_x4.py \
+  input.png reference-x4.png \
+  --model /path/to/RealESRGAN_x4plus_anime_6B.pth
+```
+
+See `scripts/picvec_eval/README.md` for NCNN and PyTorch evaluator usage,
+content-addressed caching, and reproducibility controls.
+
 ## Pipeline
 
 1. Select a processing dimension from a bounded source-complexity probe.

@@ -15,9 +15,15 @@ The evaluator is deliberately separate from the Rust vectorizer:
 
 ## Requirements
 
-Install `rsvg-convert` and the `realesrgan-ncnn-vulkan` executable with its
-`realesrgan-x4plus-anime` model. The evaluator does not download executables or
-model files.
+Install `rsvg-convert`. Real-ESRGAN can run through either of two independent
+evaluation-only backends:
+
+- `realesrgan-ncnn-vulkan` with its `realesrgan-x4plus-anime` model; or
+- SVGDeck's PyTorch/Spandrel loader with the official
+  `RealESRGAN_x4plus_anime_6B.pth` file.
+
+The scripts do not download model files. The PyTorch entry point declares its
+runtime dependencies for `uv`; the model must still be supplied explicitly.
 
 ## Run
 
@@ -40,6 +46,35 @@ Use `--realesrgan PATH` when the NCNN executable is not on `PATH`, and
 `--model-path DIR` when its models are stored outside the executable's default
 model directory. `--tile-size`, `--tta`, and `--timeout` expose the
 corresponding reproducibility/runtime settings.
+
+To use the SVGDeck-compatible PyTorch generator directly from the evaluator:
+
+```bash
+timeout 600s nice -n 10 mise x -- uv run --with spandrel==0.4.2 scripts/evaluate.py \
+  input.png output.svg evaluation-x4 \
+  --realesrgan-model /path/to/RealESRGAN_x4plus_anime_6B.pth \
+  --tile-size 256 \
+  --json
+```
+
+The generated reference is content-addressed under
+`.cache/picvec/realesrgan`. Its key includes the source pixels, model hash,
+device, precision, tile size, and padding. Existing SVGDeck cache files remain
+compatible and can be reused with
+`--realesrgan-cache-dir /path/to/svgdeck/.cache/raster2svg/realesrgan`.
+
+The x4 PNG can also be generated without running the evaluator:
+
+```bash
+timeout 600s nice -n 10 mise x -- uv run scripts/generate_realesrgan_x4.py \
+  input.png reference-x4.png \
+  --model /path/to/RealESRGAN_x4plus_anime_6B.pth \
+  --json
+```
+
+Use `--device cpu` or `--device cuda` to select a Torch device,
+`--tile-padding` to control overlap, `--fp32` to disable CUDA fp16, and
+`--no-cache` when a persistent cache is not wanted.
 
 An existing, exact x4 reference can be evaluated without invoking
 Real-ESRGAN:

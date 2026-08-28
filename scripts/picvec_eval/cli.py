@@ -21,6 +21,7 @@ from .svg_metrics import (
 
 from .evaluation import EvaluationConfig, evaluate_x4_images, load_rgb, save_rgb
 from .support import resize_image
+from .upscale import generate_realesrgan_x4
 
 
 def _sha256(path: Path) -> str:
@@ -186,6 +187,32 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", default="realesrgan-x4plus-anime")
     parser.add_argument("--model-path", type=Path)
     parser.add_argument("--tile-size", type=int, default=0)
+    parser.add_argument(
+        "--realesrgan-model",
+        type=Path,
+        help=(
+            "official RealESRGAN_x4plus_anime_6B .pth; selects the "
+            "SVGDeck-compatible PyTorch/Spandrel generator"
+        ),
+    )
+    parser.add_argument("--tile-padding", type=int, default=16)
+    parser.add_argument("--device", help="torch device for the PyTorch backend")
+    parser.add_argument(
+        "--realesrgan-fp32",
+        action="store_true",
+        help="disable CUDA fp16 in the PyTorch backend",
+    )
+    parser.add_argument(
+        "--realesrgan-cache-dir",
+        type=Path,
+        default=Path(".cache/picvec/realesrgan"),
+        help="content-addressed PyTorch x4 cache",
+    )
+    parser.add_argument(
+        "--no-realesrgan-cache",
+        action="store_true",
+        help="disable the content-addressed PyTorch x4 cache",
+    )
     parser.add_argument("--tta", action="store_true")
     parser.add_argument("--rsvg-convert", default="rsvg-convert")
     parser.add_argument("--background", default="#ffffff")
@@ -312,6 +339,12 @@ def main(argv: list[str] | None = None) -> int:
         raise FileNotFoundError(f"x4 reference not found: {args.reference_x4}")
     if args.model_path is not None and not args.model_path.exists():
         raise FileNotFoundError(f"Real-ESRGAN model path not found: {args.model_path}")
+    if args.realesrgan_model is not None and not args.realesrgan_model.is_file():
+        raise FileNotFoundError(
+            f"Real-ESRGAN PyTorch model not found: {args.realesrgan_model}"
+        )
+    if args.realesrgan_model is not None and args.tta:
+        raise ValueError("--tta is supported only by the NCNN Real-ESRGAN backend")
 
     output_directory = args.output_directory
     output_directory.mkdir(parents=True, exist_ok=True)
@@ -331,10 +364,29 @@ def main(argv: list[str] | None = None) -> int:
     expected_shape = (source.shape[0] * 4, source.shape[1] * 4)
 
     realesrgan_command: list[str] | None = None
+    realesrgan_backend = "provided-reference"
+    realesrgan_generation: dict[str, Any] | None = None
     if args.reference_x4 is not None:
         reference = load_rgb(args.reference_x4, background=args.background)
         save_rgb(reference, reference_path)
+    elif args.realesrgan_model is not None:
+        pytorch_tile_size = max(32, args.tile_size if args.tile_size > 0 else 256)
+        realesrgan_generation = generate_realesrgan_x4(
+            source,
+            reference_path,
+            model_path=args.realesrgan_model,
+            tile_size=pytorch_tile_size,
+            tile_padding=max(0, args.tile_padding),
+            use_half=not args.realesrgan_fp32,
+            device=args.device,
+            cache_dir=(
+                None if args.no_realesrgan_cache else args.realesrgan_cache_dir
+            ),
+        )
+        realesrgan_backend = "pytorch-spandrel"
+        reference = load_rgb(reference_path, background=args.background)
     else:
+        realesrgan_backend = "ncnn-vulkan"
         realesrgan_command = _generate_reference(
             processing_source_path,
             reference_path,
@@ -438,15 +490,35 @@ def main(argv: list[str] | None = None) -> int:
         "rendered_native": str(native_rendered_path),
         "rendered_native_sha256": _sha256(native_rendered_path),
         "realesrgan": {
-            "model": args.model,
+            "backend": realesrgan_backend,
+            "model": (
+                "RealESRGAN_x4plus_anime_6B"
+                if realesrgan_backend == "pytorch-spandrel"
+                else args.model
+            ),
             "model_path": str(args.model_path) if args.model_path is not None else None,
+            "pytorch_model_path": (
+                str(args.realesrgan_model)
+                if realesrgan_backend == "pytorch-spandrel"
+                else None
+            ),
             "source": (
                 str(args.reference_x4)
                 if args.reference_x4 is not None
                 else "generated"
             ),
             "command": realesrgan_command,
-            "tile_size": max(0, int(args.tile_size)),
+            "generation": realesrgan_generation,
+            "tile_size": (
+                max(32, args.tile_size if args.tile_size > 0 else 256)
+                if realesrgan_backend == "pytorch-spandrel"
+                else max(0, int(args.tile_size))
+            ),
+            "tile_padding": (
+                max(0, int(args.tile_padding))
+                if realesrgan_backend == "pytorch-spandrel"
+                else None
+            ),
             "tta": bool(args.tta),
         },
         "renderer": {

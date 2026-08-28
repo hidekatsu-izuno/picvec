@@ -8,8 +8,6 @@ from __future__ import annotations
 
 import numpy as np
 from numpy.typing import NDArray
-from scipy import ndimage
-from skimage.feature import canny
 
 
 FloatImage = NDArray[np.float32]
@@ -150,6 +148,9 @@ def luminance_edges(
     dark_log_gain: float = 15.0,
 ) -> tuple[NDArray[np.bool_], NDArray[np.bool_]]:
     """Return ordinary edges and dark-logarithmic recovered edges."""
+
+    from scipy import ndimage
+    from skimage.feature import canny
 
     value = np.clip(np.asarray(luminance, dtype=np.float32), 0.0, 1.0)
     canny_kwargs = {
