@@ -1,5 +1,3 @@
-use std::f32::consts::PI;
-
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Lab {
     pub l: f32,
@@ -59,10 +57,12 @@ pub fn lab_to_rgb(lab: Lab) -> [f32; 3] {
     #[inline]
     fn inverse_f(value: f32) -> f32 {
         const DELTA: f32 = 6.0 / 29.0;
+        const LINEAR_COEFFICIENT: f32 = f32::from_bits(0x3e03_8027);
+        const LINEAR_OFFSET: f32 = f32::from_bits(0x3e0d_3dcb);
         if value > DELTA {
             value.powi(3)
         } else {
-            3.0 * DELTA * DELTA * (value - 4.0 / 29.0)
+            LINEAR_COEFFICIENT * (value - LINEAR_OFFSET)
         }
     }
 
@@ -84,6 +84,136 @@ pub fn lab_to_rgb(lab: Lab) -> [f32; 3] {
     ]
 }
 
+/// Match `skimage.color.lab2rgb` for float32 arrays.  The Paint fitter in the
+/// Python reference uses skimage in both directions; its inverse matrix and
+/// Lab low branch differ slightly from the preprocessing colour conversion.
+pub fn skimage_lab_values_to_rgb(labs: &[Lab]) -> Vec<[f32; 3]> {
+    let mut xyz = Vec::<[f32; 3]>::with_capacity(labs.len());
+    let mut nonlinear = Vec::<f32>::new();
+    let mut nonlinear_positions = Vec::<(usize, usize)>::new();
+    for &lab in labs {
+        let y = (lab.l + 16.0) / 116.0;
+        let x = lab.a / 500.0 + y;
+        let z = (y - lab.b / 200.0).max(0.0);
+        xyz.push([x, y, z]);
+    }
+    for (row, value) in xyz.iter().enumerate() {
+        for (channel, &entry) in value.iter().enumerate() {
+            if entry > 0.206_896_6 {
+                nonlinear_positions.push((row, channel));
+                nonlinear.push(entry);
+            }
+        }
+    }
+    crate::svml::pow_f32_in_place(&mut nonlinear, 3.0);
+    let mut transformed = xyz.clone();
+    for (row, value) in transformed.iter_mut().enumerate() {
+        for channel in 0..3 {
+            if let Some(position) = nonlinear_positions
+                .iter()
+                .position(|&candidate| candidate == (row, channel))
+            {
+                value[channel] = nonlinear[position];
+            } else {
+                value[channel] = (xyz[row][channel] - 16.0 / 116.0) / 7.787;
+            }
+            value[channel] *= [0.95047, 1.0, 1.08883][channel];
+        }
+    }
+    let mut rgb = Vec::<[f32; 3]>::with_capacity(labs.len());
+    for value in transformed {
+        rgb.push([
+            value[0] * 3.240_481_4 + value[1] * -1.537_151_6 + value[2] * -0.498_536_32,
+            value[0] * -0.969_254_9 + value[1] * 1.875_99 + value[2] * 0.041_555_93,
+            value[0] * 0.055_646_64 + value[1] * -0.204_041_35 + value[2] * 1.057_311_0,
+        ]);
+    }
+    let mut gamma_values = Vec::<f32>::new();
+    let mut gamma_positions = Vec::<(usize, usize)>::new();
+    for (row, value) in rgb.iter().enumerate() {
+        for (channel, &entry) in value.iter().enumerate() {
+            if entry > 0.003_130_8 {
+                gamma_positions.push((row, channel));
+                gamma_values.push(entry);
+            }
+        }
+    }
+    crate::svml::pow_f32_in_place(&mut gamma_values, 1.0 / 2.4);
+    for (row, value) in rgb.iter_mut().enumerate() {
+        for channel in 0..3 {
+            if let Some(position) = gamma_positions
+                .iter()
+                .position(|&candidate| candidate == (row, channel))
+            {
+                value[channel] = 1.055 * gamma_values[position] - 0.055;
+            } else {
+                value[channel] *= 12.92;
+            }
+            value[channel] = value[channel].clamp(0.0, 1.0);
+        }
+    }
+    rgb
+}
+
+/// Convert a contiguous Lab image with the same float32 array operation
+/// order used by `perceptual_pipeline.lab_to_srgb`.
+pub fn lab_pixels_to_rgb(labs: &[Lab]) -> Vec<[f32; 3]> {
+    const DELTA: f32 = f32::from_bits(0x3e53_dcb1);
+    const LINEAR_COEFFICIENT: f32 = f32::from_bits(0x3e03_8027);
+    const LINEAR_OFFSET: f32 = f32::from_bits(0x3e0d_3dcb);
+    let mut f = Vec::<[f32; 3]>::with_capacity(labs.len());
+    for &lab in labs {
+        let fy = (lab.l + 16.0) / 116.0;
+        f.push([lab.a / 500.0 + fy, fy, fy - lab.b / 200.0]);
+    }
+    let mut xyz = vec![[0.0_f32; 3]; labs.len()];
+    for channel in 0..3 {
+        let mut powered: Vec<f32> = f.iter().map(|value| value[channel]).collect();
+        crate::svml::pow_f32_in_place(&mut powered, 3.0);
+        for (index, value) in f.iter().enumerate() {
+            let nonlinear = if value[channel] > DELTA {
+                powered[index]
+            } else {
+                LINEAR_COEFFICIENT * (value[channel] - LINEAR_OFFSET)
+            };
+            xyz[index][channel] = nonlinear * [0.95047, 1.0, 1.08883][channel];
+        }
+    }
+    let mut rgb = Vec::<[f32; 3]>::with_capacity(labs.len());
+    for value in xyz {
+        let r = value[2].mul_add(
+            -0.498_531_4,
+            value[1].mul_add(-1.537_138_5, value[0] * 3.240_454_2),
+        );
+        let g = value[2].mul_add(
+            0.041_556,
+            value[1].mul_add(1.876_010_8, value[0] * -0.969_266),
+        );
+        let b = value[2].mul_add(
+            1.057_225_2,
+            value[1].mul_add(-0.204_025_9, value[0] * 0.055_643_4),
+        );
+        rgb.push([r, g, b]);
+    }
+    let mut powered: Vec<f32> = rgb
+        .iter()
+        .flat_map(|value| value.iter().map(|&channel| channel.max(0.0)))
+        .collect();
+    crate::svml::pow_f32_in_place(&mut powered, 1.0 / 2.4);
+    for (index, value) in rgb.iter_mut().enumerate() {
+        for channel in 0..3 {
+            let linear = value[channel];
+            value[channel] = if linear <= 0.003_130_8 {
+                12.92 * linear
+            } else {
+                1.055 * powered[index * 3 + channel] - 0.055
+            }
+            .clamp(0.0, 1.0);
+        }
+    }
+    rgb
+}
+
 #[inline]
 pub fn delta_e76(first: Lab, second: Lab) -> f32 {
     ((first.l - second.l).powi(2) + (first.a - second.a).powi(2) + (first.b - second.b).powi(2))
@@ -92,28 +222,62 @@ pub fn delta_e76(first: Lab, second: Lab) -> f32 {
 
 /// CIEDE2000, used for the fidelity report and perceptual merge gates.
 pub fn delta_e2000(first: Lab, second: Lab) -> f32 {
-    let c1 = (first.a * first.a + first.b * first.b).sqrt();
-    let c2 = (second.a * second.a + second.b * second.b).sqrt();
-    let c_bar = (c1 + c2) * 0.5;
-    let g = 0.5 * (1.0 - (c_bar.powi(7) / (c_bar.powi(7) + 25_f32.powi(7))).sqrt());
-    let a1p = (1.0 + g) * first.a;
-    let a2p = (1.0 + g) * second.a;
-    let c1p = (a1p * a1p + first.b * first.b).sqrt();
-    let c2p = (a2p * a2p + second.b * second.b).sqrt();
-    fn hue(b: f32, a: f32) -> f32 {
-        let value = b.atan2(a).to_degrees();
-        if value < 0.0 {
-            value + 360.0
-        } else {
-            value
-        }
+    delta_e2000_pairs(&[first], &[second])[0]
+}
+
+/// CIEDE2000 over contiguous pairs, preserving NumPy's vector `atan2`
+/// dispatch and float32 degree/radian constants.
+pub fn delta_e2000_pairs(first: &[Lab], second: &[Lab]) -> Vec<f32> {
+    assert_eq!(first.len(), second.len());
+    let mut initial = Vec::with_capacity(first.len());
+    let mut atan_y_first = Vec::with_capacity(first.len());
+    let mut atan_x_first = Vec::with_capacity(first.len());
+    let mut atan_y_second = Vec::with_capacity(first.len());
+    let mut atan_x_second = Vec::with_capacity(first.len());
+    for (&first, &second) in first.iter().zip(second) {
+        let c1 = first.a.hypot(first.b);
+        let c2 = second.a.hypot(second.b);
+        let c_bar = (c1 + c2) * 0.5;
+        let g = 0.5 * (1.0 - (c_bar.powi(7) / (c_bar.powi(7) + 25_f32.powi(7))).sqrt());
+        let a1p = (1.0 + g) * first.a;
+        let a2p = (1.0 + g) * second.a;
+        let c1p = a1p.hypot(first.b);
+        let c2p = a2p.hypot(second.b);
+        initial.push((first, second, c1p, c2p));
+        atan_y_first.push(first.b);
+        atan_x_first.push(a1p);
+        atan_y_second.push(second.b);
+        atan_x_second.push(a2p);
     }
-    let h1p = if c1p <= 1e-12 { 0.0 } else { hue(first.b, a1p) };
-    let h2p = if c2p <= 1e-12 {
-        0.0
-    } else {
-        hue(second.b, a2p)
-    };
+    let atan_first = crate::svml::atan2_f32(&atan_y_first, &atan_x_first);
+    let atan_second = crate::svml::atan2_f32(&atan_y_second, &atan_x_second);
+    // NumPy defines RAD2DEG and DEG2RAD from float32 PI operands. Rust's
+    // `to_degrees` uses a differently rounded precomputed constant.
+    const RAD2DEG: f32 = 180.0_f32 / std::f32::consts::PI;
+    const DEG2RAD: f32 = std::f32::consts::PI / 180.0_f32;
+    initial
+        .into_iter()
+        .zip(atan_first.into_iter().zip(atan_second))
+        .map(|((first, second, c1p, c2p), (atan_first, atan_second))| {
+            let h1p = (atan_first * RAD2DEG) % 360.0;
+            let h1p = if h1p < 0.0 { h1p + 360.0 } else { h1p };
+            let h2p = (atan_second * RAD2DEG) % 360.0;
+            let h2p = if h2p < 0.0 { h2p + 360.0 } else { h2p };
+            delta_e2000_after_hue(first, second, c1p, c2p, h1p, h2p, DEG2RAD)
+        })
+        .collect()
+}
+
+#[inline]
+fn delta_e2000_after_hue(
+    first: Lab,
+    second: Lab,
+    c1p: f32,
+    c2p: f32,
+    h1p: f32,
+    h2p: f32,
+    deg2rad: f32,
+) -> f32 {
     let dl = second.l - first.l;
     let dc = c2p - c1p;
     let dh_angle = if c1p * c2p <= 1e-12 {
@@ -125,7 +289,7 @@ pub fn delta_e2000(first: Lab, second: Lab) -> f32 {
     } else {
         h2p - h1p - 360.0
     };
-    let dh = 2.0 * (c1p * c2p).sqrt() * (0.5 * dh_angle.to_radians()).sin();
+    let dh = 2.0 * (c1p * c2p).sqrt() * (0.5 * dh_angle * deg2rad).sin();
     let l_bar = (first.l + second.l) * 0.5;
     let c_bar_p = (c1p + c2p) * 0.5;
     let h_bar = if c1p * c2p <= 1e-12 {
@@ -137,16 +301,16 @@ pub fn delta_e2000(first: Lab, second: Lab) -> f32 {
     } else {
         (h1p + h2p - 360.0) * 0.5
     };
-    let t = 1.0 - 0.17 * (h_bar - 30.0).to_radians().cos()
-        + 0.24 * (2.0 * h_bar).to_radians().cos()
-        + 0.32 * (3.0 * h_bar + 6.0).to_radians().cos()
-        - 0.20 * (4.0 * h_bar - 63.0).to_radians().cos();
+    let t = 1.0 - 0.17 * ((h_bar - 30.0) * deg2rad).cos()
+        + 0.24 * ((2.0 * h_bar) * deg2rad).cos()
+        + 0.32 * ((3.0 * h_bar + 6.0) * deg2rad).cos()
+        - 0.20 * ((4.0 * h_bar - 63.0) * deg2rad).cos();
     let sl = 1.0 + 0.015 * (l_bar - 50.0).powi(2) / (20.0 + (l_bar - 50.0).powi(2)).sqrt();
     let sc = 1.0 + 0.045 * c_bar_p;
     let sh = 1.0 + 0.015 * c_bar_p * t;
     let delta_theta = 30.0 * (-((h_bar - 275.0) / 25.0).powi(2)).exp();
     let rc = 2.0 * (c_bar_p.powi(7) / (c_bar_p.powi(7) + 25_f32.powi(7))).sqrt();
-    let rt = -rc * (2.0 * delta_theta * PI / 180.0).sin();
+    let rt = -rc * (2.0 * delta_theta * deg2rad).sin();
     let l_term = dl / sl;
     let c_term = dc / sc;
     let h_term = dh / sh;

@@ -4,9 +4,13 @@ use std::collections::{BinaryHeap, HashMap, HashSet};
 use rayon::prelude::*;
 use serde::Serialize;
 
-use crate::color::{delta_e2000, delta_e76, rgb_to_lab};
+use crate::color::{
+    delta_e2000, delta_e2000_pairs, delta_e76, rgb_to_lab, skimage_lab_values_to_rgb, Lab,
+};
 use crate::config::Config;
-use crate::edge::{dilate_square, EdgeRoles};
+use crate::edge::{
+    dilate_square, lab_pixels, preprocess_lab_pixels, preprocess_lab_values, EdgeRoles,
+};
 use crate::geometry::Point;
 use crate::raster::{percentile, Raster};
 use crate::segment::{replace_merged_labels, Segmentation};
@@ -14,8 +18,8 @@ use crate::union_find::UnionFind;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ColorStop {
-    pub offset: f32,
-    pub color: [f32; 3],
+    pub offset: f64,
+    pub color: [f64; 3],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -115,11 +119,52 @@ fn sampled_indices(indices: &[usize], maximum: usize) -> Vec<usize> {
         .collect()
 }
 
+fn numpy_sum_f32(values: &[f32]) -> f32 {
+    if values.len() < 8 {
+        return values.iter().fold(-0.0_f32, |sum, &value| sum + value);
+    }
+    if values.len() <= 128 {
+        let mut partial = [0.0_f32; 8];
+        partial.copy_from_slice(&values[..8]);
+        let remainder_start = values.len() - values.len() % 8;
+        let mut index = 8;
+        while index < remainder_start {
+            for lane in 0..8 {
+                partial[lane] += values[index + lane];
+            }
+            index += 8;
+        }
+        let mut result = ((partial[0] + partial[1]) + (partial[2] + partial[3]))
+            + ((partial[4] + partial[5]) + (partial[6] + partial[7]));
+        for &value in &values[remainder_start..] {
+            result += value;
+        }
+        return result;
+    }
+    let mut middle = values.len() / 2;
+    middle -= middle % 8;
+    numpy_sum_f32(&values[..middle]) + numpy_sum_f32(&values[middle..])
+}
+
 fn mean_color(source: &Raster, indices: &[usize]) -> [f32; 3] {
+    let divisor = indices.len().max(1) as f32;
+    // np.mean(values, axis=0) reduces a C-contiguous N x 3 array along its
+    // strided axis.  NumPy's strided reduction is sequential, unlike the
+    // pairwise reduction used for a contiguous one-dimensional array.
+    let mut sums = [-0.0_f32; 3];
+    for &index in indices {
+        for (channel, sum) in sums.iter_mut().enumerate() {
+            *sum += source.pixels[index][channel];
+        }
+    }
+    sums.map(|sum| sum / divisor)
+}
+
+fn mean_color_f64(source: &Raster, indices: &[usize]) -> [f32; 3] {
     let mut result = [0.0_f64; 3];
     for &index in indices {
-        for (channel, value) in result.iter_mut().enumerate() {
-            *value += source.pixels[index][channel] as f64;
+        for channel in 0..3 {
+            result[channel] += source.pixels[index][channel] as f64;
         }
     }
     let divisor = indices.len().max(1) as f64;
@@ -132,20 +177,34 @@ fn mean_color(source: &Raster, indices: &[usize]) -> [f32; 3] {
 
 fn interpolate(stops: &[ColorStop], t: f32) -> [f32; 3] {
     let t = t.clamp(0.0, 1.0);
+    if stops.len() == 2 && stops[0].offset == 0.0 && stops[1].offset == 1.0 {
+        let start = stops[0].color.map(|value| value as f32);
+        let end = stops[1].color.map(|value| value as f32);
+        return [
+            start[0] + t * (end[0] - start[0]),
+            start[1] + t * (end[1] - start[1]),
+            start[2] + t * (end[2] - start[2]),
+        ];
+    }
+    let position = t as f64;
+    if let Some(stop) = stops.iter().find(|stop| stop.offset == position) {
+        return stop.color.map(|value| value as f32);
+    }
     let upper = stops
         .iter()
-        .position(|stop| stop.offset >= t)
+        .position(|stop| stop.offset >= position)
         .unwrap_or(stops.len() - 1);
     if upper == 0 {
-        return stops[0].color;
+        return stops[0].color.map(|value| value as f32);
     }
     let first = &stops[upper - 1];
     let second = &stops[upper];
-    let amount = ((t - first.offset) / (second.offset - first.offset).max(1e-6)).clamp(0.0, 1.0);
+    let amount =
+        ((position - first.offset) / (second.offset - first.offset).max(1e-6)).clamp(0.0, 1.0);
     [
-        first.color[0] * (1.0 - amount) + second.color[0] * amount,
-        first.color[1] * (1.0 - amount) + second.color[1] * amount,
-        first.color[2] * (1.0 - amount) + second.color[2] * amount,
+        (first.color[0] + amount * (second.color[0] - first.color[0])) as f32,
+        (first.color[1] + amount * (second.color[1] - first.color[1])) as f32,
+        (first.color[2] + amount * (second.color[2] - first.color[2])) as f32,
     ]
 }
 
@@ -197,16 +256,18 @@ fn solve_system(mut matrix: Vec<Vec<f64>>, mut target: Vec<f64>) -> Vec<f64> {
     target
 }
 
-fn interpolation_weights(parameter: f32, offsets: &[f32]) -> (usize, usize, f32) {
+fn interpolation_weights(parameter: f32, offsets: &[f64]) -> (usize, usize, f32) {
     let parameter = parameter.clamp(0.0, 1.0);
-    let right = offsets
+    let offset_values: Vec<f32> = offsets.iter().map(|&offset| offset as f32).collect();
+    let right = offset_values
         .iter()
         .position(|&offset| offset >= parameter)
         .unwrap_or(offsets.len() - 1)
         .max(1);
     let left = right - 1;
-    let alpha =
-        ((parameter - offsets[left]) / (offsets[right] - offsets[left]).max(1e-6)).clamp(0.0, 1.0);
+    let alpha = ((parameter - offset_values[left])
+        / (offset_values[right] - offset_values[left]).max(1e-6))
+    .clamp(0.0, 1.0);
     (left, right, alpha)
 }
 
@@ -215,7 +276,7 @@ fn fitted_stops(
     source: &Raster,
     samples: &[usize],
     parameters: &[f32],
-    offsets: &[f32],
+    offsets: &[f64],
 ) -> Vec<ColorStop> {
     let bin_count = 64_usize.min(samples.len().max(8)).max(8);
     let mut bins = vec![Vec::<[f32; 3]>::new(); bin_count];
@@ -301,6 +362,75 @@ fn fitted_stops(
     }
 
     let count = offsets.len();
+    if count == 2 && offsets[0] == 0.0 && offsets[1] == 1.0 {
+        let right = positions.clone();
+        let left: Vec<f32> = positions.iter().map(|&value| 1.0 - value).collect();
+        let aa = numpy_sum_f32(
+            &weights
+                .iter()
+                .zip(&left)
+                .map(|(&weight, &value)| weight * value * value)
+                .collect::<Vec<_>>(),
+        );
+        let ab = numpy_sum_f32(
+            &weights
+                .iter()
+                .zip(&left)
+                .zip(&right)
+                .map(|((&weight, &first), &second)| weight * first * second)
+                .collect::<Vec<_>>(),
+        );
+        let bb = numpy_sum_f32(
+            &weights
+                .iter()
+                .zip(&right)
+                .map(|(&weight, &value)| weight * value * value)
+                .collect::<Vec<_>>(),
+        );
+        let mut left_values = [-0.0_f32; 3];
+        let mut right_values = [-0.0_f32; 3];
+        for index in 0..bin_count {
+            let left_weight = weights[index] * left[index];
+            let right_weight = weights[index] * right[index];
+            for channel in 0..3 {
+                left_values[channel] += left_weight * profile[index][channel];
+                right_values[channel] += right_weight * profile[index][channel];
+            }
+        }
+        let determinant_f64 = aa as f64 * bb as f64 - ab as f64 * ab as f64;
+        let determinant = determinant_f64 as f32;
+        let colors = if determinant_f64 > 1e-8 {
+            [
+                [0, 1, 2].map(|channel| {
+                    ((left_values[channel] * bb - right_values[channel] * ab) / determinant)
+                        .clamp(0.0, 1.0)
+                }),
+                [0, 1, 2].map(|channel| {
+                    ((right_values[channel] * aa - left_values[channel] * ab) / determinant)
+                        .clamp(0.0, 1.0)
+                }),
+            ]
+        } else {
+            let total = weights.iter().sum::<f32>().max(1e-6);
+            let average = [0, 1, 2].map(|channel| {
+                weights
+                    .iter()
+                    .zip(&profile)
+                    .map(|(&weight, value)| weight * value[channel])
+                    .sum::<f32>()
+                    / total
+            });
+            [average, average]
+        };
+        return [0.0_f64, 1.0]
+            .into_iter()
+            .enumerate()
+            .map(|(index, offset)| ColorStop {
+                offset,
+                color: colors[index].map(f64::from),
+            })
+            .collect();
+    }
     let mut normal = vec![vec![0.0_f64; count]; count];
     let mut targets = vec![vec![0.0_f64; count]; 3];
     for index in 0..bin_count {
@@ -338,9 +468,9 @@ fn fitted_stops(
         .map(|(index, &offset)| ColorStop {
             offset,
             color: [
-                colors[0][index].clamp(0.0, 1.0) as f32,
-                colors[1][index].clamp(0.0, 1.0) as f32,
-                colors[2][index].clamp(0.0, 1.0) as f32,
+                colors[0][index].clamp(0.0, 1.0),
+                colors[1][index].clamp(0.0, 1.0),
+                colors[2][index].clamp(0.0, 1.0),
             ],
         })
         .collect()
@@ -363,19 +493,77 @@ fn paint_error(
             percentile: 0.0,
         };
     }
-    let errors: Vec<f32> = samples
-        .iter()
-        .map(|&index| {
-            delta_e2000(
-                rgb_to_lab(source.pixels[index]),
-                rgb_to_lab(predicted(index)),
-            )
-        })
-        .collect();
+    let references: Vec<[f32; 3]> = samples.iter().map(|&index| source.pixels[index]).collect();
+    let rendered: Vec<[f32; 3]> = samples.iter().map(|&index| predicted(index)).collect();
+    let reference_lab = preprocess_color_values(references);
+    let rendered_lab = preprocess_color_values(rendered);
+    let errors = delta_e2000_pairs(&reference_lab, &rendered_lab);
     ErrorStats {
-        mean: errors.iter().sum::<f32>() / errors.len() as f32,
+        mean: numpy_sum_f32(&errors) / errors.len() as f32,
         percentile: percentile(errors, 0.90),
     }
+}
+
+/// Measure an emitted sRGB Paint against the skimage-compatible Lab values
+/// already computed for the native source.  Paint selection in the Python
+/// implementation deliberately uses `skimage.color.rgb2lab`; the
+/// preprocess-Lab transform above belongs to boundary evidence and is not an
+/// interchangeable approximation at the acceptance thresholds.
+fn paint_error_against_labs(
+    source_labs: &[Lab],
+    samples: &[usize],
+    predicted: impl Fn(usize) -> [f32; 3],
+) -> ErrorStats {
+    if samples.is_empty() {
+        return ErrorStats {
+            mean: 0.0,
+            percentile: 0.0,
+        };
+    }
+    let references: Vec<Lab> = samples.iter().map(|&index| source_labs[index]).collect();
+    let rendered = Raster::new(
+        samples.len(),
+        1,
+        samples.iter().map(|&index| predicted(index)).collect(),
+    );
+    let rendered_labs = lab_pixels(&rendered);
+    let errors = delta_e2000_pairs(&references, &rendered_labs);
+    ErrorStats {
+        mean: numpy_sum_f32(&errors) / errors.len() as f32,
+        percentile: percentile(errors, 0.90),
+    }
+}
+
+fn gradient_error_against_labs(
+    source_labs: &[Lab],
+    samples: &[usize],
+    parameters: &[f32],
+    stops: &[ColorStop],
+) -> ErrorStats {
+    let lookup: HashMap<usize, f32> = samples
+        .iter()
+        .copied()
+        .zip(parameters.iter().copied())
+        .collect();
+    paint_error_against_labs(source_labs, samples, |index| {
+        interpolate(stops, lookup[&index])
+    })
+}
+
+fn paint_stats_against_labs(
+    source_labs: &[Lab],
+    samples: &[usize],
+    width: usize,
+    paint: &Paint,
+) -> ErrorStats {
+    paint_error_against_labs(source_labs, samples, |index| paint_at(paint, index, width))
+}
+
+fn preprocess_color_values(colors: Vec<[f32; 3]>) -> Vec<Lab> {
+    if colors.is_empty() {
+        return Vec::new();
+    }
+    preprocess_lab_values(&colors)
 }
 
 fn objective(stats: ErrorStats) -> f32 {
@@ -443,7 +631,11 @@ fn canonical_direction(mut direction: (f32, f32)) -> Option<(f32, f32)> {
     Some(direction)
 }
 
-fn fitted_linear_directions(source: &Raster, samples: &[usize]) -> Vec<(f32, f32)> {
+fn fitted_linear_directions_from_lightness(
+    source: &Raster,
+    samples: &[usize],
+    lightness: &[f32],
+) -> Vec<(f32, f32)> {
     if samples.len() < 3 {
         return Vec::new();
     }
@@ -458,34 +650,46 @@ fn fitted_linear_directions(source: &Raster, samples: &[usize]) -> Vec<(f32, f32
         .map(|&index| (index / source.width) as f32)
         .sum::<f32>()
         / divisor;
-    let lightness: Vec<f32> = samples
-        .iter()
-        .map(|&index| rgb_to_lab(source.pixels[index]).l)
-        .collect();
     let mean_lightness = lightness.iter().sum::<f32>() / divisor;
-    let (mut xx, mut xy, mut yy, mut xl, mut yl) = (0.0, 0.0, 0.0, 0.0, 0.0);
-    for (&index, &l) in samples.iter().zip(&lightness) {
+    let (mut xx, mut xy, mut yy) = (0.0_f64, 0.0_f64, 0.0_f64);
+    let (mut xl, mut yl) = (0.0_f64, 0.0_f64);
+    for (&index, &l) in samples.iter().zip(lightness) {
         let dx = (index % source.width) as f32 - centre_x;
         let dy = (index / source.width) as f32 - centre_y;
         let dl = l - mean_lightness;
-        xx += dx * dx;
-        xy += dx * dy;
-        yy += dy * dy;
-        xl += dx * dl;
-        yl += dy * dl;
+        xx += (dx * dx) as f64;
+        xy += (dx * dy) as f64;
+        yy += (dy * dy) as f64;
+        xl += (dx * dl) as f64;
+        yl += (dy * dl) as f64;
     }
     let spatial_angle = 0.5 * (2.0 * xy).atan2(xx - yy);
     let mut result = Vec::<(f32, f32)>::new();
-    if let Some(direction) = canonical_direction((spatial_angle.cos(), spatial_angle.sin())) {
-        result.push(direction);
+    let mut principal = (spatial_angle.cos() as f32, spatial_angle.sin() as f32);
+    // LAPACK's symmetric 2x2 eigenvector orientation, as exposed by
+    // `numpy.linalg.eigh`: the dominant x component is negative, while a
+    // dominant y component is positive.  Reversing the vector is visually
+    // equivalent only if every stop is also reversed, but it is not textual
+    // SVG parity and changes the robust stop fitting order.
+    let reverse = if xx >= yy {
+        principal.0 > 0.0
+    } else {
+        principal.1 < 0.0
+    };
+    if reverse {
+        principal.0 = -principal.0;
+        principal.1 = -principal.1;
     }
+    result.push(principal);
     let determinant = xx * yy - xy * xy;
     if determinant.abs() > 1e-6 {
         let plane = (
             (yy * xl - xy * yl) / determinant,
             (xx * yl - xy * xl) / determinant,
         );
-        if let Some(direction) = canonical_direction(plane) {
+        let length = (plane.0 * plane.0 + plane.1 * plane.1).sqrt();
+        if length > 1e-6 {
+            let direction = ((plane.0 / length) as f32, (plane.1 / length) as f32);
             if result
                 .iter()
                 .all(|current| (current.0 * direction.0 + current.1 * direction.1).abs() < 0.999)
@@ -495,6 +699,15 @@ fn fitted_linear_directions(source: &Raster, samples: &[usize]) -> Vec<(f32, f32
         }
     }
     result
+}
+
+fn fitted_linear_directions(source: &Raster, samples: &[usize]) -> Vec<(f32, f32)> {
+    let lightness: Vec<f32> =
+        preprocess_color_values(samples.iter().map(|&index| source.pixels[index]).collect())
+            .into_iter()
+            .map(|value| value.l)
+            .collect();
+    fitted_linear_directions_from_lightness(source, samples, &lightness)
 }
 
 fn fitted_linear_geometry(
@@ -539,6 +752,53 @@ fn fitted_linear_geometry(
     )
 }
 
+fn legacy_linear_geometry_parameters(
+    samples: &[usize],
+    width: usize,
+    direction: (f32, f32),
+) -> (Point, Point, Vec<f32>) {
+    let divisor = samples.len().max(1) as f32;
+    let center = Point {
+        x: samples
+            .iter()
+            .map(|&index| (index % width) as f32)
+            .sum::<f32>()
+            / divisor,
+        y: samples
+            .iter()
+            .map(|&index| (index / width) as f32)
+            .sum::<f32>()
+            / divisor,
+    };
+    let projections: Vec<f32> = samples
+        .iter()
+        .map(|&index| {
+            let dx = (index % width) as f32 - center.x;
+            let dy = (index / width) as f32 - center.y;
+            dx * direction.0 + dy * direction.1
+        })
+        .collect();
+    let low = projections.iter().copied().fold(f32::INFINITY, f32::min);
+    let high = projections
+        .iter()
+        .copied()
+        .fold(f32::NEG_INFINITY, f32::max);
+    let span = (high - low).max(1e-5);
+    let start = Point {
+        x: center.x + direction.0 * low,
+        y: center.y + direction.1 * low,
+    };
+    let end = Point {
+        x: center.x + direction.0 * high,
+        y: center.y + direction.1 * high,
+    };
+    let parameters = projections
+        .into_iter()
+        .map(|projection| (projection - low) / span)
+        .collect();
+    (start, end, parameters)
+}
+
 fn fitted_radial_geometries(
     source: &Raster,
     samples: &[usize],
@@ -547,10 +807,11 @@ fn fitted_radial_geometries(
     if samples.len() < 3 {
         return Vec::new();
     }
-    let lightness: Vec<f32> = samples
-        .iter()
-        .map(|&index| rgb_to_lab(source.pixels[index]).l)
-        .collect();
+    let lightness: Vec<f32> =
+        preprocess_color_values(samples.iter().map(|&index| source.pixels[index]).collect())
+            .into_iter()
+            .map(|value| value.l)
+            .collect();
     let mut ordered = lightness.clone();
     let lower = percentile(ordered.clone(), 0.20);
     let upper = percentile(std::mem::take(&mut ordered), 0.80);
@@ -694,22 +955,22 @@ fn add_gradient_stops(
     initial_stats: ErrorStats,
     maximum: usize,
 ) -> (Paint, ErrorStats) {
-    let mut offsets = vec![0.0_f32, 1.0];
+    let mut offsets = vec![0.0_f64, 1.0];
     let mut current_stops = initial_stops;
     let mut current_stats = initial_stats;
     let mut accepted_stops = current_stops.clone();
     let mut accepted_stats = current_stats;
     let initial_objective = objective(initial_stats);
     while offsets.len() < maximum.clamp(2, 5) {
-        let mut best: Option<(f32, f32, Vec<ColorStop>, ErrorStats)> = None;
+        let mut best: Option<(f32, f64, Vec<ColorStop>, ErrorStats)> = None;
         for step in 1..=9 {
-            let offset = step as f32 / 10.0;
+            let offset = 0.1_f64 + (step - 1) as f64 * 0.1_f64;
             if offsets.iter().any(|&value| (value - offset).abs() < 0.075) {
                 continue;
             }
             let mut proposed = offsets.clone();
             proposed.push(offset);
-            proposed.sort_by(f32::total_cmp);
+            proposed.sort_by(f64::total_cmp);
             let stops = fitted_stops(source, samples, parameters, &proposed);
             let stats = gradient_error(source, samples, parameters, &stops);
             let candidate = objective(stats);
@@ -728,7 +989,7 @@ fn add_gradient_stops(
             break;
         }
         offsets.push(chosen);
-        offsets.sort_by(f32::total_cmp);
+        offsets.sort_by(f64::total_cmp);
         current_stops = stops;
         current_stats = stats;
         if initial_objective - candidate >= 0.15 {
@@ -739,40 +1000,333 @@ fn add_gradient_stops(
     (paint_with_stops(template, accepted_stops), accepted_stats)
 }
 
-fn fit_region(
-    source: &Raster,
-    indices: &[usize],
-    paint_indices: &[usize],
-    config: &Config,
-) -> (Paint, f32) {
-    let sample_source = if paint_indices.is_empty() {
-        indices
-    } else {
-        paint_indices
-    };
-    let samples = sampled_indices(sample_source, 4096);
-    fit_region_samples(
-        source,
-        &samples,
-        indices.len(),
-        bounds(indices, source.width),
-        config,
-    )
+fn weighted_median_lab(values: &[(f32, f32)]) -> f32 {
+    let mut ordered = values.to_vec();
+    ordered.sort_by(|left, right| left.0.total_cmp(&right.0));
+    let total = ordered.iter().map(|value| value.1).sum::<f32>();
+    let target = 0.5 * total;
+    let mut cumulative = 0.0_f32;
+    for (value, weight) in ordered {
+        cumulative += weight;
+        if cumulative >= target {
+            return value;
+        }
+    }
+    0.0
 }
 
-fn fit_region_samples(
-    source: &Raster,
-    samples: &[usize],
-    area: usize,
-    region_bounds: Bounds,
-    config: &Config,
-) -> (Paint, f32) {
-    let solid_color = mean_color(source, samples);
-    let solid_error = paint_error(source, samples, |_| solid_color);
-    if area < config.minimum_gradient_area as usize {
-        return (Paint::Solid { color: solid_color }, solid_error.mean);
+/// Python `_fit_stops`: three robust stops in Lab, converted back to the
+/// exact sRGB field that is serialized to SVG.
+fn legacy_stops(source_labs: &[Lab], samples: &[usize], parameters: &[f32]) -> Vec<ColorStop> {
+    let mut stop_labs = Vec::<Lab>::with_capacity(3);
+    for stop in 0..3 {
+        let mut selected = Vec::<(usize, f32)>::new();
+        for (position, &parameter) in parameters.iter().enumerate() {
+            let parameter = parameter.clamp(0.0, 1.0);
+            let weight = match stop {
+                0 if parameter <= 0.5 => 1.0 - 2.0 * parameter,
+                1 if parameter <= 0.5 => 2.0 * parameter,
+                1 => 2.0 - 2.0 * parameter,
+                2 => 2.0 * parameter - 1.0,
+                _ => 0.0,
+            };
+            if weight > 0.20 {
+                selected.push((position, weight.max(1e-6)));
+            }
+        }
+        if selected.is_empty() {
+            for (position, &parameter) in parameters.iter().enumerate() {
+                let parameter = parameter.clamp(0.0, 1.0);
+                let weight = match stop {
+                    0 if parameter <= 0.5 => 1.0 - 2.0 * parameter,
+                    1 if parameter <= 0.5 => 2.0 * parameter,
+                    1 => 2.0 - 2.0 * parameter,
+                    2 => 2.0 * parameter - 1.0,
+                    _ => 0.0,
+                };
+                if weight > 0.0 {
+                    selected.push((position, weight.max(1e-6)));
+                }
+            }
+        }
+        if selected.is_empty() {
+            selected.extend((0..samples.len()).map(|position| (position, 1.0)));
+        }
+        let channel = |value: Lab, channel: usize| match channel {
+            0 => value.l,
+            1 => value.a,
+            _ => value.b,
+        };
+        let fitted = [0, 1, 2].map(|channel_index| {
+            weighted_median_lab(
+                &selected
+                    .iter()
+                    .map(|&(position, weight)| {
+                        (
+                            channel(source_labs[samples[position]], channel_index),
+                            weight,
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        });
+        stop_labs.push(Lab {
+            l: fitted[0],
+            a: fitted[1],
+            b: fitted[2],
+        });
     }
-    let mut candidates = Vec::<(Paint, ErrorStats, Vec<f32>)>::new();
+    let lows = [0, 1, 2].map(|channel| {
+        percentile(
+            samples
+                .iter()
+                .map(|&index| match channel {
+                    0 => source_labs[index].l,
+                    1 => source_labs[index].a,
+                    _ => source_labs[index].b,
+                })
+                .collect(),
+            0.02,
+        )
+    });
+    let highs = [0, 1, 2].map(|channel| {
+        percentile(
+            samples
+                .iter()
+                .map(|&index| match channel {
+                    0 => source_labs[index].l,
+                    1 => source_labs[index].a,
+                    _ => source_labs[index].b,
+                })
+                .collect(),
+            0.98,
+        )
+    });
+    for value in &mut stop_labs {
+        value.l = value.l.clamp(lows[0], highs[0]);
+        value.a = value.a.clamp(lows[1], highs[1]);
+        value.b = value.b.clamp(lows[2], highs[2]);
+    }
+    skimage_lab_values_to_rgb(&stop_labs)
+        .into_iter()
+        .zip([0.0_f64, 0.5, 1.0])
+        .map(|(color, offset)| ColorStop {
+            offset,
+            color: color.map(f64::from),
+        })
+        .collect()
+}
+
+fn legacy_gradient_error_against_labs(
+    source_labs: &[Lab],
+    samples: &[usize],
+    parameters: &[f32],
+    stops: &[ColorStop],
+) -> ErrorStats {
+    let lookup: HashMap<usize, f32> = samples
+        .iter()
+        .copied()
+        .zip(parameters.iter().copied())
+        .collect();
+    let colors: Vec<[f32; 3]> = stops
+        .iter()
+        .map(|stop| stop.color.map(|value| value as f32))
+        .collect();
+    paint_error_against_labs(source_labs, samples, |index| {
+        let parameter = lookup[&index].clamp(0.0, 1.0);
+        let (first, second, first_weight, second_weight) = if parameter <= 0.5 {
+            (0, 1, 1.0 - 2.0 * parameter, 2.0 * parameter)
+        } else {
+            (1, 2, 2.0 - 2.0 * parameter, 2.0 * parameter - 1.0)
+        };
+        [0, 1, 2].map(|channel| {
+            first_weight * colors[first][channel] + second_weight * colors[second][channel]
+        })
+    })
+}
+
+fn add_office_stops(
+    source: &Raster,
+    source_labs: &[Lab],
+    samples: &[usize],
+    parameters: &[f32],
+    template: &Paint,
+    initial_stats: ErrorStats,
+    maximum: usize,
+) -> (Paint, ErrorStats) {
+    let initial_stops = match template {
+        Paint::Linear { stops, .. } | Paint::Radial { stops, .. } => stops.clone(),
+        Paint::Solid { .. } => unreachable!(),
+    };
+    let mut offsets = vec![0.0_f64, 1.0];
+    let mut current_stops = initial_stops;
+    let mut current_stats = initial_stats;
+    let mut accepted_stops = current_stops.clone();
+    let mut accepted_stats = current_stats;
+    let initial_objective = objective(initial_stats);
+    let mut accepted_objective = initial_objective;
+    let mut smooth_profile = None::<bool>;
+    while offsets.len() < maximum.clamp(2, 5) {
+        let mut best: Option<(f32, f64, Vec<ColorStop>, ErrorStats)> = None;
+        for step in 1..=9 {
+            let offset = 0.1_f64 + (step - 1) as f64 * 0.1_f64;
+            if offsets.iter().any(|&value| (value - offset).abs() < 0.075) {
+                continue;
+            }
+            let mut proposed = offsets.clone();
+            proposed.push(offset);
+            proposed.sort_by(f64::total_cmp);
+            let stops = fitted_stops(source, samples, parameters, &proposed);
+            let stats = gradient_error_against_labs(source_labs, samples, parameters, &stops);
+            let candidate = objective(stats);
+            if best
+                .as_ref()
+                .map(|value| candidate < value.0)
+                .unwrap_or(true)
+            {
+                best = Some((candidate, offset, stops, stats));
+            }
+        }
+        let Some((candidate, chosen, stops, stats)) = best else {
+            break;
+        };
+        if candidate >= objective(current_stats) {
+            break;
+        }
+        let immediate_gain = objective(current_stats) - candidate;
+        let cumulative_gain = accepted_objective - candidate;
+        if immediate_gain < 0.15 && cumulative_gain < 0.15 {
+            let smooth = *smooth_profile
+                .get_or_insert_with(|| merge_profile_is_smooth(source, samples, parameters));
+            if !smooth {
+                break;
+            }
+        }
+        offsets.push(chosen);
+        offsets.sort_by(f64::total_cmp);
+        current_stops = stops;
+        current_stats = stats;
+        let accepted_gain = if smooth_profile == Some(true) {
+            initial_objective - candidate
+        } else {
+            cumulative_gain
+        };
+        if accepted_gain >= 0.15 {
+            accepted_stops = current_stops.clone();
+            accepted_stats = current_stats;
+            accepted_objective = candidate;
+        }
+    }
+    (paint_with_stops(template, accepted_stops), accepted_stats)
+}
+
+fn legacy_gradient_candidate(
+    source: &Raster,
+    source_labs: &[Lab],
+    samples: &[usize],
+    region_bounds: Bounds,
+    directional_only: bool,
+) -> (Paint, ErrorStats) {
+    let mut candidates = Vec::<(Paint, ErrorStats)>::new();
+    let lightness: Vec<f32> = samples.iter().map(|&index| source_labs[index].l).collect();
+    let fitted_directions = fitted_linear_directions_from_lightness(source, samples, &lightness);
+    let mut directions = if directional_only && !fitted_directions.is_empty() {
+        vec![fitted_directions[0]]
+    } else {
+        let mut defaults = vec![
+            (1.0_f32, 0.0_f32),
+            (0.0, 1.0),
+            (2.0_f32.powf(-0.5), 2.0_f32.powf(-0.5)),
+            (2.0_f32.powf(-0.5), -2.0_f32.powf(-0.5)),
+        ];
+        defaults.extend(fitted_directions);
+        defaults
+    };
+    for direction in directions {
+        let (start, end, parameters) =
+            legacy_linear_geometry_parameters(samples, source.width, direction);
+        let stops = legacy_stops(source_labs, samples, &parameters);
+        let stats = legacy_gradient_error_against_labs(source_labs, samples, &parameters, &stops);
+        candidates.push((
+            Paint::Linear {
+                preset: LinearPreset::Fitted,
+                start,
+                end,
+                stops,
+            },
+            stats,
+        ));
+    }
+
+    let divisor = samples.len().max(1) as f32;
+    let center = Point {
+        x: samples
+            .iter()
+            .map(|&index| (index % source.width) as f32)
+            .sum::<f32>()
+            / divisor,
+        y: samples
+            .iter()
+            .map(|&index| (index / source.width) as f32)
+            .sum::<f32>()
+            / divisor,
+    };
+    let lower = percentile(lightness.clone(), 0.20);
+    let mut weighted = Point::default();
+    let mut total = 0.0_f32;
+    for (&index, &value) in samples.iter().zip(&lightness) {
+        let weight = (value - lower).max(0.0) + 1e-3;
+        weighted.x += (index % source.width) as f32 * weight;
+        weighted.y += (index / source.width) as f32 * weight;
+        total += weight;
+    }
+    let focus = if total > 1e-6 {
+        Point {
+            x: weighted.x / total,
+            y: weighted.y / total,
+        }
+    } else {
+        center
+    };
+    let radius = Point {
+        x: ((region_bounds.max_x - region_bounds.min_x) * 0.5).max(0.5),
+        y: ((region_bounds.max_y - region_bounds.min_y) * 0.5).max(0.5),
+    };
+    for radial_center in if directional_only {
+        Vec::new()
+    } else {
+        vec![center, focus]
+    } {
+        let parameters: Vec<f32> = samples
+            .iter()
+            .map(|&index| radial_parameter(index, source.width, radial_center, radius))
+            .collect();
+        let stops = legacy_stops(source_labs, samples, &parameters);
+        let stats = legacy_gradient_error_against_labs(source_labs, samples, &parameters, &stops);
+        candidates.push((
+            Paint::Radial {
+                origin: RadialOrigin::Fitted,
+                center: radial_center,
+                radius,
+                stops,
+            },
+            stats,
+        ));
+    }
+    candidates
+        .into_iter()
+        .min_by(|left, right| left.1.mean.total_cmp(&right.1.mean))
+        .expect("at least the four default linear gradients")
+}
+
+fn office_gradient_candidate(
+    source: &Raster,
+    source_labs: &[Lab],
+    samples: &[usize],
+    region_bounds: Bounds,
+    maximum_stops: usize,
+) -> Option<(Paint, ErrorStats)> {
+    let mut candidates = Vec::<(f32, Paint, Vec<f32>, Option<ErrorStats>)>::new();
     for preset in [
         LinearPreset::LeftToRight,
         LinearPreset::TopToBottom,
@@ -785,35 +1339,17 @@ fn fit_region_samples(
             .map(|&index| linear_parameter(index, source.width, start, end).clamp(0.0, 1.0))
             .collect();
         let stops = fitted_stops(source, samples, &parameters, &[0.0, 1.0]);
-        let error = gradient_error(source, samples, &parameters, &stops);
+        let paint = Paint::Linear {
+            preset,
+            start,
+            end,
+            stops,
+        };
         candidates.push((
-            Paint::Linear {
-                preset,
-                start,
-                end,
-                stops,
-            },
-            error,
+            paint_rgb_mse(source, samples, &paint),
+            paint,
             parameters,
-        ));
-    }
-    for direction in fitted_linear_directions(source, samples) {
-        let (start, end) = fitted_linear_geometry(samples, source.width, direction);
-        let parameters: Vec<f32> = samples
-            .iter()
-            .map(|&index| linear_parameter(index, source.width, start, end).clamp(0.0, 1.0))
-            .collect();
-        let stops = fitted_stops(source, samples, &parameters, &[0.0, 1.0]);
-        let error = gradient_error(source, samples, &parameters, &stops);
-        candidates.push((
-            Paint::Linear {
-                preset: LinearPreset::Fitted,
-                start,
-                end,
-                stops,
-            },
-            error,
-            parameters,
+            None,
         ));
     }
     for origin in [
@@ -829,72 +1365,308 @@ fn fit_region_samples(
             .map(|&index| radial_parameter(index, source.width, center, radius))
             .collect();
         let stops = fitted_stops(source, samples, &parameters, &[0.0, 1.0]);
-        let error = gradient_error(source, samples, &parameters, &stops);
+        let paint = Paint::Radial {
+            origin,
+            center,
+            radius,
+            stops,
+        };
         candidates.push((
-            Paint::Radial {
-                origin,
-                center,
-                radius,
-                stops,
-            },
-            error,
+            paint_rgb_mse(source, samples, &paint),
+            paint,
             parameters,
+            None,
         ));
     }
-    for (center, radius) in fitted_radial_geometries(source, samples, region_bounds) {
-        let parameters: Vec<f32> = samples
-            .iter()
-            .map(|&index| radial_parameter(index, source.width, center, radius))
-            .collect();
-        let stops = fitted_stops(source, samples, &parameters, &[0.0, 1.0]);
-        let error = gradient_error(source, samples, &parameters, &stops);
-        candidates.push((
-            Paint::Radial {
-                origin: RadialOrigin::Fitted,
-                center,
-                radius,
-                stops,
-            },
-            error,
-            parameters,
+    candidates.sort_by(|left, right| left.0.total_cmp(&right.0));
+    for candidate in candidates.iter_mut().take(3) {
+        candidate.3 = Some(paint_stats_against_labs(
+            source_labs,
+            samples,
+            source.width,
+            &candidate.1,
         ));
     }
-    candidates.sort_by(|left, right| objective(left.1).total_cmp(&objective(right.1)));
-    let (template, two_stop_stats, parameters) = &candidates[0];
-    let initial_stops = match template {
-        Paint::Linear { stops, .. } | Paint::Radial { stops, .. } => stops.clone(),
-        Paint::Solid { .. } => unreachable!(),
-    };
-    let (candidate, candidate_stats) = add_gradient_stops(
+    let selected = (0..3)
+        .min_by(|&left, &right| {
+            objective(candidates[left].3.expect("finalist stats"))
+                .total_cmp(&objective(candidates[right].3.expect("finalist stats")))
+        })
+        .expect("three Office finalists");
+    let selected_two_stop = candidates[selected].1.clone();
+    let (mut gradient, mut gradient_stats) = add_office_stops(
         source,
+        source_labs,
         samples,
-        parameters,
-        template,
-        initial_stops,
-        *two_stop_stats,
+        &candidates[selected].2,
+        &candidates[selected].1,
+        candidates[selected].3.expect("selected stats"),
+        maximum_stops,
+    );
+
+    let mean = mean_color(source, samples);
+    let solid = Paint::Solid { color: mean };
+    let solid_stats = paint_stats_against_labs(source_labs, samples, source.width, &solid);
+    let percentile_guard = solid_stats.percentile + (0.10 * solid_stats.percentile).max(1.0);
+    let mut accepted =
+        solid_stats.mean >= gradient_stats.mean && gradient_stats.percentile <= percentile_guard;
+    if !accepted && maximum_stops > 2 {
+        for candidate in &mut candidates {
+            if candidate.3.is_none() {
+                candidate.3 = Some(paint_stats_against_labs(
+                    source_labs,
+                    samples,
+                    source.width,
+                    &candidate.1,
+                ));
+            }
+        }
+        let mut rescue_indices = vec![0_usize, 1, 2];
+        let mut by_mean: Vec<usize> = (0..candidates.len()).collect();
+        by_mean.sort_by(|&left, &right| {
+            candidates[left]
+                .3
+                .expect("candidate stats")
+                .mean
+                .total_cmp(&candidates[right].3.expect("candidate stats").mean)
+        });
+        for index in by_mean.into_iter().take(3) {
+            if !rescue_indices.contains(&index) {
+                rescue_indices.push(index);
+            }
+        }
+        let mut best = (gradient.clone(), gradient_stats);
+        for index in rescue_indices {
+            if candidates[index].1 == selected_two_stop {
+                continue;
+            }
+            let expanded = add_office_stops(
+                source,
+                source_labs,
+                samples,
+                &candidates[index].2,
+                &candidates[index].1,
+                candidates[index].3.expect("candidate stats"),
+                maximum_stops,
+            );
+            if objective(expanded.1) < objective(best.1) {
+                best = expanded;
+            }
+        }
+        gradient = best.0;
+        gradient_stats = best.1;
+        accepted = solid_stats.mean >= gradient_stats.mean
+            && gradient_stats.percentile <= percentile_guard;
+    }
+    accepted.then_some((gradient, gradient_stats))
+}
+
+fn fit_region(
+    label: usize,
+    source: &Raster,
+    source_labs: &[Lab],
+    indices: &[usize],
+    paint_indices: &[usize],
+    canonical_solid: [f32; 3],
+    directional_only: bool,
+    config: &Config,
+) -> (Paint, f32) {
+    let sample_source = if paint_indices.is_empty() {
+        indices
+    } else {
+        paint_indices
+    };
+    let samples = sampled_indices(sample_source, 8192);
+    fit_region_samples(
+        label,
+        source,
+        source_labs,
+        &samples,
+        indices.len(),
+        bounds(&samples, source.width),
+        canonical_solid,
+        directional_only,
+        config,
+    )
+}
+
+fn fit_region_samples(
+    label: usize,
+    source: &Raster,
+    source_labs: &[Lab],
+    samples: &[usize],
+    area: usize,
+    region_bounds: Bounds,
+    canonical_solid: [f32; 3],
+    directional_only: bool,
+    config: &Config,
+) -> (Paint, f32) {
+    // The reference fits Solid from the quantized canonical image while all
+    // model errors are measured on native Paint samples.  Using the source
+    // mean here makes every nominally solid face a different colour before
+    // gradient selection even starts.
+    let solid_color = canonical_solid;
+    let solid_error = paint_error_against_labs(source_labs, samples, |_| solid_color);
+    let trace = std::env::var("PICVEC_TRACE_PAINT_LABEL")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        == Some(label);
+    if area < config.minimum_gradient_area as usize {
+        return (Paint::Solid { color: solid_color }, solid_error.mean);
+    }
+    let sample_labs: Vec<Lab> = samples.iter().map(|&index| source_labs[index]).collect();
+    let median_lab = Lab {
+        l: median(&mut sample_labs.iter().map(|value| value.l).collect::<Vec<_>>()),
+        a: median(&mut sample_labs.iter().map(|value| value.a).collect::<Vec<_>>()),
+        b: median(&mut sample_labs.iter().map(|value| value.b).collect::<Vec<_>>()),
+    };
+    let perceptual_range = percentile(
+        delta_e2000_pairs(&sample_labs, &vec![median_lab; sample_labs.len()]),
+        0.90,
+    );
+    if perceptual_range <= 2.3 {
+        return (Paint::Solid { color: solid_color }, solid_error.mean);
+    }
+    // Preserve the reference's two independent model families.  The legacy
+    // robust three-stop model competes with Solid first; only then does the
+    // richer Office-preset estimator get a chance to replace that selection.
+    let (legacy, legacy_stats) = legacy_gradient_candidate(
+        source,
+        source_labs,
+        samples,
+        region_bounds,
+        directional_only,
+    );
+    let minimum_improvement = 0.25 * 2.3;
+    if trace {
+        eprintln!(
+            "paint trace label={label} area={area} samples={} solid={solid_error:?} legacy={legacy:?} legacy_stats={legacy_stats:?}",
+            samples.len(),
+        );
+    }
+    let (mut selected, mut selected_stats) = if solid_error.mean - legacy_stats.mean
+        >= minimum_improvement
+        && legacy_stats.mean <= solid_error.mean * 0.88
+    {
+        (legacy, legacy_stats)
+    } else {
+        (Paint::Solid { color: solid_color }, solid_error)
+    };
+    // `_fit_stops` ranks legacy geometries using its three-stop basis, then
+    // `_spec_error_stats` re-samples the selected exported Paint before the
+    // Office candidate comparison.
+    selected_stats = paint_stats_against_labs(source_labs, samples, source.width, &selected);
+
+    let office_candidate = office_gradient_candidate(
+        source,
+        source_labs,
+        samples,
+        region_bounds,
         config.maximum_gradient_stops,
     );
-    // The final exporter gives an Office-compatible five-stop candidate one
-    // last chance with a 0.05-JND mean gain, provided p90 does not regress.
-    // Using the coarser region-merge threshold here incorrectly flattened
-    // many car-body highlights back to solid bands.
-    let required = 0.05 * 2.3;
-    if solid_error.mean - candidate_stats.mean >= required
-        && candidate_stats.percentile <= solid_error.percentile + 1e-4
-    {
-        (candidate, candidate_stats.mean)
-    } else {
-        (Paint::Solid { color: solid_color }, solid_error.mean)
+    if trace {
+        eprintln!(
+            "paint trace selected_before_office={selected:?} selected_stats={selected_stats:?} office={office_candidate:?}"
+        );
     }
+    if let Some((office, office_stats)) = office_candidate
+        .filter(|(paint, _)| !directional_only || matches!(paint, Paint::Linear { .. }))
+    {
+        let required_gain = if matches!(selected, Paint::Solid { .. }) {
+            0.05 * 2.3
+        } else {
+            1e-3
+        };
+        if selected_stats.mean - office_stats.mean >= required_gain
+            && office_stats.percentile <= selected_stats.percentile + 1e-4
+        {
+            selected = office;
+            selected_stats = office_stats;
+        }
+    }
+    (selected, selected_stats.mean)
 }
 
 fn fitted_stops_direct(
     source: &Raster,
     samples: &[usize],
     parameters: &[f32],
-    offsets: &[f32],
+    offsets: &[f64],
 ) -> Vec<ColorStop> {
     let count = offsets.len();
+    if count == 2 && offsets[0] == 0.0 && offsets[1] == 1.0 {
+        let right = parameters.to_vec();
+        let left: Vec<f32> = parameters
+            .iter()
+            .map(|&parameter| 1.0 - parameter)
+            .collect();
+        let aa = numpy_sum_f32(&left.iter().map(|value| value * value).collect::<Vec<_>>());
+        let ab = numpy_sum_f32(
+            &left
+                .iter()
+                .zip(&right)
+                .map(|(&first, &second)| first * second)
+                .collect::<Vec<_>>(),
+        );
+        let bb = numpy_sum_f32(&right.iter().map(|value| value * value).collect::<Vec<_>>());
+        let mut left_values = [-0.0_f32; 3];
+        let mut right_values = [-0.0_f32; 3];
+        // These are np.sum(N x 3, axis=0), hence the same sequential strided
+        // reduction as mean_color rather than NumPy's contiguous pairwise sum.
+        for ((&index, &left_weight), &right_weight) in samples.iter().zip(&left).zip(&right) {
+            for channel in 0..3 {
+                left_values[channel] += left_weight * source.pixels[index][channel];
+                right_values[channel] += right_weight * source.pixels[index][channel];
+            }
+        }
+        // `float(np.sum(...))` promotes these three coefficients to Python
+        // float before the determinant is evaluated.  NumPy then casts that
+        // scalar back to float32 for the array division below.
+        let determinant_f64 = aa as f64 * bb as f64 - ab as f64 * ab as f64;
+        let determinant = determinant_f64 as f32;
+        if std::env::var("PICVEC_TRACE_FIT_SAMPLES").is_ok() {
+            let requested = std::env::var("PICVEC_TRACE_FIT_SAMPLES").unwrap_or_default();
+            let actual = samples
+                .iter()
+                .map(usize::to_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            if requested == actual {
+                eprintln!(
+                    "trace fit direct parameters={parameters:?} aa={aa:?} ab={ab:?} bb={bb:?} det64={determinant_f64:?} det={determinant:?} left_values={left_values:?} right_values={right_values:?}"
+                );
+            }
+        }
+        let colors = if determinant_f64 > 1e-8 {
+            [
+                [
+                    (left_values[0] * bb - right_values[0] * ab) / determinant,
+                    (left_values[1] * bb - right_values[1] * ab) / determinant,
+                    (left_values[2] * bb - right_values[2] * ab) / determinant,
+                ],
+                [
+                    (right_values[0] * aa - left_values[0] * ab) / determinant,
+                    (right_values[1] * aa - left_values[1] * ab) / determinant,
+                    (right_values[2] * aa - left_values[2] * ab) / determinant,
+                ],
+            ]
+        } else {
+            let color = mean_color(source, samples);
+            [color, color]
+        };
+        return offsets
+            .iter()
+            .enumerate()
+            .map(|(index, &offset)| ColorStop {
+                offset,
+                color: [
+                    colors[index][0].clamp(0.0, 1.0) as f64,
+                    colors[index][1].clamp(0.0, 1.0) as f64,
+                    colors[index][2].clamp(0.0, 1.0) as f64,
+                ],
+            })
+            .collect();
+    }
     let mut normal = vec![vec![0.0_f64; count]; count];
     let mut targets = vec![vec![0.0_f64; count]; 3];
     for (&index, &parameter) in samples.iter().zip(parameters) {
@@ -930,9 +1702,9 @@ fn fitted_stops_direct(
         .map(|(index, &offset)| ColorStop {
             offset,
             color: [
-                colors[0][index].clamp(0.0, 1.0) as f32,
-                colors[1][index].clamp(0.0, 1.0) as f32,
-                colors[2][index].clamp(0.0, 1.0) as f32,
+                colors[0][index].clamp(0.0, 1.0),
+                colors[1][index].clamp(0.0, 1.0),
+                colors[2][index].clamp(0.0, 1.0),
             ],
         })
         .collect()
@@ -968,26 +1740,42 @@ fn expand_merge_stops(
     initial_stats: ErrorStats,
     maximum: usize,
 ) -> (Paint, ErrorStats) {
-    let mut offsets = vec![0.0_f32, 1.0];
+    let trace = std::env::var("PICVEC_TRACE_FIT_SAMPLES")
+        .ok()
+        .map(|value| {
+            value
+                .split(',')
+                .filter_map(|part| part.parse::<usize>().ok())
+                .eq(samples.iter().copied())
+        })
+        .unwrap_or(false);
+    let mut offsets = vec![0.0_f64, 1.0];
     let mut current_stops = initial_stops;
     let mut current_stats = initial_stats;
     let mut accepted_stops = current_stops.clone();
     let mut accepted_stats = current_stats;
     let initial_objective = objective(initial_stats);
     let mut accepted_objective = initial_objective;
+    let mut smooth_profile = None::<bool>;
     while offsets.len() < maximum.clamp(2, 5) {
-        let mut best: Option<(f32, f32, Vec<ColorStop>, ErrorStats)> = None;
+        let mut best: Option<(f32, f64, Vec<ColorStop>, ErrorStats)> = None;
         for step in 1..=9 {
-            let offset = step as f32 / 10.0;
+            let offset = 0.1_f64 + (step - 1) as f64 * 0.1_f64;
             if offsets.iter().any(|&value| (value - offset).abs() < 0.075) {
                 continue;
             }
             let mut proposed = offsets.clone();
             proposed.push(offset);
-            proposed.sort_by(f32::total_cmp);
+            proposed.sort_by(f64::total_cmp);
             let stops = fitted_stops_direct(source, samples, parameters, &proposed);
             let stats = gradient_error(source, samples, parameters, &stops);
             let candidate = objective(stats);
+            if trace {
+                eprintln!(
+                    "trace expand offsets={:?} candidate={:?} stats=({:?},{:?}) stops={:?}",
+                    proposed, candidate, stats.mean, stats.percentile, stops,
+                );
+            }
             if best
                 .as_ref()
                 .map(|value| candidate < value.0)
@@ -999,21 +1787,117 @@ fn expand_merge_stops(
         let Some((candidate, chosen, stops, stats)) = best else {
             break;
         };
+        if trace {
+            eprintln!(
+                "trace expand best chosen={:?} candidate={:?} current={:?} accepted={:?}",
+                chosen,
+                candidate,
+                objective(current_stats),
+                accepted_objective,
+            );
+        }
         if candidate >= objective(current_stats) {
             break;
         }
+        let immediate_gain = objective(current_stats) - candidate;
+        let cumulative_gain = accepted_objective - candidate;
+        if immediate_gain < 0.15 && cumulative_gain < 0.15 {
+            let smooth = *smooth_profile
+                .get_or_insert_with(|| merge_profile_is_smooth(source, samples, parameters));
+            if trace {
+                eprintln!("trace expand smooth={smooth}");
+            }
+            if !smooth {
+                break;
+            }
+        }
         offsets.push(chosen);
-        offsets.sort_by(f32::total_cmp);
+        offsets.sort_by(f64::total_cmp);
         current_stops = stops;
         current_stats = stats;
-        let cumulative_gain = accepted_objective - candidate;
-        if initial_objective - candidate >= 0.15 || cumulative_gain >= 0.15 {
+        let accepted_gain = if smooth_profile == Some(true) {
+            initial_objective - candidate
+        } else {
+            cumulative_gain
+        };
+        if accepted_gain >= 0.15 {
             accepted_stops = current_stops.clone();
             accepted_stats = current_stats;
             accepted_objective = candidate;
         }
     }
     (paint_with_stops(template, accepted_stops), accepted_stats)
+}
+
+fn merge_profile_is_smooth(source: &Raster, samples: &[usize], parameters: &[f32]) -> bool {
+    let bin_count = 64_usize.min(samples.len().max(8)).max(8);
+    let mut bins = vec![Vec::<[f32; 3]>::new(); bin_count];
+    for (&index, &parameter) in samples.iter().zip(parameters) {
+        let bin = ((parameter.clamp(0.0, 1.0) * bin_count as f32) as usize).min(bin_count - 1);
+        bins[bin].push(source.pixels[index]);
+    }
+    let positions: Vec<f32> = (0..bin_count)
+        .map(|index| (index as f32 + 0.5) / bin_count as f32)
+        .collect();
+    let mut profile = vec![[f32::NAN; 3]; bin_count];
+    let valid: Vec<usize> = bins
+        .iter()
+        .enumerate()
+        .filter_map(|(index, values)| (!values.is_empty()).then_some(index))
+        .collect();
+    for &index in &valid {
+        for channel in 0..3 {
+            let mut values: Vec<f32> = bins[index].iter().map(|value| value[channel]).collect();
+            profile[index][channel] = median(&mut values);
+        }
+    }
+    if valid.len() == 1 {
+        let color = profile[valid[0]];
+        profile.fill(color);
+    } else if !valid.is_empty() {
+        for index in 0..bin_count {
+            if profile[index][0].is_finite() {
+                continue;
+            }
+            let right_position = valid.partition_point(|&value| value < index);
+            let left = valid[right_position.saturating_sub(1)];
+            let right = valid[right_position.min(valid.len() - 1)];
+            let amount = if left == right {
+                0.0
+            } else {
+                (positions[index] - positions[left]) / (positions[right] - positions[left])
+            };
+            for channel in 0..3 {
+                profile[index][channel] =
+                    profile[left][channel] * (1.0 - amount) + profile[right][channel] * amount;
+            }
+        }
+    }
+    let kernel: Vec<f64> = (-4_i32..=4)
+        .map(|offset| (-0.5 * (offset * offset) as f64).exp())
+        .collect();
+    let kernel_sum = kernel.iter().sum::<f64>();
+    let original = profile.clone();
+    for index in 0..bin_count {
+        for channel in 0..3 {
+            profile[index][channel] = (kernel
+                .iter()
+                .enumerate()
+                .map(|(kernel_index, &weight)| {
+                    let offset = kernel_index as isize - 4;
+                    let sample =
+                        (index as isize + offset).clamp(0, bin_count as isize - 1) as usize;
+                    original[sample][channel] as f64 * weight
+                })
+                .sum::<f64>()
+                / kernel_sum) as f32;
+        }
+    }
+    let labs = preprocess_lab_values(&profile);
+    labs.windows(2)
+        .map(|pair| delta_e2000(pair[0], pair[1]))
+        .fold(0.0_f32, f32::max)
+        <= 5.0
 }
 
 /// Fit the exact Solid/linear/radial family used by the exporter, without
@@ -1026,6 +1910,16 @@ fn fit_merge_paint(
     region_bounds: Bounds,
     maximum_stops: usize,
 ) -> (Paint, ErrorStats) {
+    let trace_fit = std::env::var("PICVEC_TRACE_FIT_SAMPLES")
+        .ok()
+        .map(|value| {
+            let requested: Vec<usize> = value
+                .split(',')
+                .filter_map(|part| part.parse::<usize>().ok())
+                .collect();
+            requested == samples
+        })
+        .unwrap_or(false);
     let solid_color = mean_color(source, samples);
     let solid = Paint::Solid { color: solid_color };
     let solid_stats = paint_stats(source, samples, &solid);
@@ -1083,6 +1977,28 @@ fn fit_merge_paint(
             stats,
         ));
     }
+    if trace_fit {
+        for (mse, paint, _, stats) in &candidates {
+            let references: Vec<[f32; 3]> =
+                samples.iter().map(|&index| source.pixels[index]).collect();
+            let rendered: Vec<[f32; 3]> = samples
+                .iter()
+                .map(|&index| paint_at(paint, index, source.width))
+                .collect();
+            let reference_lab = preprocess_color_values(references);
+            let rendered_lab = preprocess_color_values(rendered);
+            eprintln!(
+                "trace fit candidate mse={:?} stats=({:?},{:?}) errors={:?} reference_lab={:?} rendered_lab={:?} paint={:?}",
+                mse,
+                stats.mean,
+                stats.percentile,
+                delta_e2000_pairs(&reference_lab, &rendered_lab),
+                reference_lab,
+                rendered_lab,
+                paint,
+            );
+        }
+    }
     candidates.sort_by(|left, right| left.0.total_cmp(&right.0));
     // RGB MSE first selects three cheap two-stop finalists.  The reference
     // expands only the best perceptual finalist; expanding all three here can
@@ -1111,6 +2027,9 @@ fn fit_merge_paint(
         )
     };
     let mut best = expand(selected);
+    if trace_fit {
+        eprintln!("trace fit selected={} expanded={:?}", selected, best);
+    }
     let required = 0.35_f32.max(0.08 * solid_stats.mean);
     let percentile_guard = solid_stats.percentile + 1.0_f32.max(0.10 * solid_stats.percentile);
     let mut accepted =
@@ -1135,6 +2054,9 @@ fn fit_merge_paint(
                 continue;
             }
             let expanded = expand(candidate);
+            if trace_fit {
+                eprintln!("trace fit rescue={} expanded={:?}", candidate, expanded);
+            }
             if objective(expanded.1) < objective(best.1) {
                 best = expanded;
             }
@@ -1153,16 +2075,15 @@ fn paint_rgb_mse(source: &Raster, samples: &[usize], paint: &Paint) -> f32 {
     if samples.is_empty() {
         return 0.0;
     }
-    samples
-        .iter()
-        .map(|&index| {
-            let predicted = paint_at(paint, index, source.width);
-            (0..3)
-                .map(|channel| (source.pixels[index][channel] - predicted[channel]).powi(2))
-                .sum::<f32>()
-        })
-        .sum::<f32>()
-        / samples.len() as f32
+    let mut squared = Vec::with_capacity(samples.len() * 3);
+    for &index in samples {
+        let predicted = paint_at(paint, index, source.width);
+        for (channel, &value) in predicted.iter().enumerate() {
+            let difference = value - source.pixels[index][channel];
+            squared.push(difference * difference);
+        }
+    }
+    numpy_sum_f32(&squared) / squared.len() as f32
 }
 
 #[derive(Clone)]
@@ -1246,6 +2167,24 @@ fn balanced_samples(
     let mut result = sampled_indices(first, first_count);
     result.extend(sampled_indices(second, second_count));
     result
+}
+
+fn balanced_sample_parts(
+    first: &[usize],
+    second: &[usize],
+    first_weight: usize,
+    second_weight: usize,
+    maximum: usize,
+) -> (Vec<usize>, Vec<usize>) {
+    let total = (first_weight + second_weight).max(1);
+    let first_count = (((maximum as f64 * first_weight as f64 / total as f64).round_ties_even())
+        as usize)
+        .clamp(1, maximum.saturating_sub(1));
+    let second_count = maximum.saturating_sub(first_count).max(1);
+    (
+        sampled_indices(first, first_count),
+        sampled_indices(second, second_count),
+    )
 }
 
 fn inset_region_samples(
@@ -1362,18 +2301,38 @@ fn merge_proposal(
     second: &MergeRegion,
     config: &Config,
 ) -> MergeProposal {
-    let quick_samples = balanced_samples(
+    let trace_pair = std::env::var("PICVEC_TRACE_MERGE_PAIR")
+        .ok()
+        .and_then(|value| {
+            let mut values = value
+                .split(',')
+                .filter_map(|part| part.parse::<usize>().ok());
+            Some((values.next()?, values.next()?))
+        })
+        .map(|(left, right)| {
+            (first.labels.len() == 1
+                && second.labels.len() == 1
+                && first.labels.contains(&left)
+                && second.labels.contains(&right))
+                || (first.labels.len() == 1
+                    && second.labels.len() == 1
+                    && first.labels.contains(&right)
+                    && second.labels.contains(&left))
+        })
+        .unwrap_or(false);
+    let (first_samples, second_samples) = balanced_sample_parts(
         &first.samples,
         &second.samples,
         first.pixels.len(),
         second.pixels.len(),
         384,
     );
-    let first_samples = sampled_indices(&first.samples, 384);
-    let second_samples = sampled_indices(&second.samples, 384);
-    let first_mean = mean_color(source, &first_samples);
-    let second_mean = mean_color(source, &second_samples);
-    let mean_delta = delta_e2000(rgb_to_lab(first_mean), rgb_to_lab(second_mean));
+    let mut quick_samples = first_samples.clone();
+    quick_samples.extend_from_slice(&second_samples);
+    let first_mean = mean_color_f64(source, &first_samples);
+    let second_mean = mean_color_f64(source, &second_samples);
+    let mean_labs = preprocess_color_values(vec![first_mean, second_mean]);
+    let mean_delta = delta_e2000_pairs(&mean_labs[..1], &mean_labs[1..])[0];
     let hard_edge = mean_delta > 22.0;
     let limit = if hard_edge {
         config
@@ -1437,6 +2396,38 @@ fn merge_proposal(
     if hard_edge && score > limit {
         score = f32::INFINITY;
     }
+    if trace_pair {
+        eprintln!(
+            "trace merge pair labels={:?}/{:?} pixels={}/{} sample_counts={}/{}/{} first_mean={:?} second_mean={:?} mean_delta={:?} solid={:?} solid_stats=({:?},{:?}) paint={:?} score={:?}",
+            first.labels,
+            second.labels,
+            first.pixels.len(),
+            second.pixels.len(),
+            first.samples.len(),
+            second.samples.len(),
+            quick_samples.len(),
+            first_mean,
+            second_mean,
+            mean_delta,
+            solid,
+            solid_stats.mean,
+            solid_stats.percentile,
+            paint,
+            score,
+        );
+        let union_stats = paint_stats(source, &quick_samples, &paint);
+        let first_stats = paint_stats(source, &first_samples, &paint);
+        let second_stats = paint_stats(source, &second_samples, &paint);
+        eprintln!(
+            "trace stats union=({:?},{:?}) first=({:?},{:?}) second=({:?},{:?})",
+            union_stats.mean,
+            union_stats.percentile,
+            first_stats.mean,
+            first_stats.percentile,
+            second_stats.mean,
+            second_stats.percentile,
+        );
+    }
     MergeProposal {
         samples: balanced_samples(
             &first.samples,
@@ -1456,6 +2447,88 @@ fn pair(first: usize, second: usize) -> (usize, usize) {
     } else {
         (second, first)
     }
+}
+
+fn python_int_set_order(values: &[usize]) -> Vec<usize> {
+    const LINEAR_PROBES: usize = 9;
+    const PERTURB_SHIFT: usize = 5;
+
+    fn slot(table: &[Option<usize>], value: usize) -> usize {
+        let mask = table.len() - 1;
+        let mut index = value & mask;
+        let mut perturb = value;
+        loop {
+            let mut probe_index = index;
+            let mut probes = if probe_index + LINEAR_PROBES <= mask {
+                LINEAR_PROBES
+            } else {
+                0
+            };
+            loop {
+                if table[probe_index].is_none() || table[probe_index] == Some(value) {
+                    return probe_index;
+                }
+                if probes == 0 {
+                    break;
+                }
+                probes -= 1;
+                probe_index += 1;
+            }
+            perturb >>= PERTURB_SHIFT;
+            index = (index * 5 + 1 + perturb) & mask;
+        }
+    }
+
+    // CPython uses a distinct absent-key insertion probe while rebuilding a
+    // resized set. Unlike set_add_entry's do/while, set_insert_clean checks
+    // exactly LINEAR_PROBES following slots. Reusing `slot` here changes the
+    // iteration order of larger adjacency sets and therefore equal-score
+    // merge candidates.
+    fn clean_slot(table: &[Option<usize>], value: usize) -> usize {
+        let mask = table.len() - 1;
+        let mut index = value & mask;
+        let mut perturb = value;
+        loop {
+            if table[index].is_none() {
+                return index;
+            }
+            if index + LINEAR_PROBES <= mask {
+                let mut probe_index = index;
+                for _ in 0..LINEAR_PROBES {
+                    probe_index += 1;
+                    if table[probe_index].is_none() {
+                        return probe_index;
+                    }
+                }
+            }
+            perturb >>= PERTURB_SHIFT;
+            index = (index * 5 + 1 + perturb) & mask;
+        }
+    }
+
+    let mut table = vec![None; 8];
+    let mut used = 0_usize;
+    for &value in values {
+        let index = slot(&table, value);
+        if table[index] == Some(value) {
+            continue;
+        }
+        table[index] = Some(value);
+        used += 1;
+        if used * 5 >= (table.len() - 1) * 3 {
+            let minimum = used * if used <= 50_000 { 4 } else { 2 };
+            let mut size = 8_usize;
+            while size <= minimum {
+                size *= 2;
+            }
+            let previous = std::mem::replace(&mut table, vec![None; size]);
+            for item in previous.into_iter().flatten() {
+                let target = clean_slot(&table, item);
+                table[target] = Some(item);
+            }
+        }
+    }
+    table.into_iter().flatten().collect()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1494,16 +2567,19 @@ fn merge_candidate_proposal(
             {
                 continue;
             }
-            let mut predicted: Vec<f32> = boundary
+            let first_colors: Vec<[f32; 3]> = boundary
                 .sample_pairs
                 .iter()
-                .map(|&(first_index, second_index)| {
-                    delta_e2000(
-                        rgb_to_lab(paint_at(&proposal.paint, first_index, source.width)),
-                        rgb_to_lab(paint_at(&proposal.paint, second_index, source.width)),
-                    )
-                })
+                .map(|&(first_index, _)| paint_at(&proposal.paint, first_index, source.width))
                 .collect();
+            let second_colors: Vec<[f32; 3]> = boundary
+                .sample_pairs
+                .iter()
+                .map(|&(_, second_index)| paint_at(&proposal.paint, second_index, source.width))
+                .collect();
+            let first_lab = preprocess_color_values(first_colors);
+            let second_lab = preprocess_color_values(second_colors);
+            let mut predicted = delta_e2000_pairs(&first_lab, &second_lab);
             if median(&mut predicted) < 0.45 * boundary.median_delta_e {
                 proposal.score = f32::INFINITY;
                 break;
@@ -1585,6 +2661,10 @@ pub fn merge_partition(
                 source.height,
                 paint_region_inset,
             );
+            // RegionCandidate stores at most 1024 samples.  Every later
+            // resampling step operates on this fixed set, not on all inset
+            // pixels.
+            let selected = sampled_indices(&selected, 1024);
             let paint = Paint::Solid {
                 color: mean_color(source, &selected),
             };
@@ -1601,12 +2681,7 @@ pub fn merge_partition(
         region.as_mut().unwrap().labels.insert(label);
     }
     let barrier = dilate_square(&roles.face_barrier, source.width, source.height, 1);
-    let edge_lab: Vec<_> = edge_reference
-        .pixels
-        .iter()
-        .copied()
-        .map(rgb_to_lab)
-        .collect();
+    let edge_lab = preprocess_lab_pixels(edge_reference);
     let mut adjacency = vec![HashSet::<usize>::new(); count];
     let mut evidence = HashMap::<(usize, usize), (Vec<(usize, usize)>, Vec<f32>, bool)>::new();
     let mut inspect = |first: usize, second: usize| {
@@ -1713,11 +2788,42 @@ pub fn merge_partition(
     let mut versions = vec![0_usize; count];
     let mut queue = BinaryHeap::<MergeQueueEntry>::new();
     let mut sequence = 0_usize;
+    // skimage.graph.RAG inserts nodes and edges while scipy.generic_filter
+    // scans the label raster.  Python then copies every adjacency view into a
+    // set before queueing proposals.  Equal-score fits are resolved by that
+    // insertion/iteration sequence, so label-sorted queueing is not
+    // equivalent even though it contains the same pairs.
+    let mut rag_node_order = Vec::<usize>::with_capacity(count);
+    let mut rag_node_seen = vec![false; count];
+    let mut rag_adjacency = vec![Vec::<usize>::new(); count];
+    let mut rag_edges = HashSet::<(usize, usize)>::new();
+    for y in 0..source.height {
+        for x in 0..source.width {
+            let index = y * source.width + x;
+            let center = segmentation.labels[index] as usize;
+            for (dx, dy) in [(0_isize, -1_isize), (-1, 0), (1, 0), (0, 1)] {
+                let px =
+                    (x as isize + dx).clamp(0, source.width.saturating_sub(1) as isize) as usize;
+                let py =
+                    (y as isize + dy).clamp(0, source.height.saturating_sub(1) as isize) as usize;
+                let other = segmentation.labels[py * source.width + px] as usize;
+                if center == other || !rag_edges.insert(pair(center, other)) {
+                    continue;
+                }
+                for node in [center, other] {
+                    if !rag_node_seen[node] {
+                        rag_node_seen[node] = true;
+                        rag_node_order.push(node);
+                    }
+                }
+                rag_adjacency[center].push(other);
+                rag_adjacency[other].push(center);
+            }
+        }
+    }
     let mut initial_pairs = Vec::<(usize, usize)>::new();
-    for (left, neighbours) in adjacency.iter().enumerate() {
-        let mut ordered: Vec<usize> = neighbours.iter().copied().collect();
-        ordered.sort_unstable();
-        for right in ordered {
+    for left in rag_node_order {
+        for right in python_int_set_order(&rag_adjacency[left]) {
             if left < right {
                 initial_pairs.push((left, right));
             }
@@ -1842,6 +2948,376 @@ pub fn merge_partition(
     accepted
 }
 
+#[derive(Clone, Debug)]
+struct SmoothPaintBoundary {
+    left: usize,
+    right: usize,
+    points: Vec<Point>,
+    length: usize,
+    median_delta_e: f32,
+    percentile_delta_e: f32,
+}
+
+fn paint_at_point(paint: &Paint, point: Point) -> [f32; 3] {
+    match paint {
+        Paint::Solid { color } => *color,
+        Paint::Linear {
+            start, end, stops, ..
+        } => {
+            let dx = end.x - start.x;
+            let dy = end.y - start.y;
+            let parameter = ((point.x - start.x) * dx + (point.y - start.y) * dy)
+                / (dx * dx + dy * dy).max(1e-8);
+            interpolate(stops, parameter.clamp(0.0, 1.0))
+        }
+        Paint::Radial {
+            center,
+            radius,
+            stops,
+            ..
+        } => {
+            let parameter = (((point.x - center.x) / radius.x.max(1e-6)).powi(2)
+                + ((point.y - center.y) / radius.y.max(1e-6)).powi(2))
+            .sqrt()
+            .clamp(0.0, 1.0);
+            interpolate(stops, parameter)
+        }
+    }
+}
+
+fn errors_for_indices(
+    source_labs: &[Lab],
+    samples: &[usize],
+    width: usize,
+    paint: &Paint,
+) -> Vec<f32> {
+    let references: Vec<Lab> = samples.iter().map(|&index| source_labs[index]).collect();
+    let rendered = Raster::new(
+        samples.len(),
+        1,
+        samples
+            .iter()
+            .map(|&index| paint_at(paint, index, width))
+            .collect(),
+    );
+    delta_e2000_pairs(&references, &lab_pixels(&rendered))
+}
+
+fn seam_errors_at_points(first: &Paint, second: &Paint, points: &[Point]) -> Vec<f32> {
+    let first_rgb: Vec<[f32; 3]> = points
+        .iter()
+        .map(|&point| paint_at_point(first, point))
+        .collect();
+    let second_rgb: Vec<[f32; 3]> = points
+        .iter()
+        .map(|&point| paint_at_point(second, point))
+        .collect();
+    let first_lab = lab_pixels(&Raster::new(points.len(), 1, first_rgb));
+    let second_lab = lab_pixels(&Raster::new(points.len(), 1, second_rgb));
+    delta_e2000_pairs(&first_lab, &second_lab)
+}
+
+fn smooth_paint_boundaries(
+    boundary_source: &Raster,
+    segmentation: &Segmentation,
+    minimum_length: usize,
+    include_non_smooth: bool,
+) -> Vec<SmoothPaintBoundary> {
+    let labs = lab_pixels(boundary_source);
+    let mut pairs = std::collections::BTreeMap::<(usize, usize), Vec<(usize, Point, f32)>>::new();
+    for y in 0..segmentation.height {
+        for x in 0..segmentation.width.saturating_sub(1) {
+            let first_index = y * segmentation.width + x;
+            let second_index = first_index + 1;
+            let first = segmentation.labels[first_index] as usize;
+            let second = segmentation.labels[second_index] as usize;
+            if first == second {
+                continue;
+            }
+            pairs.entry(pair(first, second)).or_default().push((
+                first_index,
+                Point {
+                    x: x as f32 + 0.5,
+                    y: y as f32,
+                },
+                delta_e2000(labs[first_index], labs[second_index]),
+            ));
+        }
+    }
+    for y in 0..segmentation.height.saturating_sub(1) {
+        for x in 0..segmentation.width {
+            let first_index = y * segmentation.width + x;
+            let second_index = first_index + segmentation.width;
+            let first = segmentation.labels[first_index] as usize;
+            let second = segmentation.labels[second_index] as usize;
+            if first == second {
+                continue;
+            }
+            pairs.entry(pair(first, second)).or_default().push((
+                first_index,
+                Point {
+                    x: x as f32,
+                    y: y as f32 + 0.5,
+                },
+                delta_e2000(labs[first_index], labs[second_index]),
+            ));
+        }
+    }
+
+    let mut result = Vec::<SmoothPaintBoundary>::new();
+    for ((left, right), edges) in pairs {
+        let mut by_cell = std::collections::BTreeMap::<usize, Vec<usize>>::new();
+        for (edge, &(cell, _, _)) in edges.iter().enumerate() {
+            by_cell.entry(cell).or_default().push(edge);
+        }
+        let cells: HashSet<usize> = by_cell.keys().copied().collect();
+        let mut seen = HashSet::<usize>::new();
+        for &start in by_cell.keys() {
+            if !seen.insert(start) {
+                continue;
+            }
+            let mut queue = std::collections::VecDeque::from([start]);
+            let mut component = HashSet::<usize>::from([start]);
+            while let Some(cell) = queue.pop_front() {
+                let x = cell % segmentation.width;
+                let y = cell / segmentation.width;
+                for dy in -1_isize..=1 {
+                    for dx in -1_isize..=1 {
+                        if dx == 0 && dy == 0 {
+                            continue;
+                        }
+                        let px = x as isize + dx;
+                        let py = y as isize + dy;
+                        if px < 0
+                            || py < 0
+                            || px >= segmentation.width as isize
+                            || py >= segmentation.height as isize
+                        {
+                            continue;
+                        }
+                        let neighbour = py as usize * segmentation.width + px as usize;
+                        if cells.contains(&neighbour) && seen.insert(neighbour) {
+                            component.insert(neighbour);
+                            queue.push_back(neighbour);
+                        }
+                    }
+                }
+            }
+            let selected: Vec<usize> = edges
+                .iter()
+                .enumerate()
+                .filter_map(|(index, &(cell, _, _))| component.contains(&cell).then_some(index))
+                .collect();
+            if selected.len() < minimum_length.max(1) {
+                continue;
+            }
+            let mut errors: Vec<f32> = selected.iter().map(|&index| edges[index].2).collect();
+            let boundary_median = median(&mut errors.clone());
+            let boundary_p90 = percentile(errors, 0.90);
+            if !include_non_smooth && (boundary_median > 1.5 || boundary_p90 > 3.0) {
+                continue;
+            }
+            let point_indices = sampled_indices(&selected, 96);
+            result.push(SmoothPaintBoundary {
+                left,
+                right,
+                points: point_indices
+                    .into_iter()
+                    .map(|index| edges[index].1)
+                    .collect(),
+                length: selected.len(),
+                median_delta_e: boundary_median,
+                percentile_delta_e: boundary_p90,
+            });
+        }
+    }
+    result
+}
+
+fn background_label(segmentation: &Segmentation) -> usize {
+    let mut counts = vec![0_usize; segmentation.regions.len()];
+    for x in 0..segmentation.width {
+        counts[segmentation.labels[x] as usize] += 1;
+        counts[segmentation.labels[(segmentation.height - 1) * segmentation.width + x] as usize] +=
+            1;
+    }
+    for y in 1..segmentation.height.saturating_sub(1) {
+        counts[segmentation.labels[y * segmentation.width] as usize] += 1;
+        counts[segmentation.labels[y * segmentation.width + segmentation.width - 1] as usize] += 1;
+    }
+    counts
+        .iter()
+        .enumerate()
+        .max_by_key(|&(label, &count)| (count, std::cmp::Reverse(label)))
+        .map(|value| value.0)
+        .unwrap_or(0)
+}
+
+#[derive(Clone)]
+struct HarmonizeProposal {
+    score: f32,
+    candidate_mean: f32,
+    left_owner: usize,
+    right_owner: usize,
+    paint: Paint,
+    boundary_count: usize,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn harmonize_adjacent_paints(
+    source: &Raster,
+    boundary_source: &Raster,
+    segmentation: &Segmentation,
+    region_indices: &[Vec<usize>],
+    region_paint_indices: &[Vec<usize>],
+    paints: &mut [Paint],
+    errors: &mut [f32],
+    config: &Config,
+) -> usize {
+    let source_labs = lab_pixels(source);
+    let background = background_label(segmentation);
+    let boundaries: Vec<SmoothPaintBoundary> =
+        smooth_paint_boundaries(boundary_source, segmentation, 8, false)
+            .into_iter()
+            .filter(|boundary| {
+                boundary.left != background
+                    && boundary.right != background
+                    && !region_paint_indices[boundary.left].is_empty()
+                    && !region_paint_indices[boundary.right].is_empty()
+            })
+            .collect();
+    let count = paints.len();
+    let label_samples: Vec<Vec<usize>> = region_paint_indices
+        .iter()
+        .map(|indices| sampled_indices(indices, 1024))
+        .collect();
+    let mut members: HashMap<usize, HashSet<usize>> = (0..count)
+        .map(|label| (label, HashSet::from([label])))
+        .collect();
+    let mut owner: Vec<usize> = (0..count).collect();
+    let mut accepted = 0_usize;
+    for _ in 0..3 {
+        let mut grouped =
+            std::collections::BTreeMap::<(usize, usize), Vec<&SmoothPaintBoundary>>::new();
+        for boundary in &boundaries {
+            let first = owner[boundary.left];
+            let second = owner[boundary.right];
+            if first != second {
+                grouped
+                    .entry(pair(first, second))
+                    .or_default()
+                    .push(boundary);
+            }
+        }
+        let mut proposals = Vec::<HarmonizeProposal>::new();
+        for ((left_owner, right_owner), shared) in grouped {
+            let mut union_labels: Vec<usize> = members[&left_owner]
+                .union(&members[&right_owner])
+                .copied()
+                .collect();
+            union_labels.sort_unstable();
+            if union_labels.len() > 8 {
+                continue;
+            }
+            let mut union_samples = Vec::<usize>::new();
+            for &label in &union_labels {
+                union_samples.extend_from_slice(&label_samples[label]);
+            }
+            union_samples = sampled_indices(&union_samples, 8192);
+            let Some((candidate, _)) = office_gradient_candidate(
+                source,
+                &source_labs,
+                &union_samples,
+                bounds(&union_samples, source.width),
+                config.maximum_gradient_stops,
+            ) else {
+                continue;
+            };
+            let mut baseline_errors = Vec::<f32>::new();
+            for &label in &union_labels {
+                baseline_errors.extend(errors_for_indices(
+                    &source_labs,
+                    &label_samples[label],
+                    source.width,
+                    &paints[label],
+                ));
+            }
+            let candidate_errors =
+                errors_for_indices(&source_labs, &union_samples, source.width, &candidate);
+            let baseline_mean = numpy_sum_f32(&baseline_errors) / baseline_errors.len() as f32;
+            let candidate_mean = numpy_sum_f32(&candidate_errors) / candidate_errors.len() as f32;
+            let baseline_p90 = percentile(baseline_errors, 0.90);
+            let candidate_p90 = percentile(candidate_errors, 0.90);
+            let mut seam_errors = Vec::<f32>::new();
+            for boundary in &shared {
+                seam_errors.extend(seam_errors_at_points(
+                    &paints[boundary.left],
+                    &paints[boundary.right],
+                    &boundary.points,
+                ));
+            }
+            let seam_mean = numpy_sum_f32(&seam_errors) / seam_errors.len() as f32;
+            let seam_p90 = percentile(seam_errors, 0.90);
+            if seam_p90 < 0.75 {
+                continue;
+            }
+            let mean_regression = candidate_mean - baseline_mean;
+            let p90_regression = candidate_p90 - baseline_p90;
+            if mean_regression > (0.05 * 2.3_f32).min(0.10 * seam_mean)
+                || p90_regression > 0.10 * 2.3
+            {
+                continue;
+            }
+            let score = mean_regression - 0.10 * seam_mean;
+            if score > 0.0 {
+                continue;
+            }
+            proposals.push(HarmonizeProposal {
+                score,
+                candidate_mean,
+                left_owner,
+                right_owner,
+                paint: candidate,
+                boundary_count: shared.len(),
+            });
+        }
+        proposals.sort_by(|left, right| {
+            left.score
+                .total_cmp(&right.score)
+                .then(left.candidate_mean.total_cmp(&right.candidate_mean))
+                .then(left.left_owner.cmp(&right.left_owner))
+                .then(left.right_owner.cmp(&right.right_owner))
+        });
+        let mut consumed = HashSet::<usize>::new();
+        let mut pass_merges = 0_usize;
+        for proposal in proposals {
+            if consumed.contains(&proposal.left_owner) || consumed.contains(&proposal.right_owner) {
+                continue;
+            }
+            let keep = proposal.left_owner.min(proposal.right_owner);
+            let remove = proposal.left_owner.max(proposal.right_owner);
+            let removed = members.remove(&remove).unwrap_or_default();
+            let combined = members.entry(keep).or_default();
+            combined.extend(removed);
+            for &label in combined.iter() {
+                owner[label] = keep;
+                paints[label] = proposal.paint.clone();
+                errors[label] = proposal.candidate_mean;
+            }
+            consumed.insert(proposal.left_owner);
+            consumed.insert(proposal.right_owner);
+            pass_merges += 1;
+            accepted += 1;
+            let _ = proposal.boundary_count;
+        }
+        if pass_merges == 0 {
+            break;
+        }
+    }
+    accepted
+}
+
+#[allow(dead_code)]
 fn couple_linear(
     source: &Raster,
     segmentation: &Segmentation,
@@ -1907,12 +3383,12 @@ fn couple_linear(
             }
         }
         let endpoint_distance = delta_e76(
-            rgb_to_lab(sa.last().unwrap().color),
-            rgb_to_lab(sb.first().unwrap().color),
+            rgb_to_lab(sa.last().unwrap().color.map(|value| value as f32)),
+            rgb_to_lab(sb.first().unwrap().color.map(|value| value as f32)),
         )
         .min(delta_e76(
-            rgb_to_lab(sa.first().unwrap().color),
-            rgb_to_lab(sb.last().unwrap().color),
+            rgb_to_lab(sa.first().unwrap().color.map(|value| value as f32)),
+            rgb_to_lab(sb.last().unwrap().color.map(|value| value as f32)),
         ));
         if endpoint_distance <= config.gradient_merge_error * 3.0 {
             union.union(a as usize, b as usize);
@@ -1949,8 +3425,8 @@ fn couple_linear(
             .map(|&index| linear_parameter(index, source.width, start, end).clamp(0.0, 1.0))
             .collect();
         let stop_count = config.maximum_gradient_stops.clamp(2, 5);
-        let offsets: Vec<f32> = (0..stop_count)
-            .map(|index| index as f32 / (stop_count - 1) as f32)
+        let offsets: Vec<f64> = (0..stop_count)
+            .map(|index| index as f64 / (stop_count - 1) as f64)
             .collect();
         let stops = fitted_stops(source, &samples, &parameters, &offsets);
         let combined_error = gradient_error(source, &samples, &parameters, &stops).mean;
@@ -2063,10 +3539,10 @@ fn couple_linear(
 
 #[derive(Clone, Debug)]
 struct CouplingBoundary {
-    left: usize,
-    right: usize,
-    samples: Vec<(usize, usize)>,
+    boundary: SmoothPaintBoundary,
     seam_p90: f32,
+    seam_mean: f32,
+    same_paint_key: bool,
 }
 
 fn five_stop_basis(parameter: f32) -> [f64; 5] {
@@ -2088,9 +3564,72 @@ fn coupled_parameter(paint: &Paint, index: usize, width: usize) -> f32 {
     .clamp(0.0, 1.0)
 }
 
+fn coupled_parameter_point(paint: &Paint, point: Point) -> f32 {
+    match paint {
+        Paint::Linear { start, end, .. } => {
+            let dx = end.x - start.x;
+            let dy = end.y - start.y;
+            ((point.x - start.x) * dx + (point.y - start.y) * dy) / (dx * dx + dy * dy).max(1e-8)
+        }
+        Paint::Radial { center, radius, .. } => (((point.x - center.x) / radius.x.max(1e-6))
+            .powi(2)
+            + ((point.y - center.y) / radius.y.max(1e-6)).powi(2))
+        .sqrt(),
+        Paint::Solid { .. } => 0.5,
+    }
+    .clamp(0.0, 1.0)
+}
+
+fn bilinear_sample(image: &Raster, point: Point) -> [f32; 3] {
+    let x = point.x.clamp(0.0, image.width.saturating_sub(1) as f32);
+    let y = point.y.clamp(0.0, image.height.saturating_sub(1) as f32);
+    let x0 = x.floor() as usize;
+    let y0 = y.floor() as usize;
+    let x1 = (x0 + 1).min(image.width - 1);
+    let y1 = (y0 + 1).min(image.height - 1);
+    let ax = x - x0 as f32;
+    let ay = y - y0 as f32;
+    [0, 1, 2].map(|channel| {
+        let upper = image.pixels[y0 * image.width + x0][channel] * (1.0 - ax)
+            + image.pixels[y0 * image.width + x1][channel] * ax;
+        let lower = image.pixels[y1 * image.width + x0][channel] * (1.0 - ax)
+            + image.pixels[y1 * image.width + x1][channel] * ax;
+        upper * (1.0 - ay) + lower * ay
+    })
+}
+
+fn patch_boundary_halo(boundary: &SmoothPaintBoundary, segmentation: &Segmentation) -> Vec<Point> {
+    let mut result = Vec::<Point>::new();
+    for &point in &boundary.points {
+        for (dx, dy) in [
+            (0.0_f32, 0.0_f32),
+            (-2.0, 0.0),
+            (-1.0, 0.0),
+            (1.0, 0.0),
+            (2.0, 0.0),
+            (0.0, -2.0),
+            (0.0, -1.0),
+            (0.0, 1.0),
+            (0.0, 2.0),
+        ] {
+            let candidate = Point {
+                x: (point.x + dx).clamp(0.0, segmentation.width.saturating_sub(1) as f32),
+                y: (point.y + dy).clamp(0.0, segmentation.height.saturating_sub(1) as f32),
+            };
+            let x = candidate.x.round_ties_even() as usize;
+            let y = candidate.y.round_ties_even() as usize;
+            let label = segmentation.labels[y * segmentation.width + x] as usize;
+            if label == boundary.left || label == boundary.right {
+                result.push(candidate);
+            }
+        }
+    }
+    result
+}
+
 fn promote_solid_geometry(source: &Raster, samples: &[usize]) -> Paint {
     let region_bounds = bounds(samples, source.width);
-    let offsets = [0.0_f32, 0.25, 0.5, 0.75, 1.0];
+    let offsets = [0.0_f64, 0.25, 0.5, 0.75, 1.0];
     let mut directions = fitted_linear_directions(source, samples);
     directions.extend([
         (1.0, 0.0),
@@ -2132,15 +3671,206 @@ fn promote_solid_geometry(source: &Raster, samples: &[usize]) -> Paint {
             stops: vec![
                 ColorStop {
                     offset: 0.0,
-                    color: mean_color(source, samples),
+                    color: mean_color(source, samples).map(f64::from),
                 },
                 ColorStop {
                     offset: 1.0,
-                    color: mean_color(source, samples),
+                    color: mean_color(source, samples).map(f64::from),
                 },
             ],
         }
     })
+}
+
+fn extended_linear_geometry(
+    samples: &[usize],
+    width: usize,
+    direction: (f32, f32),
+) -> (Point, Point) {
+    let divisor = samples.len().max(1) as f32;
+    let center = Point {
+        x: samples
+            .iter()
+            .map(|&index| (index % width) as f32)
+            .sum::<f32>()
+            / divisor,
+        y: samples
+            .iter()
+            .map(|&index| (index / width) as f32)
+            .sum::<f32>()
+            / divisor,
+    };
+    let (low, high) =
+        samples
+            .iter()
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |(low, high), &index| {
+                let projection = ((index % width) as f32 - center.x) * direction.0
+                    + ((index / width) as f32 - center.y) * direction.1;
+                (low.min(projection), high.max(projection))
+            });
+    let span = (high - low).max(1.0);
+    let margin = 2.0_f32.max(0.10 * span);
+    (
+        Point {
+            x: center.x + direction.0 * (low - margin),
+            y: center.y + direction.1 * (low - margin),
+        },
+        Point {
+            x: center.x + direction.0 * (high + margin),
+            y: center.y + direction.1 * (high + margin),
+        },
+    )
+}
+
+fn coupled_candidate_directions(
+    source: &Raster,
+    source_labs: &[Lab],
+    samples: &[usize],
+) -> Vec<(f32, f32)> {
+    let divisor = samples.len().max(1) as f32;
+    let center_x = samples
+        .iter()
+        .map(|&index| (index % source.width) as f32)
+        .sum::<f32>()
+        / divisor;
+    let center_y = samples
+        .iter()
+        .map(|&index| (index / source.width) as f32)
+        .sum::<f32>()
+        / divisor;
+    let mean_l = samples
+        .iter()
+        .map(|&index| source_labs[index].l)
+        .sum::<f32>()
+        / divisor;
+    let (mut xx, mut xy, mut yy, mut xl, mut yl) = (0.0_f64, 0.0, 0.0, 0.0, 0.0);
+    for &index in samples {
+        let dx = (index % source.width) as f32 - center_x;
+        let dy = (index / source.width) as f32 - center_y;
+        let dl = source_labs[index].l - mean_l;
+        xx += (dx * dx) as f64;
+        xy += (dx * dy) as f64;
+        yy += (dy * dy) as f64;
+        xl += (dx * dl) as f64;
+        yl += (dy * dl) as f64;
+    }
+    let mut directions = Vec::<(f32, f32)>::new();
+    let determinant = xx * yy - xy * xy;
+    if determinant.abs() > 1e-6 {
+        let plane = (
+            (yy * xl - xy * yl) / determinant,
+            (xx * yl - xy * xl) / determinant,
+        );
+        let length = (plane.0 * plane.0 + plane.1 * plane.1).sqrt();
+        if length > 1e-6 {
+            directions.push(((plane.0 / length) as f32, (plane.1 / length) as f32));
+        }
+    }
+    if samples.len() >= 3 {
+        let angle = 0.5 * (2.0 * xy).atan2(xx - yy);
+        let large = (angle.cos() as f32, angle.sin() as f32);
+        directions.push((-large.1, large.0));
+        directions.push(large);
+    }
+    directions.extend([
+        (1.0, 0.0),
+        (0.0, 1.0),
+        (
+            std::f32::consts::FRAC_1_SQRT_2,
+            std::f32::consts::FRAC_1_SQRT_2,
+        ),
+        (
+            std::f32::consts::FRAC_1_SQRT_2,
+            -std::f32::consts::FRAC_1_SQRT_2,
+        ),
+    ]);
+    let mut unique = Vec::<(f32, f32)>::new();
+    let mut keys = HashSet::<(i32, i32)>::new();
+    for direction in directions {
+        let Some(direction) = canonical_direction(direction) else {
+            continue;
+        };
+        let key = (
+            (direction.0 * 1000.0).round_ties_even() as i32,
+            (direction.1 * 1000.0).round_ties_even() as i32,
+        );
+        if keys.insert(key) {
+            unique.push(direction);
+        }
+    }
+    unique
+}
+
+fn fit_coupled_geometry(
+    source: &Raster,
+    source_labs: &[Lab],
+    samples: &[usize],
+    geometry: &Paint,
+) -> (Paint, ErrorStats) {
+    let mut normal = vec![vec![0.0_f64; 5]; 5];
+    let mut rhs = vec![vec![0.0_f64; 5]; 3];
+    for &sample in samples {
+        let basis = five_stop_basis(coupled_parameter(geometry, sample, source.width));
+        for first in 0..5 {
+            for second in 0..5 {
+                normal[first][second] += basis[first] * basis[second];
+            }
+            for channel in 0..3 {
+                rhs[channel][first] += basis[first] * source.pixels[sample][channel] as f64;
+            }
+        }
+    }
+    for row in 0..3 {
+        let difference = [1.0_f64, -2.0, 1.0];
+        for first in 0..3 {
+            for second in 0..3 {
+                normal[row + first][row + second] += 0.05 * difference[first] * difference[second];
+            }
+        }
+    }
+    let solved: Vec<Vec<f64>> = rhs
+        .into_iter()
+        .map(|target| solve_system(normal.clone(), target))
+        .collect();
+    let colors: Vec<[f32; 3]> = (0..5)
+        .map(|stop| {
+            [
+                solved[0][stop].clamp(0.0, 1.0) as f32,
+                solved[1][stop].clamp(0.0, 1.0) as f32,
+                solved[2][stop].clamp(0.0, 1.0) as f32,
+            ]
+        })
+        .collect();
+    let paint = paint_with_five_stops(geometry, &colors);
+    let stats = paint_stats_against_labs(source_labs, samples, source.width, &paint);
+    (paint, stats)
+}
+
+fn choose_coupled_geometry(
+    source: &Raster,
+    source_labs: &[Lab],
+    samples: &[usize],
+    current: &Paint,
+) -> Paint {
+    let mut geometries = Vec::<Paint>::new();
+    if !matches!(current, Paint::Solid { .. }) {
+        geometries.push(current.clone());
+    }
+    for direction in coupled_candidate_directions(source, source_labs, samples) {
+        let (start, end) = extended_linear_geometry(samples, source.width, direction);
+        geometries.push(Paint::Linear {
+            preset: LinearPreset::Fitted,
+            start,
+            end,
+            stops: Vec::new(),
+        });
+    }
+    geometries
+        .into_iter()
+        .map(|geometry| fit_coupled_geometry(source, source_labs, samples, &geometry))
+        .min_by(|left, right| objective(left.1).total_cmp(&objective(right.1)))
+        .map(|value| value.0)
+        .unwrap_or_else(|| current.clone())
 }
 
 fn paint_with_five_stops(template: &Paint, colours: &[[f32; 3]]) -> Paint {
@@ -2148,8 +3878,8 @@ fn paint_with_five_stops(template: &Paint, colours: &[[f32; 3]]) -> Paint {
         .iter()
         .enumerate()
         .map(|(index, &color)| ColorStop {
-            offset: index as f32 / 4.0,
-            color,
+            offset: index as f64 / 4.0,
+            color: color.map(f64::from),
         })
         .collect();
     match template {
@@ -2195,6 +3925,7 @@ fn weighted_percentile(mut values: Vec<(f32, f32)>, quantile: f32) -> f32 {
 #[allow(clippy::too_many_arguments)]
 fn couple_adjacent_paints(
     source: &Raster,
+    boundary_source: &Raster,
     segmentation: &Segmentation,
     region_indices: &[Vec<usize>],
     region_paint_indices: &[Vec<usize>],
@@ -2202,80 +3933,58 @@ fn couple_adjacent_paints(
     errors: &mut [f32],
     config: &Config,
 ) -> usize {
-    let mut pair_samples = HashMap::<(usize, usize), Vec<(usize, usize)>>::new();
-    for y in 0..segmentation.height {
-        for x in 0..segmentation.width {
-            let index = y * segmentation.width + x;
-            for neighbour in [
-                (x + 1 < segmentation.width).then_some(index + 1),
-                (y + 1 < segmentation.height).then_some(index + segmentation.width),
-            ]
-            .into_iter()
-            .flatten()
-            {
-                let first = segmentation.labels[index] as usize;
-                let second = segmentation.labels[neighbour] as usize;
-                if first == second {
-                    continue;
-                }
-                let key = pair(first, second);
-                let oriented = if first <= second {
-                    (index, neighbour)
-                } else {
-                    (neighbour, index)
-                };
-                pair_samples.entry(key).or_default().push(oriented);
-            }
-        }
-    }
-    let mut ordered_pairs: Vec<_> = pair_samples.into_iter().collect();
-    ordered_pairs.sort_by_key(|value| value.0);
+    let background = background_label(segmentation);
+    let source_labs = lab_pixels(source);
+    let data_samples: Vec<Vec<usize>> = region_paint_indices
+        .iter()
+        .map(|indices| sampled_indices(indices, 768))
+        .collect();
     let mut candidates = Vec::<CouplingBoundary>::new();
-    for ((left, right), samples) in ordered_pairs {
-        if samples.len() < 8 {
+    for boundary in smooth_paint_boundaries(boundary_source, segmentation, 2, true) {
+        let left = boundary.left;
+        let right = boundary.right;
+        if left == background
+            || right == background
+            || region_paint_indices[left].is_empty()
+            || region_paint_indices[right].is_empty()
+        {
             continue;
         }
-        let sampled = sampled_indices(&(0..samples.len()).collect::<Vec<_>>(), 256);
-        let mut source_deltas = Vec::with_capacity(sampled.len());
-        let mut seam_deltas = Vec::with_capacity(sampled.len());
-        for sample in sampled {
-            let (first, second) = samples[sample];
-            source_deltas.push(delta_e2000(
-                rgb_to_lab(source.pixels[first]),
-                rgb_to_lab(source.pixels[second]),
-            ));
-            let first_colour = paint_at(&paints[left], first, source.width);
-            let second_colour = paint_at(&paints[right], first, source.width);
-            seam_deltas.push(delta_e2000(
-                rgb_to_lab(first_colour),
-                rgb_to_lab(second_colour),
-            ));
+        let same_paint_key = segmentation
+            .paint_keys
+            .get(left)
+            .zip(segmentation.paint_keys.get(right))
+            .map(|(first, second)| first == second)
+            .unwrap_or(false);
+        if boundary.length < 8 && !same_paint_key {
+            continue;
         }
-        let mut source_for_median = source_deltas.clone();
-        let source_median = median(&mut source_for_median);
-        let source_p90 = percentile(source_deltas, 0.90);
+        if !same_paint_key && (boundary.median_delta_e > 1.5 || boundary.percentile_delta_e > 3.0) {
+            continue;
+        }
+        let seam_deltas = seam_errors_at_points(&paints[left], &paints[right], &boundary.points);
+        let seam_mean = numpy_sum_f32(&seam_deltas) / seam_deltas.len().max(1) as f32;
         let seam_p90 = percentile(seam_deltas, 0.90);
-        if source_median <= 1.5 && source_p90 <= 3.0 && seam_p90 >= 0.75 {
+        if seam_p90 >= 0.75 || same_paint_key {
             candidates.push(CouplingBoundary {
-                left,
-                right,
-                samples,
+                boundary,
                 seam_p90,
+                seam_mean,
+                same_paint_key,
             });
         }
     }
     candidates.sort_by(|first, second| {
         second
-            .seam_p90
-            .total_cmp(&first.seam_p90)
-            .then(first.left.cmp(&second.left))
-            .then(first.right.cmp(&second.right))
+            .same_paint_key
+            .cmp(&first.same_paint_key)
+            .then(second.seam_p90.total_cmp(&first.seam_p90))
     });
     let mut union = UnionFind::new(paints.len());
     let mut sizes = vec![1_usize; paints.len()];
     for boundary in &candidates {
-        let left = union.find(boundary.left);
-        let right = union.find(boundary.right);
+        let left = union.find(boundary.boundary.left);
+        let right = union.find(boundary.boundary.right);
         if left == right || sizes[left] + sizes[right] > 64 {
             continue;
         }
@@ -2286,7 +3995,7 @@ fn couple_adjacent_paints(
     }
     let mut groups = HashMap::<usize, Vec<usize>>::new();
     for boundary in &candidates {
-        for label in [boundary.left, boundary.right] {
+        for label in [boundary.boundary.left, boundary.boundary.right] {
             groups.entry(union.find(label)).or_default().push(label);
         }
     }
@@ -2304,41 +4013,83 @@ fn couple_adjacent_paints(
         let boundaries: Vec<&CouplingBoundary> = candidates
             .iter()
             .filter(|boundary| {
-                members.binary_search(&boundary.left).is_ok()
-                    && members.binary_search(&boundary.right).is_ok()
+                members.binary_search(&boundary.boundary.left).is_ok()
+                    && members.binary_search(&boundary.boundary.right).is_ok()
             })
             .collect();
         if boundaries.is_empty() {
             continue;
         }
+        let mut shared_union = UnionFind::new(paints.len());
+        for boundary in boundaries.iter().filter(|boundary| boundary.same_paint_key) {
+            shared_union.union(boundary.boundary.left, boundary.boundary.right);
+        }
+        let mut patch_groups = HashMap::<usize, Vec<usize>>::new();
+        for &member in &members {
+            let root = shared_union.find(member);
+            patch_groups.entry(root).or_default().push(member);
+        }
+        let mut shared_geometries = HashMap::<usize, Paint>::new();
+        for patch_group in patch_groups.values().filter(|group| group.len() > 1) {
+            let mut all_samples = Vec::<usize>::new();
+            for &member in patch_group {
+                all_samples.extend_from_slice(&data_samples[member]);
+            }
+            let directions = coupled_candidate_directions(source, &source_labs, &all_samples);
+            let mut best: Option<(f32, Vec<(usize, Paint)>)> = None;
+            for direction in directions {
+                let mut fitted = Vec::<(usize, Paint)>::new();
+                let mut weighted_score = 0.0_f32;
+                let mut sample_count = 0_usize;
+                for &member in patch_group {
+                    let (start, end) =
+                        extended_linear_geometry(&data_samples[member], source.width, direction);
+                    let geometry = Paint::Linear {
+                        preset: LinearPreset::Fitted,
+                        start,
+                        end,
+                        stops: Vec::new(),
+                    };
+                    let (paint, stats) = fit_coupled_geometry(
+                        source,
+                        &source_labs,
+                        &data_samples[member],
+                        &geometry,
+                    );
+                    weighted_score += data_samples[member].len() as f32 * objective(stats);
+                    sample_count += data_samples[member].len();
+                    fitted.push((member, paint));
+                }
+                let score = weighted_score / sample_count.max(1) as f32;
+                if best.as_ref().map(|value| score < value.0).unwrap_or(true) {
+                    best = Some((score, fitted));
+                }
+            }
+            if let Some((_, fitted)) = best {
+                shared_geometries.extend(fitted);
+            }
+        }
         let geometries: Vec<Paint> = members
             .iter()
             .map(|&member| {
-                if matches!(paints[member], Paint::Solid { .. }) {
-                    let source_indices = if region_paint_indices[member].is_empty() {
-                        &region_indices[member]
-                    } else {
-                        &region_paint_indices[member]
-                    };
-                    promote_solid_geometry(source, &sampled_indices(source_indices, 768))
-                } else {
-                    paints[member].clone()
-                }
+                shared_geometries.get(&member).cloned().unwrap_or_else(|| {
+                    choose_coupled_geometry(
+                        source,
+                        &source_labs,
+                        &data_samples[member],
+                        &paints[member],
+                    )
+                })
             })
             .collect();
         let variable_count = members.len() * 5;
         let mut normal = vec![vec![0.0_f64; variable_count]; variable_count];
         let mut rhs = vec![vec![0.0_f64; variable_count]; 3];
         for (position, &member) in members.iter().enumerate() {
-            let source_indices = if region_paint_indices[member].is_empty() {
-                &region_indices[member]
-            } else {
-                &region_paint_indices[member]
-            };
-            let samples = sampled_indices(source_indices, 768);
+            let samples = &data_samples[member];
             let data_weight =
                 (region_indices[member].len() as f64 / samples.len().max(1) as f64).max(1.0);
-            for &sample in &samples {
+            for &sample in samples {
                 let basis = five_stop_basis(coupled_parameter(
                     &geometries[position],
                     sample,
@@ -2358,22 +4109,25 @@ fn couple_adjacent_paints(
             }
         }
         for boundary in &boundaries {
-            let left_position = members.binary_search(&boundary.left).unwrap();
-            let right_position = members.binary_search(&boundary.right).unwrap();
-            let boundary_weight_scale = (16.0 / boundary.samples.len().max(1) as f64).min(1.0);
-            let continuity_weight = 64.0 * boundary_weight_scale;
-            let target_weight = 3.0 * boundary_weight_scale;
-            for &(left_sample, right_sample) in &boundary.samples {
-                let left_basis = five_stop_basis(coupled_parameter(
-                    &geometries[left_position],
-                    left_sample,
-                    source.width,
-                ));
-                let right_basis = five_stop_basis(coupled_parameter(
-                    &geometries[right_position],
-                    left_sample,
-                    source.width,
-                ));
+            let left_position = members.binary_search(&boundary.boundary.left).unwrap();
+            let right_position = members.binary_search(&boundary.boundary.right).unwrap();
+            let constraint_points = if boundary.same_paint_key {
+                patch_boundary_halo(&boundary.boundary, segmentation)
+            } else {
+                boundary.boundary.points.clone()
+            };
+            if constraint_points.is_empty() {
+                continue;
+            }
+            let boundary_weight_scale = (16.0 / constraint_points.len().max(1) as f64).min(1.0);
+            let patch_scale = if boundary.same_paint_key { 16.0 } else { 1.0 };
+            let continuity_weight = 64.0 * patch_scale * boundary_weight_scale;
+            let target_weight = 3.0 * patch_scale * boundary_weight_scale;
+            for point in constraint_points {
+                let left_basis =
+                    five_stop_basis(coupled_parameter_point(&geometries[left_position], point));
+                let right_basis =
+                    five_stop_basis(coupled_parameter_point(&geometries[right_position], point));
                 let left_block = left_position * 5;
                 let right_block = right_position * 5;
                 for first in 0..5 {
@@ -2388,11 +4142,7 @@ fn couple_adjacent_paints(
                         normal[left_block + first][right_block + second] -= cross;
                         normal[right_block + second][left_block + first] -= cross;
                     }
-                    let target = [
-                        0.5 * (source.pixels[left_sample][0] + source.pixels[right_sample][0]),
-                        0.5 * (source.pixels[left_sample][1] + source.pixels[right_sample][1]),
-                        0.5 * (source.pixels[left_sample][2] + source.pixels[right_sample][2]),
-                    ];
+                    let target = bilinear_sample(source, point);
                     for (channel, channel_rhs) in rhs.iter_mut().enumerate().take(3) {
                         channel_rhs[left_block + first] +=
                             target_weight * left_basis[first] * target[channel] as f64;
@@ -2440,29 +4190,16 @@ fn couple_adjacent_paints(
         let mut baseline_errors = Vec::<(f32, f32)>::new();
         let mut proposed_errors = Vec::<(f32, f32)>::new();
         for (position, &member) in members.iter().enumerate() {
-            let source_indices = if region_paint_indices[member].is_empty() {
-                &region_indices[member]
-            } else {
-                &region_paint_indices[member]
-            };
-            let samples = sampled_indices(source_indices, 768);
+            let samples = &data_samples[member];
             let weight = region_indices[member].len() as f32 / samples.len().max(1) as f32;
-            for &sample in &samples {
-                let actual = rgb_to_lab(source.pixels[sample]);
-                baseline_errors.push((
-                    delta_e2000(
-                        actual,
-                        rgb_to_lab(paint_at(&paints[member], sample, source.width)),
-                    ),
-                    weight,
-                ));
-                proposed_errors.push((
-                    delta_e2000(
-                        actual,
-                        rgb_to_lab(paint_at(&proposed[position], sample, source.width)),
-                    ),
-                    weight,
-                ));
+            let baseline = errors_for_indices(&source_labs, samples, source.width, &paints[member]);
+            let candidate =
+                errors_for_indices(&source_labs, samples, source.width, &proposed[position]);
+            for value in baseline {
+                baseline_errors.push((value, weight));
+            }
+            for value in candidate {
+                proposed_errors.push((value, weight));
             }
         }
         let baseline_mean = baseline_errors
@@ -2488,36 +4225,48 @@ fn couple_adjacent_paints(
             - weighted_percentile(baseline_errors.clone(), 0.90);
         let mut before_seams = Vec::new();
         let mut after_seams = Vec::new();
-        for boundary in &boundaries {
-            let left_position = members.binary_search(&boundary.left).unwrap();
-            let right_position = members.binary_search(&boundary.right).unwrap();
-            for &(sample, _) in &boundary.samples {
-                before_seams.push(delta_e2000(
-                    rgb_to_lab(paint_at(&paints[boundary.left], sample, source.width)),
-                    rgb_to_lab(paint_at(&paints[boundary.right], sample, source.width)),
-                ));
-                after_seams.push(delta_e2000(
-                    rgb_to_lab(paint_at(&proposed[left_position], sample, source.width)),
-                    rgb_to_lab(paint_at(&proposed[right_position], sample, source.width)),
-                ));
-            }
+        for boundary in boundaries
+            .iter()
+            .filter(|boundary| boundary.seam_p90 >= 0.75)
+        {
+            let left_position = members.binary_search(&boundary.boundary.left).unwrap();
+            let right_position = members.binary_search(&boundary.boundary.right).unwrap();
+            before_seams.extend(seam_errors_at_points(
+                &paints[boundary.boundary.left],
+                &paints[boundary.boundary.right],
+                &boundary.boundary.points,
+            ));
+            after_seams.extend(seam_errors_at_points(
+                &proposed[left_position],
+                &proposed[right_position],
+                &boundary.boundary.points,
+            ));
+        }
+        if before_seams.is_empty() {
+            continue;
         }
         let before_mean = before_seams.iter().sum::<f32>() / before_seams.len().max(1) as f32;
         let after_mean = after_seams.iter().sum::<f32>() / after_seams.len().max(1) as f32;
         let before_p90 = percentile(before_seams, 0.90);
         let after_p90 = percentile(after_seams, 0.90);
         let score = mean_regression + 0.35 * (after_mean - before_mean);
-        if mean_regression <= 0.15 * config.gradient_merge_error
-            && p90_regression <= 0.50 * config.gradient_merge_error
+        let has_patch_boundary = boundaries.iter().any(|boundary| boundary.same_paint_key);
+        let maximum_mean_regression =
+            if has_patch_boundary { 0.25 } else { 0.15 } * config.gradient_merge_error;
+        let maximum_p90_regression =
+            if has_patch_boundary { 0.75 } else { 0.50 } * config.gradient_merge_error;
+        if mean_regression <= maximum_mean_regression
+            && p90_regression <= maximum_p90_regression
             && before_p90 - after_p90 >= 0.50
             && after_p90 <= 2.3_f32.max(0.80 * before_p90)
             && score <= 0.0
         {
             for (position, &member) in members.iter().enumerate() {
                 paints[member] = proposed[position].clone();
-                errors[member] = paint_stats(
-                    source,
-                    &sampled_indices(&region_indices[member], 768),
+                errors[member] = paint_stats_against_labs(
+                    &source_labs,
+                    &data_samples[member],
+                    source.width,
                     &paints[member],
                 )
                 .mean;
@@ -2530,9 +4279,12 @@ fn couple_adjacent_paints(
 
 pub fn fit_all(
     source: &Raster,
+    boundary_source: &Raster,
     segmentation: &Segmentation,
     config: &Config,
 ) -> (Vec<Paint>, GradientSummary) {
+    let source_labs = lab_pixels(source);
+    let strong_branches = crate::ridge::strong_branches(&segmentation.canonical);
     let mut region_indices = vec![Vec::<usize>::new(); segmentation.regions.len()];
     let mut region_paint_indices = vec![Vec::<usize>::new(); segmentation.regions.len()];
     for (index, &label) in segmentation.labels.iter().enumerate() {
@@ -2544,12 +4296,66 @@ pub fn fit_all(
     let fitted: Vec<(Paint, f32)> = region_indices
         .iter()
         .zip(&region_paint_indices)
-        .map(|(indices, paint_indices)| fit_region(source, indices, paint_indices, config))
+        .enumerate()
+        .map(|(label, (indices, paint_indices))| {
+            let strong_dark = indices
+                .iter()
+                .filter(|&&index| strong_branches.dark[index])
+                .count()
+                * 2
+                >= indices.len();
+            let strong_bright = !strong_dark
+                && indices
+                    .iter()
+                    .filter(|&&index| strong_branches.bright[index])
+                    .count()
+                    * 2
+                    >= indices.len();
+            let branch_paint_indices: Vec<usize> = if strong_dark {
+                paint_indices
+                    .iter()
+                    .copied()
+                    .filter(|&index| strong_branches.dark[index])
+                    .collect()
+            } else if strong_bright {
+                paint_indices
+                    .iter()
+                    .copied()
+                    .filter(|&index| strong_branches.bright[index])
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let selected_paint_indices = if strong_dark || strong_bright {
+                &branch_paint_indices
+            } else {
+                paint_indices
+            };
+            let canonical_solid = indices
+                .first()
+                .map(|&index| segmentation.canonical.pixels[index])
+                .unwrap_or([0.0; 3]);
+            fit_region(
+                label,
+                source,
+                &source_labs,
+                indices,
+                selected_paint_indices,
+                canonical_solid,
+                strong_dark,
+                config,
+            )
+        })
         .collect();
     let mut paints: Vec<Paint> = fitted.iter().map(|value| value.0.clone()).collect();
     let mut errors: Vec<f32> = fitted.iter().map(|value| value.1).collect();
-    let coupled = couple_linear(
+    if let Ok(prefix) = std::env::var("PICVEC_PAINT_DIAGNOSTICS") {
+        save_paint_kinds(&format!("{prefix}-initial.json"), &paints);
+        save_paint_details(&format!("{prefix}-initial-details.json"), &paints);
+    }
+    let coupled = harmonize_adjacent_paints(
         source,
+        boundary_source,
         segmentation,
         &region_indices,
         &region_paint_indices,
@@ -2557,8 +4363,13 @@ pub fn fit_all(
         &mut errors,
         config,
     );
+    if let Ok(prefix) = std::env::var("PICVEC_PAINT_DIAGNOSTICS") {
+        save_paint_kinds(&format!("{prefix}-harmonized.json"), &paints);
+        save_paint_details(&format!("{prefix}-harmonized-details.json"), &paints);
+    }
     let locally_coupled = couple_adjacent_paints(
         source,
+        boundary_source,
         segmentation,
         &region_indices,
         &region_paint_indices,
@@ -2566,6 +4377,10 @@ pub fn fit_all(
         &mut errors,
         config,
     );
+    if let Ok(prefix) = std::env::var("PICVEC_PAINT_DIAGNOSTICS") {
+        save_paint_kinds(&format!("{prefix}-coupled.json"), &paints);
+        save_paint_details(&format!("{prefix}-coupled-details.json"), &paints);
+    }
     let mut summary = GradientSummary {
         coupled_linear_regions: coupled + locally_coupled,
         maximum_stops: paints
@@ -2593,6 +4408,61 @@ pub fn fit_all(
         }
     }
     (paints, summary)
+}
+
+fn save_paint_kinds(path: &str, paints: &[Paint]) {
+    let values: Vec<&str> = paints
+        .iter()
+        .map(|paint| match paint {
+            Paint::Solid { .. } => "solid",
+            Paint::Linear { .. } => "linear",
+            Paint::Radial { .. } => "radial",
+        })
+        .collect();
+    if let Ok(document) = serde_json::to_vec(&values) {
+        let _ = std::fs::write(path, document);
+    }
+}
+
+fn save_paint_details(path: &str, paints: &[Paint]) {
+    let values: Vec<serde_json::Value> = paints
+        .iter()
+        .map(|paint| match paint {
+            Paint::Solid { color } => serde_json::json!({
+                "kind": "solid",
+                "color": color,
+            }),
+            Paint::Linear {
+                preset,
+                start,
+                end,
+                stops,
+            } => serde_json::json!({
+                "kind": "linear",
+                "preset": format!("{preset:?}"),
+                "geometry": [start.x, start.y, end.x, end.y],
+                "stops": stops.iter().map(|stop| serde_json::json!([
+                    stop.offset, stop.color
+                ])).collect::<Vec<_>>(),
+            }),
+            Paint::Radial {
+                origin,
+                center,
+                radius,
+                stops,
+            } => serde_json::json!({
+                "kind": "radial",
+                "origin": format!("{origin:?}"),
+                "geometry": [center.x, center.y, radius.x, radius.y],
+                "stops": stops.iter().map(|stop| serde_json::json!([
+                    stop.offset, stop.color
+                ])).collect::<Vec<_>>(),
+            }),
+        })
+        .collect();
+    if let Ok(document) = serde_json::to_vec(&values) {
+        let _ = std::fs::write(path, document);
+    }
 }
 
 #[cfg(test)]

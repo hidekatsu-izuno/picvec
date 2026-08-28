@@ -2,7 +2,7 @@ use rayon::prelude::*;
 use serde::Serialize;
 use std::collections::{HashSet, VecDeque};
 
-use crate::color::{delta_e2000, delta_e76, lab_to_rgb, rgb_to_lab, Lab};
+use crate::color::{delta_e2000, delta_e2000_pairs, delta_e76, lab_pixels_to_rgb, Lab};
 use crate::config::Config;
 use crate::raster::{percentile, Raster};
 
@@ -77,7 +77,168 @@ struct Measurement {
 }
 
 pub fn lab_pixels(image: &Raster) -> Vec<Lab> {
-    image.pixels.par_iter().copied().map(rgb_to_lab).collect()
+    let mut linear = image.pixels.clone();
+    let mut nonlinear_indices = Vec::with_capacity(linear.len() * 3);
+    let mut nonlinear_values = Vec::with_capacity(linear.len() * 3);
+    for (pixel, rgb) in linear.iter_mut().enumerate() {
+        for (channel, value) in rgb.iter_mut().enumerate() {
+            *value = value.clamp(0.0, 1.0);
+            if *value > 0.04045 {
+                nonlinear_indices.push((pixel, channel));
+                nonlinear_values.push((*value + 0.055) / 1.055);
+            } else {
+                *value /= 12.92;
+            }
+        }
+    }
+    crate::svml::pow_f32_in_place(&mut nonlinear_values, 2.4);
+    for ((pixel, channel), value) in nonlinear_indices.into_iter().zip(nonlinear_values) {
+        linear[pixel][channel] = value;
+    }
+    let mut normalized = Vec::<[f32; 3]>::with_capacity(image.pixels.len());
+    for linear in linear {
+        let x = linear[2].mul_add(
+            0.180_423,
+            linear[1].mul_add(0.357_58, linear[0] * 0.412_453),
+        );
+        let y = linear[2].mul_add(
+            0.072_169,
+            linear[1].mul_add(0.715_16, linear[0] * 0.212_671),
+        );
+        let z = linear[2].mul_add(
+            0.950_227,
+            linear[1].mul_add(0.119_193, linear[0] * 0.019_334),
+        );
+        normalized.push([x / 0.95047, y, z / 1.08883]);
+    }
+    let mut nonlinear_indices = Vec::with_capacity(normalized.len() * 3);
+    let mut nonlinear_values = Vec::with_capacity(normalized.len() * 3);
+    for (pixel, xyz) in normalized.iter().enumerate() {
+        for (channel, &value) in xyz.iter().enumerate() {
+            if value > 0.008_856 {
+                nonlinear_indices.push((pixel, channel));
+                nonlinear_values.push(value);
+            }
+        }
+    }
+    crate::svml::cbrt_f32_in_place(&mut nonlinear_values);
+    for ((pixel, channel), value) in nonlinear_indices.into_iter().zip(nonlinear_values) {
+        normalized[pixel][channel] = value;
+    }
+    for xyz in &mut normalized {
+        for value in xyz {
+            if *value <= 0.008_856 {
+                *value = 7.787 * *value + 16.0 / 116.0;
+            }
+        }
+    }
+    normalized
+        .into_par_iter()
+        .map(|value| Lab {
+            l: 116.0 * value[1] - 16.0,
+            a: 500.0 * (value[0] - value[1]),
+            b: 200.0 * (value[1] - value[2]),
+        })
+        .collect()
+}
+
+/// Match preprocess.srgb_to_lab, whose explicit matrix and low branch are
+/// used for source-boundary evidence (distinct from skimage.rgb2lab above).
+pub fn preprocess_lab_pixels(image: &Raster) -> Vec<Lab> {
+    preprocess_lab_values(&image.pixels)
+}
+
+pub fn preprocess_lab_values(pixels: &[[f32; 3]]) -> Vec<Lab> {
+    let trace = std::env::var_os("PICVEC_TRACE_PREPROCESS_LAB").is_some();
+    let mut linear = pixels.to_vec();
+    let mut nonlinear_indices = Vec::with_capacity(linear.len() * 3);
+    let mut nonlinear_values = Vec::with_capacity(linear.len() * 3);
+    for (pixel, rgb) in linear.iter_mut().enumerate() {
+        for (channel, value) in rgb.iter_mut().enumerate() {
+            *value = value.clamp(0.0, 1.0);
+            if *value > 0.04045 {
+                nonlinear_indices.push((pixel, channel));
+                nonlinear_values.push((*value + 0.055) / 1.055);
+            } else {
+                *value /= 12.92;
+            }
+        }
+    }
+    crate::svml::pow_f32_in_place(&mut nonlinear_values, 2.4);
+    for ((pixel, channel), value) in nonlinear_indices.into_iter().zip(nonlinear_values) {
+        linear[pixel][channel] = value;
+    }
+    if trace {
+        eprintln!("trace preprocess input={pixels:?} linear={linear:?}");
+    }
+    let mut normalized = Vec::<[f32; 3]>::with_capacity(pixels.len());
+    let scalar_matmul = pixels.len() == 1;
+    for linear in linear {
+        // NumPy's matmul dispatches a (1, 3) @ (3, 3) product through its
+        // scalar dot loop, while two or more rows use the FMA-vectorized
+        // matrix loop. Child-region Paint checks frequently contain exactly
+        // one sample, so retain that shape-dependent rounding here.
+        let dot = |first: f32, second: f32, third: f32| {
+            if scalar_matmul {
+                let left = linear[0] * first;
+                let middle = linear[1] * second;
+                let right = linear[2] * third;
+                (left + middle) + right
+            } else {
+                linear[2].mul_add(third, linear[1].mul_add(second, linear[0] * first))
+            }
+        };
+        let x = dot(0.412_456_4, 0.357_576_1, 0.180_437_5);
+        let y = dot(0.212_672_9, 0.715_152_2, 0.072_175);
+        let z = dot(0.019_333_9, 0.119_192, 0.950_304_1);
+        normalized.push([x / 0.95047, y, z / 1.08883]);
+    }
+    if trace {
+        eprintln!("trace preprocess normalized-before={normalized:?}");
+    }
+    const DELTA: f32 = 6.0_f32 / 29.0_f32;
+    const THRESHOLD: f32 = DELTA * DELTA * DELTA;
+    let mut nonlinear_indices = Vec::with_capacity(normalized.len() * 3);
+    let mut nonlinear_values = Vec::with_capacity(normalized.len() * 3);
+    for (pixel, xyz) in normalized.iter().enumerate() {
+        for (channel, &value) in xyz.iter().enumerate() {
+            if value > THRESHOLD {
+                nonlinear_indices.push((pixel, channel));
+                nonlinear_values.push(value.max(0.0));
+            }
+        }
+    }
+    crate::svml::cbrt_f32_in_place(&mut nonlinear_values);
+    for ((pixel, channel), value) in nonlinear_indices.into_iter().zip(nonlinear_values) {
+        normalized[pixel][channel] = value;
+    }
+    // Python evaluates ``3 * (6 / 29) ** 2`` as a scalar float64 and NumPy
+    // casts it once to float32 before dividing the float32 array. Recomputing
+    // from the already-rounded float32 DELTA is one ULP larger.
+    const DENOMINATOR: f32 = f32::from_bits(1_040_416_807);
+    const OFFSET: f32 = 4.0_f32 / 29.0_f32;
+    for xyz in &mut normalized {
+        for value in xyz {
+            if *value <= THRESHOLD {
+                *value = *value / DENOMINATOR + OFFSET;
+            }
+        }
+    }
+    if trace {
+        eprintln!("trace preprocess normalized-after={normalized:?}");
+    }
+    let result: Vec<Lab> = normalized
+        .into_iter()
+        .map(|value| Lab {
+            l: 116.0 * value[1] - 16.0,
+            a: 500.0 * (value[0] - value[1]),
+            b: 200.0 * (value[1] - value[2]),
+        })
+        .collect();
+    if trace {
+        eprintln!("trace preprocess lab={result:?}");
+    }
+    result
 }
 
 #[inline]
@@ -3153,51 +3314,148 @@ fn adaptive_tolerance(lightness: f32, config: &Config) -> f32 {
 }
 
 /// Small-radius bilateral smoothing that never averages through a strong
-/// perceptual edge.  The implementation is parallel by output row/pixel.
+/// perceptual edge.
 pub fn perceptual_smooth(image: &Raster, config: &Config) -> Raster {
     let radius = config.smoothing_radius as isize;
     if radius == 0 {
         return image.clone();
     }
     let lab = lab_pixels(image);
+    if let Ok(path) = std::env::var("PICVEC_SMOOTH_INPUT_LAB_DIAGNOSTIC") {
+        let mut bytes = Vec::with_capacity(lab.len() * 12);
+        for value in &lab {
+            bytes.extend_from_slice(&value.l.to_le_bytes());
+            bytes.extend_from_slice(&value.a.to_le_bytes());
+            bytes.extend_from_slice(&value.b.to_le_bytes());
+        }
+        let _ = std::fs::write(path, bytes);
+    }
     let sigma = config.smoothing_spatial_sigma.max(0.1);
-    let pixels: Vec<[f32; 3]> = (0..image.pixels.len())
-        .into_par_iter()
-        .map(|index| {
-            let x = (index % image.width) as isize;
-            let y = (index / image.width) as isize;
-            let centre = lab[index];
-            let mut sum = [0.0_f32; 3];
-            let mut weight_sum = 0.0_f32;
-            for dy in -radius..=radius {
-                for dx in -radius..=radius {
+    let mut numerator = vec![[0.0_f32; 3]; image.pixels.len()];
+    let mut denominator = vec![0.0_f32; image.pixels.len()];
+    // Python advances one complete shifted image at a time. Besides enabling
+    // NumPy's dispatched contiguous `exp`, this fixes the accumulation order
+    // for every output pixel. Keep that same dy/dx-major traversal here.
+    for dy in -radius..=radius {
+        for dx in -radius..=radius {
+            let samples: Vec<Lab> = (0..image.pixels.len())
+                .into_par_iter()
+                .map(|index| {
+                    let x = (index % image.width) as isize;
+                    let y = (index / image.width) as isize;
                     let px = (x + dx).clamp(0, image.width as isize - 1) as usize;
                     let py = (y + dy).clamp(0, image.height as isize - 1) as usize;
-                    let sample_index = py * image.width + px;
-                    let sample = lab[sample_index];
-                    let distance = delta_e2000(centre, sample);
+                    lab[py * image.width + px]
+                })
+                .collect();
+            let distances = delta_e2000_pairs(&lab, &samples);
+            let mut weights: Vec<f32> = distances
+                .into_par_iter()
+                .enumerate()
+                .map(|(index, distance)| {
+                    let centre = lab[index];
+                    let sample = samples[index];
                     let threshold =
                         adaptive_tolerance(0.5 * (centre.l + sample.l), config).max(1e-3);
-                    let spatial = (-((dx * dx + dy * dy) as f32) / (2.0 * sigma * sigma)).exp();
-                    let range = (-(distance * distance) / (2.0 * threshold * threshold)).exp();
-                    let weight = spatial * range;
+                    let ratio = distance / threshold;
+                    -0.5_f32 * (ratio * ratio)
+                })
+                .collect();
+            crate::svml::exp_f32_in_place(&mut weights);
+            let spatial =
+                crate::svml::exp_f64(-0.5_f64 * (dx * dx + dy * dy) as f64 / (sigma * sigma));
+            numerator
+                .par_iter_mut()
+                .zip(denominator.par_iter_mut())
+                .zip(weights.into_par_iter())
+                .enumerate()
+                .for_each(|(index, ((sum, weight_sum), range))| {
+                    let sample = samples[index];
+                    let weight = (spatial * range as f64) as f32;
                     sum[0] += sample.l * weight;
                     sum[1] += sample.a * weight;
                     sum[2] += sample.b * weight;
-                    weight_sum += weight;
-                }
-            }
+                    *weight_sum += weight;
+                });
+        }
+    }
+    let smoothed_lab: Vec<Lab> = numerator
+        .into_par_iter()
+        .zip(denominator.into_par_iter())
+        .zip(lab.par_iter())
+        .map(|((sum, weight_sum), &original)| {
             if weight_sum <= 1e-8 {
-                image.pixels[index]
+                original
             } else {
-                lab_to_rgb(Lab {
+                Lab {
                     l: sum[0] / weight_sum,
                     a: sum[1] / weight_sum,
                     b: sum[2] / weight_sum,
-                })
+                }
             }
         })
         .collect();
+    if let Ok(path) = std::env::var("PICVEC_SMOOTH_LAB_DIAGNOSTIC") {
+        let mut bytes = Vec::with_capacity(smoothed_lab.len() * 12);
+        for value in &smoothed_lab {
+            bytes.extend_from_slice(&value.l.to_le_bytes());
+            bytes.extend_from_slice(&value.a.to_le_bytes());
+            bytes.extend_from_slice(&value.b.to_le_bytes());
+        }
+        let _ = std::fs::write(path, bytes);
+    }
+    if let Ok(path) = std::env::var("PICVEC_SMOOTH_PIXEL_DIAGNOSTIC") {
+        let x = std::env::var("PICVEC_SMOOTH_PIXEL_X")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(1053_isize);
+        let y = std::env::var("PICVEC_SMOOTH_PIXEL_Y")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(23_isize);
+        let centre = lab[y as usize * image.width + x as usize];
+        let mut sum = [0.0_f32; 3];
+        let mut weight_sum = 0.0_f32;
+        let mut runs = Vec::new();
+        for dy in -radius..=radius {
+            for dx in -radius..=radius {
+                let px = (x + dx).clamp(0, image.width as isize - 1) as usize;
+                let py = (y + dy).clamp(0, image.height as isize - 1) as usize;
+                let sample = lab[py * image.width + px];
+                let distance = delta_e2000(centre, sample);
+                let threshold = adaptive_tolerance(0.5 * (centre.l + sample.l), config).max(1e-3);
+                let spatial =
+                    crate::svml::exp_f64(-0.5_f64 * (dx * dx + dy * dy) as f64 / (sigma * sigma));
+                let ratio = distance / threshold;
+                let mut exponent = [-0.5_f32 * (ratio * ratio)];
+                crate::svml::exp_f32_in_place(&mut exponent);
+                let range = exponent[0];
+                let weight = (spatial * range as f64) as f32;
+                sum[0] += sample.l * weight;
+                sum[1] += sample.a * weight;
+                sum[2] += sample.b * weight;
+                weight_sum += weight;
+                runs.push(serde_json::json!({
+                    "dx": dx,
+                    "dy": dy,
+                    "sample": [sample.l, sample.a, sample.b],
+                    "distance": distance,
+                    "threshold": threshold,
+                    "spatial": spatial as f32,
+                    "range": range,
+                    "weight": weight,
+                    "numerator": sum,
+                    "denominator": weight_sum,
+                }));
+            }
+        }
+        let value = serde_json::json!({
+            "runs": runs,
+            "result": [sum[0] / weight_sum, sum[1] / weight_sum, sum[2] / weight_sum],
+        });
+        let _ = std::fs::write(path, serde_json::to_vec_pretty(&value).unwrap_or_default());
+    }
+    let pixels = lab_pixels_to_rgb(&smoothed_lab);
     Raster::new(image.width, image.height, pixels)
 }
 

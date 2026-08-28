@@ -13,9 +13,11 @@ pub mod metrics;
 pub mod optimize;
 pub mod pipeline;
 pub mod raster;
+pub mod ridge;
 pub mod segment;
 pub mod structural;
 pub mod svg;
+mod svml;
 mod union_find;
 
 pub use config::Config;

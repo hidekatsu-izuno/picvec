@@ -1,8 +1,8 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 use serde::Serialize;
 
-use crate::color::{delta_e2000, lab_to_rgb, rgb_to_lab, Lab};
+use crate::color::{delta_e2000, lab_pixels_to_rgb, lab_to_rgb, rgb_to_lab, Lab};
 use crate::config::Config;
 use crate::edge::{lab_pixels, EdgeRoles};
 use crate::raster::{percentile, Raster};
@@ -62,6 +62,11 @@ pub struct Segmentation {
     pub width: usize,
     pub height: usize,
     pub labels: Vec<u32>,
+    /// Source Paint owner retained when adaptive patches split one face into
+    /// several geometry labels.  Python carries the corresponding
+    /// `final_keys`; local Paint coupling uses equality only to recognize an
+    /// artificial patch boundary.
+    pub paint_keys: Vec<u32>,
     pub paint_samples: Vec<bool>,
     /// Quantized/regularized Paint prototypes used only for discrete
     /// ownership decisions. Gradient fitting continues to sample the native
@@ -335,19 +340,35 @@ fn compact_connected(values: &[u32], width: usize, height: usize) -> (Vec<u32>, 
             }
         }
     }
-    let mut roots = HashMap::<usize, u32>::new();
-    let mut next = 0_u32;
-    let labels = (0..values.len())
-        .map(|index| {
-            let root = union.find(index);
-            *roots.entry(root).or_insert_with(|| {
-                let value = next;
-                next += 1;
-                value
-            })
-        })
+    let mut pixel_roots = Vec::with_capacity(values.len());
+    let mut components = HashMap::<usize, (u32, usize)>::new();
+    for (index, &palette) in values.iter().enumerate() {
+        let root = union.find(index);
+        pixel_roots.push(root);
+        components
+            .entry(root)
+            .and_modify(|component| component.1 = component.1.min(index))
+            .or_insert((palette, index));
+    }
+    // scipy.ndimage.label is invoked once per palette in ascending palette
+    // order.  Within one palette it numbers components by their first
+    // row-major sample.  Preserve that exact ordering because later passes
+    // use stable label order to resolve otherwise equal candidates.
+    let mut ordered: Vec<(usize, u32, usize)> = components
+        .into_iter()
+        .map(|(root, (palette, first))| (root, palette, first))
         .collect();
-    (labels, next as usize)
+    ordered.sort_by_key(|&(_, palette, first)| (palette, first));
+    let root_labels: HashMap<usize, u32> = ordered
+        .iter()
+        .enumerate()
+        .map(|(label, &(root, _, _))| (root, label as u32))
+        .collect();
+    let labels = pixel_roots
+        .into_iter()
+        .map(|root| root_labels[&root])
+        .collect();
+    (labels, ordered.len())
 }
 
 fn compact_values(values: &[u32]) -> (Vec<u32>, usize) {
@@ -745,11 +766,31 @@ fn region_stats(image: &Raster, labels: &[u32], count: usize) -> Vec<RegionStats
 }
 
 fn region_mean_raster_for(image: &Raster, labels: &[u32], count: usize) -> Raster {
-    let stats = region_stats(image, labels, count);
-    let pixels = labels
-        .iter()
-        .map(|&label| stats[label as usize].mean_rgb)
+    // Python's _region_mean_image averages in Lab, using float64 bincount
+    // accumulators, casts the region means to float32, expands them back to
+    // image shape, and only then converts the complete array to sRGB.
+    let labs = lab_pixels(image);
+    let mut areas = vec![0_usize; count];
+    let mut sums = vec![[0.0_f64; 3]; count];
+    for (&label, lab) in labels.iter().zip(labs) {
+        let region = label as usize;
+        areas[region] += 1;
+        sums[region][0] += lab.l as f64;
+        sums[region][1] += lab.a as f64;
+        sums[region][2] += lab.b as f64;
+    }
+    let means: Vec<Lab> = (0..count)
+        .map(|region| {
+            let divisor = areas[region].max(1) as f64;
+            Lab {
+                l: (sums[region][0] / divisor) as f32,
+                a: (sums[region][1] / divisor) as f32,
+                b: (sums[region][2] / divisor) as f32,
+            }
+        })
         .collect();
+    let mean_pixels: Vec<Lab> = labels.iter().map(|&label| means[label as usize]).collect();
+    let pixels = lab_pixels_to_rgb(&mean_pixels);
     Raster::new(image.width, image.height, pixels)
 }
 
@@ -769,6 +810,361 @@ struct FlowEdge {
     capacity: f64,
 }
 
+#[derive(Clone, Debug)]
+struct PreflowEdge {
+    to: usize,
+    reverse: usize,
+    capacity: f64,
+    flow: f64,
+}
+
+#[derive(Clone, Debug, Default)]
+struct PreflowLevel {
+    active: BTreeSet<usize>,
+    inactive: BTreeSet<usize>,
+}
+
+fn add_authored_edge(
+    graph: &mut [Vec<(usize, f64)>],
+    node_order: &mut Vec<usize>,
+    seen: &mut [bool],
+    from: usize,
+    to: usize,
+    capacity: f64,
+) {
+    for node in [from, to] {
+        if !seen[node] {
+            seen[node] = true;
+            node_order.push(node);
+        }
+    }
+    if let Some(edge) = graph[from].iter_mut().find(|edge| edge.0 == to) {
+        edge.1 = capacity;
+    } else {
+        graph[from].push((to, capacity));
+    }
+}
+
+fn add_preflow_pair(graph: &mut [Vec<PreflowEdge>], from: usize, to: usize, capacity: f64) {
+    if let Some(index) = graph[from].iter().position(|edge| edge.to == to) {
+        graph[from][index].capacity = capacity;
+        return;
+    }
+    let forward_reverse = graph[to].len();
+    let reverse_reverse = graph[from].len();
+    graph[from].push(PreflowEdge {
+        to,
+        reverse: forward_reverse,
+        capacity,
+        flow: 0.0,
+    });
+    graph[to].push(PreflowEdge {
+        to: from,
+        reverse: reverse_reverse,
+        capacity: 0.0,
+        flow: 0.0,
+    });
+}
+
+fn preflow_push(
+    graph: &mut [Vec<PreflowEdge>],
+    excess: &mut [f64],
+    from: usize,
+    edge_index: usize,
+    amount: f64,
+) {
+    let to = graph[from][edge_index].to;
+    let reverse = graph[from][edge_index].reverse;
+    graph[from][edge_index].flow += amount;
+    graph[to][reverse].flow -= amount;
+    excess[from] -= amount;
+    excess[to] += amount;
+}
+
+fn preflow_reverse_bfs(graph: &[Vec<PreflowEdge>], target: usize) -> Vec<Option<usize>> {
+    let mut heights = vec![None; graph.len()];
+    let mut queue = VecDeque::from([target]);
+    heights[target] = Some(0);
+    while let Some(node) = queue.pop_front() {
+        let following = heights[node].expect("visited node") + 1;
+        // Residual edges are inserted in symmetric pairs, so the outgoing
+        // neighbour order is also the predecessor insertion order used by
+        // NetworkX's reverse BFS.
+        for edge in &graph[node] {
+            let predecessor = edge.to;
+            let incoming = &graph[predecessor][edge.reverse];
+            if heights[predecessor].is_none() && incoming.flow < incoming.capacity {
+                heights[predecessor] = Some(following);
+                queue.push_back(predecessor);
+            }
+        }
+    }
+    heights
+}
+
+fn preflow_reaches_sink_after_saturated_removal(
+    graph: &[Vec<PreflowEdge>],
+    sink: usize,
+) -> Vec<bool> {
+    let mut reached = vec![false; graph.len()];
+    let mut queue = VecDeque::from([sink]);
+    reached[sink] = true;
+    while let Some(node) = queue.pop_front() {
+        for edge in &graph[node] {
+            let predecessor = edge.to;
+            let incoming = &graph[predecessor][edge.reverse];
+            // networkx.minimum_cut removes edges only when the two floats are
+            // exactly equal.  A one-ulp over-capacity edge left by its
+            // value-only preflow therefore remains traversable here even
+            // though it would fail the ordinary residual `flow < capacity`
+            // test used during the flow computation.
+            if !reached[predecessor] && incoming.flow != incoming.capacity {
+                reached[predecessor] = true;
+                queue.push_back(predecessor);
+            }
+        }
+    }
+    reached
+}
+
+fn rebuild_preflow_levels(
+    levels: &mut [PreflowLevel],
+    heights: &[usize],
+    excess: &[f64],
+    source: usize,
+    sink: usize,
+) {
+    for level in levels.iter_mut() {
+        level.active.clear();
+        level.inactive.clear();
+    }
+    for node in 0..heights.len() {
+        if node == source || node == sink {
+            continue;
+        }
+        if excess[node] > 0.0 {
+            levels[heights[node]].active.insert(node);
+        } else {
+            levels[heights[node]].inactive.insert(node);
+        }
+    }
+}
+
+fn networkx_preflow_cut_assignment(
+    component: &[usize],
+    alpha: &[f32],
+    first_seed: &[bool],
+    second_seed: &[bool],
+    width: usize,
+) -> Vec<bool> {
+    let count = component.len();
+    let source = count;
+    let sink = count + 1;
+    let node_count = count + 2;
+    let mut lookup = HashMap::<usize, usize>::with_capacity(count);
+    for (local, &index) in component.iter().enumerate() {
+        lookup.insert(index, local);
+    }
+
+    // Recreate DiGraph insertion order first, then build its residual graph.
+    // The value-only highest-label preflow used by NetworkX intentionally
+    // leaves a preflow rather than converting it to a feasible max flow, so
+    // residual edge order is observable when equal cuts exist.
+    let mut authored = vec![Vec::<(usize, f64)>::new(); node_count];
+    let mut node_order = Vec::<usize>::with_capacity(node_count);
+    let mut seen = vec![false; node_count];
+    let hard = 1_000_000.0_f64;
+    for (local, &index) in component.iter().enumerate() {
+        let value = alpha[local].clamp(0.0, 1.0) as f64;
+        add_authored_edge(
+            &mut authored,
+            &mut node_order,
+            &mut seen,
+            source,
+            local,
+            if first_seed[index] {
+                hard
+            } else {
+                value * value
+            },
+        );
+        add_authored_edge(
+            &mut authored,
+            &mut node_order,
+            &mut seen,
+            local,
+            sink,
+            if second_seed[index] {
+                hard
+            } else {
+                (1.0 - value) * (1.0 - value)
+            },
+        );
+        let x = index % width;
+        for neighbour in [Some(index + width), (x + 1 < width).then_some(index + 1)]
+            .into_iter()
+            .flatten()
+        {
+            if let Some(&other) = lookup.get(&neighbour) {
+                add_authored_edge(
+                    &mut authored,
+                    &mut node_order,
+                    &mut seen,
+                    local,
+                    other,
+                    0.15,
+                );
+                add_authored_edge(
+                    &mut authored,
+                    &mut node_order,
+                    &mut seen,
+                    other,
+                    local,
+                    0.15,
+                );
+            }
+        }
+    }
+    let mut graph = vec![Vec::<PreflowEdge>::new(); node_count];
+    for &from in &node_order {
+        for &(to, capacity) in &authored[from] {
+            if capacity > 0.0 {
+                add_preflow_pair(&mut graph, from, to, capacity);
+            }
+        }
+    }
+
+    let initial = preflow_reverse_bfs(&graph, sink);
+    if initial[source].is_none() {
+        return vec![true; count];
+    }
+    let n = graph.len();
+    let mut heights: Vec<usize> = initial
+        .iter()
+        .map(|height| height.unwrap_or(n + 1))
+        .collect();
+    let mut max_height = heights
+        .iter()
+        .enumerate()
+        .filter(|&(node, _)| node != source)
+        .map(|(_, &height)| height)
+        .filter(|&height| height <= n)
+        .max()
+        .unwrap_or(0);
+    heights[source] = n;
+    let mut current_edge = vec![0_usize; n];
+    let mut excess = vec![0.0_f64; n];
+    let mut levels = vec![PreflowLevel::default(); 2 * n + 2];
+    for edge_index in 0..graph[source].len() {
+        let capacity = graph[source][edge_index].capacity;
+        if capacity > 0.0 {
+            preflow_push(&mut graph, &mut excess, source, edge_index, capacity);
+        }
+    }
+    rebuild_preflow_levels(&mut levels, &heights, &excess, source, sink);
+    let edge_count: usize = graph.iter().map(Vec::len).sum();
+    let threshold = n + edge_count;
+    let mut work = 0_usize;
+    let mut height = max_height;
+    while height > 0 {
+        let Some(&node) = levels[height].active.iter().next() else {
+            height -= 1;
+            continue;
+        };
+        let old_height = height;
+        levels[height].active.remove(&node);
+        loop {
+            let edge_index = current_edge[node];
+            let to = graph[node][edge_index].to;
+            if heights[node] == heights[to] + 1
+                && graph[node][edge_index].flow < graph[node][edge_index].capacity
+            {
+                let amount = excess[node]
+                    .min(graph[node][edge_index].capacity - graph[node][edge_index].flow);
+                preflow_push(&mut graph, &mut excess, node, edge_index, amount);
+                if to != source && to != sink && levels[heights[to]].inactive.remove(&to) {
+                    levels[heights[to]].active.insert(to);
+                }
+                if excess[node] == 0.0 {
+                    levels[heights[node]].inactive.insert(node);
+                    break;
+                }
+            }
+            current_edge[node] += 1;
+            if current_edge[node] == graph[node].len() {
+                current_edge[node] = 0;
+                work += graph[node].len();
+                heights[node] = graph[node]
+                    .iter()
+                    .filter(|edge| edge.flow < edge.capacity)
+                    .map(|edge| heights[edge.to])
+                    .min()
+                    .expect("residual neighbour")
+                    + 1;
+                if heights[node] >= n - 1 {
+                    levels[heights[node]].active.insert(node);
+                    break;
+                }
+                height = heights[node];
+            }
+        }
+
+        if work >= threshold {
+            let relabelled = preflow_reverse_bfs(&graph, sink);
+            max_height = relabelled.iter().flatten().copied().max().unwrap_or(0);
+            for node in 0..n {
+                if let Some(new_height) = relabelled[node] {
+                    if node != sink {
+                        heights[node] = new_height;
+                    }
+                } else if heights[node] < n {
+                    heights[node] = n + 1;
+                }
+            }
+            rebuild_preflow_levels(&mut levels, &heights, &excess, source, sink);
+            height = max_height;
+            work = 0;
+        } else if levels[old_height].active.is_empty() && levels[old_height].inactive.is_empty() {
+            for node in 0..n {
+                if heights[node] > old_height && heights[node] <= max_height {
+                    heights[node] = n + 1;
+                }
+            }
+            rebuild_preflow_levels(&mut levels, &heights, &excess, source, sink);
+            height = old_height - 1;
+            max_height = height;
+        } else {
+            max_height = max_height.max(height);
+        }
+    }
+
+    let reaches_sink = preflow_reaches_sink_after_saturated_removal(&graph, sink);
+    let assignment: Vec<bool> = (0..count).map(|node| !reaches_sink[node]).collect();
+    if let Ok(path) = std::env::var("PICVEC_PREFLOW_GRAPH_DIAGNOSTIC") {
+        let diagnostic_index = 911_usize.saturating_mul(width).saturating_add(383);
+        if component.contains(&diagnostic_index) {
+            let adjacency: Vec<Vec<(usize, f64, f64)>> = graph
+                .iter()
+                .map(|edges| {
+                    edges
+                        .iter()
+                        .map(|edge| (edge.to, edge.capacity, edge.flow))
+                        .collect()
+                })
+                .collect();
+            let value = serde_json::json!({
+                "node_order": node_order,
+                "adjacency": adjacency,
+                "heights": heights,
+                "excess": excess,
+                "assignment": assignment,
+            });
+            let _ = std::fs::write(path, serde_json::to_vec(&value).unwrap_or_default());
+        }
+    }
+    assignment
+}
+
 fn add_flow_edge(graph: &mut [Vec<FlowEdge>], from: usize, to: usize, capacity: f64) {
     let forward_reverse = graph[to].len();
     let reverse_reverse = graph[from].len();
@@ -781,6 +1177,27 @@ fn add_flow_edge(graph: &mut [Vec<FlowEdge>], from: usize, to: usize, capacity: 
         to: from,
         reverse: reverse_reverse,
         capacity: 0.0,
+    });
+}
+
+fn add_bidirectional_flow_edge(
+    graph: &mut [Vec<FlowEdge>],
+    first: usize,
+    second: usize,
+    first_capacity: f64,
+    second_capacity: f64,
+) {
+    let first_reverse = graph[second].len();
+    let second_reverse = graph[first].len();
+    graph[first].push(FlowEdge {
+        to: second,
+        reverse: first_reverse,
+        capacity: first_capacity,
+    });
+    graph[second].push(FlowEdge {
+        to: first,
+        reverse: second_reverse,
+        capacity: second_capacity,
     });
 }
 
@@ -872,8 +1289,12 @@ fn graph_cut_assignment(
             .flatten()
         {
             if let Some(&other) = lookup.get(&neighbour) {
-                add_flow_edge(&mut graph, local, other, 0.15);
-                add_flow_edge(&mut graph, other, local, 0.15);
+                // NetworkX represents the two authored directed edges as one
+                // residual edge pair with capacity in both directions.  Two
+                // independent forward/reverse pairs have the same nominal
+                // cut energy but a different residual plateau and therefore
+                // choose a different owner when several minimum cuts tie.
+                add_bidirectional_flow_edge(&mut graph, local, other, 0.15, 0.15);
             }
         }
     }
@@ -1171,8 +1592,37 @@ fn correct_antialias_partition(
         {
             continue;
         }
-        let first_assignment =
-            graph_cut_assignment(component, &alpha, &first_seed, &second_seed, image.width);
+        let first_assignment = networkx_preflow_cut_assignment(
+            component,
+            &alpha,
+            &first_seed,
+            &second_seed,
+            image.width,
+        );
+        if let Ok(path) = std::env::var("PICVEC_ANTIALIAS_DIAGNOSTIC") {
+            let diagnostic_index = 911_usize.saturating_mul(image.width).saturating_add(383);
+            if component.contains(&diagnostic_index) {
+                let coordinates: Vec<[usize; 2]> = component
+                    .iter()
+                    .map(|&index| [index / image.width, index % image.width])
+                    .collect();
+                let first_seed_values: Vec<bool> =
+                    component.iter().map(|&index| first_seed[index]).collect();
+                let second_seed_values: Vec<bool> =
+                    component.iter().map(|&index| second_seed[index]).collect();
+                let value = serde_json::json!({
+                    "label": label,
+                    "first": first,
+                    "second": second,
+                    "coordinates": coordinates,
+                    "alpha": alpha,
+                    "first_seed": first_seed_values,
+                    "second_seed": second_seed_values,
+                    "assignment": first_assignment,
+                });
+                let _ = std::fs::write(path, serde_json::to_vec(&value).unwrap_or_default());
+            }
+        }
         let first_count = first_assignment.iter().filter(|&&value| value).count();
         if first_count == 0 || first_count == component.len() {
             continue;
@@ -1189,10 +1639,14 @@ fn correct_antialias_partition(
         split_regions += 1;
     }
     let mut compact_map = vec![u32::MAX; count];
-    let mut next = 0_u32;
+    let mut present = vec![false; count];
     for &label in &corrected {
-        if compact_map[label as usize] == u32::MAX {
-            compact_map[label as usize] = next;
+        present[label as usize] = true;
+    }
+    let mut next = 0_u32;
+    for (label, &is_present) in present.iter().enumerate() {
+        if is_present {
+            compact_map[label] = next;
             next += 1;
         }
     }
@@ -1215,6 +1669,19 @@ pub fn segment(image: &Raster, roles: &EdgeRoles, config: &Config) -> Segmentati
     let maximum_area = effective_minimum_area(config, image.width, image.height);
     let local_area = local_area_map(roles, config, maximum_area);
     let (mut palette_map, palette_lab, histogram_cells) = build_palette(&source_lab, config);
+    if let Ok(prefix) = std::env::var("PICVEC_PIPELINE_DIAGNOSTICS") {
+        let mut bytes = Vec::with_capacity(palette_map.len() * 4);
+        for &palette in &palette_map {
+            bytes.extend_from_slice(&palette.to_le_bytes());
+        }
+        let _ = std::fs::write(
+            format!(
+                "{prefix}-palette-map-{}x{}.u32le",
+                image.width, image.height
+            ),
+            bytes,
+        );
+    }
     let (_, initial_count) = compact_connected(&palette_map, image.width, image.height);
     // The reference pass visits palette owners in stable palette order and
     // updates later owners' bounds as pixels move.  Repeating the complete
@@ -1264,6 +1731,7 @@ pub fn segment(image: &Raster, roles: &EdgeRoles, config: &Config) -> Segmentati
         width: image.width,
         height: image.height,
         labels,
+        paint_keys: (0..count as u32).collect(),
         paint_samples: correction.paint_samples,
         canonical,
         regions,
@@ -1325,6 +1793,7 @@ pub(crate) fn replace_merged_labels(
     let (labels, count) = compact_values(&labels);
     let canonical = region_mean_raster_for(&segmentation.canonical, &labels, count);
     segmentation.labels = labels;
+    segmentation.paint_keys = (0..count as u32).collect();
     segmentation.canonical = canonical;
     segmentation.regions = region_stats(image, &segmentation.labels, count);
     segmentation.summary.merged_regions = count;
@@ -1354,16 +1823,24 @@ pub fn split_adaptive_paint_patches(
     let median_labs: Vec<Lab> = pixels
         .iter()
         .map(|indices| {
-            let selected: Vec<usize> = indices
+            let mut selected: Vec<usize> = indices
                 .iter()
                 .copied()
                 .filter(|&index| segmentation.paint_samples[index])
                 .collect();
-            let selected = if selected.is_empty() {
-                indices
-            } else {
-                &selected
-            };
+            if selected.is_empty() {
+                selected.extend(indices.iter().copied());
+            }
+            if selected.len() > 1_024 {
+                let last = (selected.len() - 1) as f64;
+                let sampled = (0..1_024)
+                    .map(|sample| {
+                        let position = (last * sample as f64 / 1_023.0).floor() as usize;
+                        selected[position]
+                    })
+                    .collect();
+                selected = sampled;
+            }
             let channel_median = |channel: usize| {
                 let mut values: Vec<f32> = selected
                     .iter()
@@ -1374,7 +1851,14 @@ pub fn split_adaptive_paint_patches(
                     })
                     .collect();
                 values.sort_by(f32::total_cmp);
-                values.get(values.len() / 2).copied().unwrap_or(0.0)
+                let middle = values.len() / 2;
+                if values.is_empty() {
+                    0.0
+                } else if values.len() % 2 == 0 {
+                    (values[middle - 1] + values[middle]) * 0.5
+                } else {
+                    values[middle]
+                }
             };
             Lab {
                 l: channel_median(0),
@@ -1383,49 +1867,120 @@ pub fn split_adaptive_paint_patches(
             }
         })
         .collect();
-    let mut boundaries = HashMap::<(usize, usize), Vec<f32>>::new();
+    // `_smooth_paint_boundaries` first appends all horizontal interfaces,
+    // then all vertical interfaces, and stable-sorts them by label pair.
+    // Keep the boundary cell as well as its source error: one pair can meet
+    // in distant places and Python classifies each eight-connected run
+    // independently rather than pooling them into one percentile.
+    let mut boundaries = BTreeMap::<(usize, usize), Vec<(usize, f32)>>::new();
     for y in 0..segmentation.height {
+        for x in 0..segmentation.width.saturating_sub(1) {
+            let index = y * segmentation.width + x;
+            let neighbour = index + 1;
+            let first = segmentation.labels[index] as usize;
+            let second = segmentation.labels[neighbour] as usize;
+            if first != second {
+                let key = if first < second {
+                    (first, second)
+                } else {
+                    (second, first)
+                };
+                boundaries.entry(key).or_default().push((
+                    index,
+                    delta_e2000(boundary_lab[index], boundary_lab[neighbour]),
+                ));
+            }
+        }
+    }
+    for y in 0..segmentation.height.saturating_sub(1) {
         for x in 0..segmentation.width {
             let index = y * segmentation.width + x;
-            for neighbour in [
-                (x + 1 < segmentation.width).then_some(index + 1),
-                (y + 1 < segmentation.height).then_some(index + segmentation.width),
-            ]
-            .into_iter()
-            .flatten()
-            {
-                let first = segmentation.labels[index] as usize;
-                let second = segmentation.labels[neighbour] as usize;
-                if first != second {
-                    let key = if first < second {
-                        (first, second)
-                    } else {
-                        (second, first)
-                    };
-                    boundaries
-                        .entry(key)
-                        .or_default()
-                        .push(delta_e2000(boundary_lab[index], boundary_lab[neighbour]));
-                }
+            let neighbour = index + segmentation.width;
+            let first = segmentation.labels[index] as usize;
+            let second = segmentation.labels[neighbour] as usize;
+            if first != second {
+                let key = if first < second {
+                    (first, second)
+                } else {
+                    (second, first)
+                };
+                boundaries.entry(key).or_default().push((
+                    index,
+                    delta_e2000(boundary_lab[index], boundary_lab[neighbour]),
+                ));
             }
         }
     }
     let mut candidates = HashSet::<usize>::new();
-    for ((first, second), mut deltas) in boundaries {
-        if deltas.len() < 8 {
-            continue;
+    let mut candidate_runs = 0_usize;
+    let mut adaptive_run_diagnostics = Vec::new();
+    for ((first, second), samples) in boundaries {
+        let mut by_cell = BTreeMap::<usize, Vec<f32>>::new();
+        for (cell, error) in samples {
+            by_cell.entry(cell).or_default().push(error);
         }
-        let p90 = percentile(deltas.clone(), 0.90);
-        let median_delta = {
+        let cells: HashSet<usize> = by_cell.keys().copied().collect();
+        let mut seen = HashSet::<usize>::new();
+        for &start in by_cell.keys() {
+            if !seen.insert(start) {
+                continue;
+            }
+            let mut queue = VecDeque::from([start]);
+            let mut deltas = Vec::<f32>::new();
+            while let Some(cell) = queue.pop_front() {
+                deltas.extend(by_cell[&cell].iter().copied());
+                let x = cell % segmentation.width;
+                let y = cell / segmentation.width;
+                for dy in -1_isize..=1 {
+                    for dx in -1_isize..=1 {
+                        if dx == 0 && dy == 0 {
+                            continue;
+                        }
+                        let nx = x as isize + dx;
+                        let ny = y as isize + dy;
+                        if nx < 0
+                            || ny < 0
+                            || nx >= segmentation.width as isize
+                            || ny >= segmentation.height as isize
+                        {
+                            continue;
+                        }
+                        let neighbour = ny as usize * segmentation.width + nx as usize;
+                        if cells.contains(&neighbour) && seen.insert(neighbour) {
+                            queue.push_back(neighbour);
+                        }
+                    }
+                }
+            }
+            if deltas.len() < 8 {
+                continue;
+            }
             deltas.sort_by(f32::total_cmp);
-            deltas[deltas.len() / 2]
-        };
-        if median_delta <= 1.5
-            && p90 <= 3.0
-            && delta_e2000(median_labs[first], median_labs[second]) >= 0.75
-        {
-            candidates.insert(first);
-            candidates.insert(second);
+            let middle = deltas.len() / 2;
+            let median_delta = if deltas.len() % 2 == 0 {
+                (deltas[middle - 1] + deltas[middle]) * 0.5
+            } else {
+                deltas[middle]
+            };
+            let p90 = percentile_f64(&deltas, 0.90);
+            if median_delta <= 1.5 && p90 <= 3.0 {
+                let separation = delta_e2000(median_labs[first], median_labs[second]);
+                adaptive_run_diagnostics.push(serde_json::json!({
+                    "left": first,
+                    "right": second,
+                    "length": deltas.len(),
+                    "median": median_delta,
+                    "p90": p90,
+                    "separation": separation,
+                    "left_lab": [median_labs[first].l, median_labs[first].a, median_labs[first].b],
+                    "right_lab": [median_labs[second].l, median_labs[second].a, median_labs[second].b],
+                }));
+                if separation >= 0.75 {
+                    candidates.insert(first);
+                    candidates.insert(second);
+                    candidate_runs += 1;
+                }
+            }
         }
     }
     let mut border_counts = vec![0_usize; count];
@@ -1439,13 +1994,38 @@ pub fn split_adaptive_paint_patches(
         border_counts
             [segmentation.labels[y * segmentation.width + segmentation.width - 1] as usize] += 1;
     }
-    if let Some((background, _)) = border_counts.iter().enumerate().max_by_key(|value| value.1) {
+    if let Some(background) = border_counts
+        .iter()
+        .enumerate()
+        .fold(None, |best, (label, &area)| match best {
+            Some((_, best_area)) if best_area >= area => best,
+            _ => Some((label, area)),
+        })
+        .map(|(label, _)| label)
+    {
         candidates.remove(&background);
     }
+    if let Ok(path) = std::env::var("PICVEC_ADAPTIVE_DIAGNOSTICS") {
+        let mut candidate_labels: Vec<usize> = candidates.iter().copied().collect();
+        candidate_labels.sort_unstable();
+        let value = serde_json::json!({
+            "runs": adaptive_run_diagnostics,
+            "candidate_runs": candidate_runs,
+            "candidates": candidate_labels,
+        });
+        let _ = std::fs::write(path, serde_json::to_vec_pretty(&value).unwrap_or_default());
+    }
     let candidate_count = candidates.len();
-    let patch_span =
-        128_usize.max((0.20 * segmentation.width.max(segmentation.height) as f32).round() as usize);
+    let patch_span = 128_usize.max(
+        (0.20 * segmentation.width.max(segmentation.height) as f64).round_ties_even() as usize,
+    );
+    let source_paint_keys = if segmentation.paint_keys.len() == count {
+        segmentation.paint_keys.clone()
+    } else {
+        (0..count as u32).collect()
+    };
     let mut output = vec![u32::MAX; segmentation.labels.len()];
+    let mut output_paint_keys = Vec::<u32>::new();
     let mut next_label = 0_u32;
     let mut split_faces = 0_usize;
     let mut added_regions = 0_usize;
@@ -1491,8 +2071,8 @@ pub fn split_adaptive_paint_patches(
                 axis.sort_unstable();
                 let mut thresholds = Vec::<usize>::new();
                 for part in 1..part_count {
-                    let position = ((axis.len() - 1) as f32 * part as f32 / part_count as f32)
-                        .round() as usize;
+                    let position = ((axis.len() - 1) as f64 * part as f64 / part_count as f64)
+                        .round_ties_even() as usize;
                     let value = axis[position];
                     if thresholds.last().copied() != Some(value) {
                         thresholds.push(value);
@@ -1505,7 +2085,7 @@ pub fn split_adaptive_paint_patches(
                     } else {
                         index / segmentation.width
                     };
-                    let bin = thresholds.partition_point(|&threshold| threshold < coordinate);
+                    let bin = thresholds.partition_point(|&threshold| threshold <= coordinate);
                     bins[bin].push(index);
                 }
                 for bin in bins {
@@ -1554,6 +2134,7 @@ pub fn split_adaptive_paint_patches(
             for index in piece {
                 output[index] = next_label;
             }
+            output_paint_keys.push(source_paint_keys[label]);
             next_label += 1;
         }
     }
@@ -1562,11 +2143,28 @@ pub fn split_adaptive_paint_patches(
         return;
     }
     segmentation.labels = output;
+    segmentation.paint_keys = output_paint_keys;
     segmentation.regions = region_stats(image, &segmentation.labels, next_label as usize);
     segmentation.summary.merged_regions = next_label as usize;
     segmentation.summary.adaptive_patch_candidate_faces = candidate_count;
     segmentation.summary.adaptive_patch_split_faces = split_faces;
     segmentation.summary.adaptive_patch_added_regions = added_regions;
+    let _ = candidate_runs;
+}
+
+fn percentile_f64(sorted: &[f32], quantile: f64) -> f64 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    let position = quantile.clamp(0.0, 1.0) * (sorted.len() - 1) as f64;
+    let low = position.floor() as usize;
+    let high = position.ceil() as usize;
+    if low == high {
+        sorted[low] as f64
+    } else {
+        let amount = position - low as f64;
+        sorted[low] as f64 * (1.0 - amount) + sorted[high] as f64 * amount
+    }
 }
 
 /// Remove palette-only boundary staircases while preserving measured source

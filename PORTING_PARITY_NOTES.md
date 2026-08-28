@@ -217,6 +217,19 @@ and unsupported dark regions.
     of this information through segmentation barriers and a later structural
     layer.  Port these ownership stages directly before claiming full parity.
 
+8. **Backend-independent numerical kernels.** Exact parity currently requires
+   NumPy 2.4.4's CPU-dispatched float32 `pow`, `cbrt`, `atan2`, `exp`, and
+   reduction order. After parity is established, define and test a canonical
+   colour-math backend so results do not depend on the host NumPy/SVML dispatch.
+   This is intentionally not being changed during the parity pass.
+
+9. **Batched merge colour conversion.** The reference evaluates Paint errors
+   over contiguous arrays. The direct Rust port now preserves that operation
+   shape, but repeatedly allocates temporary RGB/Lab buffers per proposal.
+   Reusable per-worker buffers or a fused exact kernel could remove this cost;
+   defer it until SVG byte parity tests prove that allocation/order changes do
+   not alter any fitted Paint or merge decision.
+
 ## Geometry defect found during the port
 
 The former Rust implementation fitted a long master Bezier and then cut it at
@@ -245,3 +258,53 @@ timeout 180s nice -n 10 target/release/picvec \
 For every accepted change, record both the intermediate-count movement and a
 native-size render comparison.  A lower global mean error is not sufficient
 if a source-supported thin feature becomes disconnected.
+
+## Deferred improvements found during exact-parity work
+
+- **Canonical graph-cut saturation.** `networkx.minimum_cut` removes a
+  residual edge only when `flow == capacity`. In the car AA partition, the
+  value-only preflow leaves one edge at `0.15000000000000002` for a capacity
+  of `0.15`; NetworkX therefore treats that over-capacity edge as traversable
+  and selects a different member of an equal-cut plateau. A tolerance-based
+  saturation test or a canonical feasible-max-flow partition would be more
+  numerically robust, but it would change the Python reference result. The
+  Rust port intentionally preserves the reference behaviour; make any such
+  change in both implementations only after parity is complete and add an
+  explicit plateau regression test.
+
+- **Stable Lab histogram cells.** The current one-unit Lab histogram uses
+  raw `rint` at half-integer boundaries. Sub-ulp differences between NumPy's
+  vector colour math and scalar Rust colour math can move a handful of pixels
+  to another cell and cascade through palette representative updates. A
+  tolerance-aware or fixed-point cell definition would make the algorithm
+  portable across math backends, but changing that definition is a quality
+  improvement rather than a faithful port and is deliberately deferred.
+
+- **Math-backend-independent RAG priority.** Paint-merge proposals with an
+  error around `1e-5` can become exact zero under scalar float32 colour math.
+  The reference resolves equal heap scores by scikit-image RAG insertion
+  order, so a numerically insignificant difference may change later merge
+  availability. Quantizing the priority below a documented epsilon and using
+  an explicit topology-derived tie key would be more portable, but it would
+  change Python's present queue order. The port therefore preserves the RAG
+  order and leaves priority stabilization for a coordinated post-parity
+  change.
+
+- **High-region-count segmentation cost.** The current exact native run of
+  `viewport2.jpg` selects 1600 x 1067, produces 77,884 regions, and takes
+  566.182 s; the 300 s bounded run stopped while still in segmentation. The
+  earlier approximate implementation completed the same sample much faster,
+  so allocation reuse, indexed neighbourhood updates, and exact-result
+  batching should be profiled specifically on this case. Do not change merge
+  order or reduce the automatically selected input size merely to improve the
+  timing; guard any optimization with label, Paint, and rendered-SVG parity.
+
+- **Decision stability after millipixel formatting.** On the final car
+  comparison, sub-millipixel numerical differences leave the same 1,787 paths,
+  67 lines, 252 linear gradients, and 68 radial gradients, but can change a
+  few equivalent optimizer choices (straight cubic versus `L`, cubic versus
+  analytic arc) and retain one extra Office gradient stop. Canonicalizing
+  decision inputs at the SVG formatting precision would make the output more
+  backend-stable, but it would change the current Python reference thresholds.
+  Apply such stabilization to both implementations only after parity and add
+  command/stop-count regression coverage.

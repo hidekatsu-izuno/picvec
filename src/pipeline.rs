@@ -20,8 +20,8 @@ use crate::segment::{
     SegmentationSummary,
 };
 use crate::structural::{
-    analyse as analyse_structural, select_missing as select_missing_structural, StructuralInk,
-    StructuralSummary,
+    analyse as analyse_structural, select_missing_with_junctions as select_missing_structural,
+    StructuralInk, StructuralSummary,
 };
 use crate::svg::{write as write_svg, SvgSummary};
 use crate::{Error, Result};
@@ -101,6 +101,15 @@ fn save_label_diagnostic(name: &str, labels: &[u32], width: usize, height: usize
     }
     let path = PathBuf::from(format!("{prefix}-{name}-{width}x{height}.u32le"));
     let _ = fs::write(path, bytes);
+}
+
+fn save_mask_diagnostic(name: &str, mask: &[bool], width: usize, height: usize) {
+    let Ok(prefix) = std::env::var("PICVEC_PIPELINE_DIAGNOSTICS") else {
+        return;
+    };
+    let values: Vec<u8> = mask.iter().map(|&value| u8::from(value)).collect();
+    let path = PathBuf::from(format!("{prefix}-{name}-{width}x{height}.u8"));
+    let _ = fs::write(path, values);
 }
 
 fn estimate_dimension(image: &Raster, config: &Config) -> ComplexityProbe {
@@ -311,16 +320,81 @@ pub fn vectorize(input: &Path, output: &Path, config: &Config) -> Result<Summary
         }
     };
     let processing = input_image.resize_max(complexity.selected_dimension.max(64));
+    save_pipeline_diagnostic("source", &processing);
     report_progress(config, "load-resize", started, &mut checkpoint);
     let mut roles = classify(&processing);
+    save_mask_diagnostic(
+        "edge-boundary",
+        &roles.boundary,
+        processing.width,
+        processing.height,
+    );
+    save_mask_diagnostic(
+        "edge-visible-ridge-centres",
+        &roles.visible_ridge_centres,
+        processing.width,
+        processing.height,
+    );
+    save_mask_diagnostic(
+        "edge-visible-ridge-coverage",
+        &roles.visible_ridge_coverage,
+        processing.width,
+        processing.height,
+    );
+    save_mask_diagnostic(
+        "edge-dark-boundary-coverage",
+        &roles.dark_boundary,
+        processing.width,
+        processing.height,
+    );
+    save_mask_diagnostic(
+        "edge-shading",
+        &roles.shading,
+        processing.width,
+        processing.height,
+    );
+    save_mask_diagnostic(
+        "edge-face-barrier",
+        &roles.face_barrier,
+        processing.width,
+        processing.height,
+    );
     report_progress(config, "edge-roles", started, &mut checkpoint);
     let (paint_reference, structural_candidates) = analyse_structural(&processing, &mut roles);
+    save_mask_diagnostic(
+        "paint-ownership",
+        &structural_candidates.paint_ownership_mask,
+        processing.width,
+        processing.height,
+    );
     save_pipeline_diagnostic("underpaint", &paint_reference);
     report_progress(config, "structural-analysis", started, &mut checkpoint);
     let smoothed = perceptual_smooth(&paint_reference, config);
     save_pipeline_diagnostic("smoothed", &smoothed);
+    if std::env::var_os("PICVEC_PIPELINE_DIAGNOSTICS").is_some() {
+        let smoothed_lab = Raster::new(
+            smoothed.width,
+            smoothed.height,
+            smoothed
+                .pixels
+                .iter()
+                .copied()
+                .map(|pixel| {
+                    let lab = rgb_to_lab(pixel);
+                    [lab.l, lab.a, lab.b]
+                })
+                .collect(),
+        );
+        save_pipeline_diagnostic("smoothed-lab", &smoothed_lab);
+    }
     report_progress(config, "perceptual-smoothing", started, &mut checkpoint);
     let mut segmentation = segment(&smoothed, &roles, config);
+    save_mask_diagnostic(
+        "paint-samples",
+        &segmentation.paint_samples,
+        processing.width,
+        processing.height,
+    );
     save_label_diagnostic(
         "segmented-labels",
         &segmentation.labels,
@@ -355,14 +429,16 @@ pub fn vectorize(input: &Path, output: &Path, config: &Config) -> Result<Summary
         processing.width,
         processing.height,
     );
+    save_pipeline_diagnostic("regularized-canonical", &segmentation.canonical);
     report_progress(config, "boundary-regularization", started, &mut checkpoint);
     merge_partition(
         &paint_reference,
-        &processing,
+        &geometry_edge_reference,
         &mut segmentation,
         &roles,
         config,
     );
+    save_pipeline_diagnostic("pre-thin-canonical", &segmentation.canonical);
     save_label_diagnostic(
         "merged-labels",
         &segmentation.labels,
@@ -375,12 +451,32 @@ pub fn vectorize(input: &Path, output: &Path, config: &Config) -> Result<Summary
         &mut segmentation,
         &structural_candidates.paint_ownership_mask,
     );
+    save_label_diagnostic(
+        "thin-labels",
+        &segmentation.labels,
+        processing.width,
+        processing.height,
+    );
     report_progress(config, "thin-paint-ownership", started, &mut checkpoint);
+    segmentation.paint_samples =
+        crate::ridge::adjust_paint_samples(&segmentation.canonical, &segmentation.paint_samples);
+    save_mask_diagnostic(
+        "fitted-paint-samples",
+        &segmentation.paint_samples,
+        processing.width,
+        processing.height,
+    );
     split_adaptive_paint_patches(&paint_reference, &processing, &mut segmentation);
+    save_label_diagnostic(
+        "final-labels",
+        &segmentation.labels,
+        processing.width,
+        processing.height,
+    );
     report_progress(config, "adaptive-paint-patches", started, &mut checkpoint);
     let (geometry, geometry_report) = build_geometry(&segmentation);
     report_progress(config, "shared-geometry", started, &mut checkpoint);
-    let (paints, gradient_report) = fit_all(&paint_reference, &segmentation, config);
+    let (paints, gradient_report) = fit_all(&paint_reference, &processing, &segmentation, config);
     report_progress(config, "paint-fitting", started, &mut checkpoint);
     let paint_render = render_svg_preview(
         output,
@@ -393,8 +489,12 @@ pub fn vectorize(input: &Path, output: &Path, config: &Config) -> Result<Summary
     )?;
     report_progress(config, "paint-preview", started, &mut checkpoint);
     let optimization = optimization_summary(&geometry, &paints, &geometry_report);
-    let residual_structural =
-        select_missing_structural(&processing, &paint_render, &structural_candidates);
+    let residual_structural = select_missing_structural(
+        &processing,
+        &paint_render,
+        &structural_candidates,
+        &geometry_report.paint_junctions,
+    );
     report_progress(config, "structural-selection", started, &mut checkpoint);
     let residual_render = render_svg_preview(
         output,

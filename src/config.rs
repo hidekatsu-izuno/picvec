@@ -9,7 +9,7 @@ pub struct Config {
     pub auto_minimum_dimension: u32,
     pub auto_maximum_dimension: u32,
     pub smoothing_radius: u32,
-    pub smoothing_spatial_sigma: f32,
+    pub smoothing_spatial_sigma: f64,
     pub smoothing_dark_delta_e: f32,
     pub smoothing_light_delta_e: f32,
     pub dark_knee_lstar: f32,
