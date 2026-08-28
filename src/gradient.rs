@@ -3209,78 +3209,81 @@ fn harmonize_adjacent_paints(
                     .push(boundary);
             }
         }
-        let mut proposals = Vec::<HarmonizeProposal>::new();
-        for ((left_owner, right_owner), shared) in grouped {
-            let mut union_labels: Vec<usize> = members[&left_owner]
-                .union(&members[&right_owner])
-                .copied()
-                .collect();
-            union_labels.sort_unstable();
-            if union_labels.len() > 8 {
-                continue;
-            }
-            let mut union_samples = Vec::<usize>::new();
-            for &label in &union_labels {
-                union_samples.extend_from_slice(&label_samples[label]);
-            }
-            union_samples = sampled_indices(&union_samples, 8192);
-            let Some((candidate, _)) = office_gradient_candidate(
-                source,
-                &source_labs,
-                &union_samples,
-                bounds(&union_samples, source.width),
-                config.maximum_gradient_stops,
-            ) else {
-                continue;
-            };
-            let mut baseline_errors = Vec::<f32>::new();
-            for &label in &union_labels {
-                baseline_errors.extend(errors_for_indices(
+        let mut proposals: Vec<HarmonizeProposal> = grouped
+            .into_iter()
+            .collect::<Vec<_>>()
+            .into_par_iter()
+            .filter_map(|((left_owner, right_owner), shared)| {
+                let mut union_labels: Vec<usize> = members[&left_owner]
+                    .union(&members[&right_owner])
+                    .copied()
+                    .collect();
+                union_labels.sort_unstable();
+                if union_labels.len() > 8 {
+                    return None;
+                }
+                let mut union_samples = Vec::<usize>::new();
+                for &label in &union_labels {
+                    union_samples.extend_from_slice(&label_samples[label]);
+                }
+                union_samples = sampled_indices(&union_samples, 8192);
+                let (candidate, _) = office_gradient_candidate(
+                    source,
                     &source_labs,
-                    &label_samples[label],
-                    source.width,
-                    &paints[label],
-                ));
-            }
-            let candidate_errors =
-                errors_for_indices(&source_labs, &union_samples, source.width, &candidate);
-            let baseline_mean = numpy_sum_f32(&baseline_errors) / baseline_errors.len() as f32;
-            let candidate_mean = numpy_sum_f32(&candidate_errors) / candidate_errors.len() as f32;
-            let baseline_p90 = percentile(baseline_errors, 0.90);
-            let candidate_p90 = percentile(candidate_errors, 0.90);
-            let mut seam_errors = Vec::<f32>::new();
-            for boundary in &shared {
-                seam_errors.extend(seam_errors_at_points(
-                    &paints[boundary.left],
-                    &paints[boundary.right],
-                    &boundary.points,
-                ));
-            }
-            let seam_mean = numpy_sum_f32(&seam_errors) / seam_errors.len() as f32;
-            let seam_p90 = percentile(seam_errors, 0.90);
-            if seam_p90 < 0.75 {
-                continue;
-            }
-            let mean_regression = candidate_mean - baseline_mean;
-            let p90_regression = candidate_p90 - baseline_p90;
-            if mean_regression > (0.05 * 2.3_f32).min(0.10 * seam_mean)
-                || p90_regression > 0.10 * 2.3
-            {
-                continue;
-            }
-            let score = mean_regression - 0.10 * seam_mean;
-            if score > 0.0 {
-                continue;
-            }
-            proposals.push(HarmonizeProposal {
-                score,
-                candidate_mean,
-                left_owner,
-                right_owner,
-                paint: candidate,
-                boundary_count: shared.len(),
-            });
-        }
+                    &union_samples,
+                    bounds(&union_samples, source.width),
+                    config.maximum_gradient_stops,
+                )?;
+                let mut baseline_errors = Vec::<f32>::new();
+                for &label in &union_labels {
+                    baseline_errors.extend(errors_for_indices(
+                        &source_labs,
+                        &label_samples[label],
+                        source.width,
+                        &paints[label],
+                    ));
+                }
+                let candidate_errors =
+                    errors_for_indices(&source_labs, &union_samples, source.width, &candidate);
+                let baseline_mean = numpy_sum_f32(&baseline_errors) / baseline_errors.len() as f32;
+                let candidate_mean =
+                    numpy_sum_f32(&candidate_errors) / candidate_errors.len() as f32;
+                let baseline_p90 = percentile(baseline_errors, 0.90);
+                let candidate_p90 = percentile(candidate_errors, 0.90);
+                let mut seam_errors = Vec::<f32>::new();
+                for boundary in &shared {
+                    seam_errors.extend(seam_errors_at_points(
+                        &paints[boundary.left],
+                        &paints[boundary.right],
+                        &boundary.points,
+                    ));
+                }
+                let seam_mean = numpy_sum_f32(&seam_errors) / seam_errors.len() as f32;
+                let seam_p90 = percentile(seam_errors, 0.90);
+                if seam_p90 < 0.75 {
+                    return None;
+                }
+                let mean_regression = candidate_mean - baseline_mean;
+                let p90_regression = candidate_p90 - baseline_p90;
+                if mean_regression > (0.05 * 2.3_f32).min(0.10 * seam_mean)
+                    || p90_regression > 0.10 * 2.3
+                {
+                    return None;
+                }
+                let score = mean_regression - 0.10 * seam_mean;
+                if score > 0.0 {
+                    return None;
+                }
+                Some(HarmonizeProposal {
+                    score,
+                    candidate_mean,
+                    left_owner,
+                    right_owner,
+                    paint: candidate,
+                    boundary_count: shared.len(),
+                })
+            })
+            .collect();
         proposals.sort_by(|left, right| {
             left.score
                 .total_cmp(&right.score)
@@ -4003,12 +4006,13 @@ fn couple_adjacent_paints(
         members.sort_unstable();
         members.dedup();
     }
-    let mut accepted = 0_usize;
     let mut ordered_groups: Vec<Vec<usize>> = groups.into_values().collect();
     ordered_groups.sort_by_key(|members| members[0]);
-    for members in ordered_groups {
+    let paint_snapshot = paints.to_vec();
+    let group_updates = std::sync::Mutex::new(Vec::<Vec<(usize, Paint, f32)>>::new());
+    ordered_groups.par_iter().for_each(|members| {
         if members.len() < 2 {
-            continue;
+            return;
         }
         let boundaries: Vec<&CouplingBoundary> = candidates
             .iter()
@@ -4018,14 +4022,14 @@ fn couple_adjacent_paints(
             })
             .collect();
         if boundaries.is_empty() {
-            continue;
+            return;
         }
-        let mut shared_union = UnionFind::new(paints.len());
+        let mut shared_union = UnionFind::new(paint_snapshot.len());
         for boundary in boundaries.iter().filter(|boundary| boundary.same_paint_key) {
             shared_union.union(boundary.boundary.left, boundary.boundary.right);
         }
         let mut patch_groups = HashMap::<usize, Vec<usize>>::new();
-        for &member in &members {
+        for &member in members {
             let root = shared_union.find(member);
             patch_groups.entry(root).or_default().push(member);
         }
@@ -4070,14 +4074,14 @@ fn couple_adjacent_paints(
             }
         }
         let geometries: Vec<Paint> = members
-            .iter()
+            .par_iter()
             .map(|&member| {
                 shared_geometries.get(&member).cloned().unwrap_or_else(|| {
                     choose_coupled_geometry(
                         source,
                         &source_labs,
                         &data_samples[member],
-                        &paints[member],
+                        &paint_snapshot[member],
                     )
                 })
             })
@@ -4168,7 +4172,7 @@ fn couple_adjacent_paints(
             row[index] += 1e-6;
         }
         let solved: Vec<Vec<f64>> = rhs
-            .into_iter()
+            .into_par_iter()
             .map(|channel| solve_system(normal.clone(), channel))
             .collect();
         let proposed: Vec<Paint> = geometries
@@ -4192,7 +4196,8 @@ fn couple_adjacent_paints(
         for (position, &member) in members.iter().enumerate() {
             let samples = &data_samples[member];
             let weight = region_indices[member].len() as f32 / samples.len().max(1) as f32;
-            let baseline = errors_for_indices(&source_labs, samples, source.width, &paints[member]);
+            let baseline =
+                errors_for_indices(&source_labs, samples, source.width, &paint_snapshot[member]);
             let candidate =
                 errors_for_indices(&source_labs, samples, source.width, &proposed[position]);
             for value in baseline {
@@ -4232,8 +4237,8 @@ fn couple_adjacent_paints(
             let left_position = members.binary_search(&boundary.boundary.left).unwrap();
             let right_position = members.binary_search(&boundary.boundary.right).unwrap();
             before_seams.extend(seam_errors_at_points(
-                &paints[boundary.boundary.left],
-                &paints[boundary.boundary.right],
+                &paint_snapshot[boundary.boundary.left],
+                &paint_snapshot[boundary.boundary.right],
                 &boundary.boundary.points,
             ));
             after_seams.extend(seam_errors_at_points(
@@ -4243,7 +4248,7 @@ fn couple_adjacent_paints(
             ));
         }
         if before_seams.is_empty() {
-            continue;
+            return;
         }
         let before_mean = before_seams.iter().sum::<f32>() / before_seams.len().max(1) as f32;
         let after_mean = after_seams.iter().sum::<f32>() / after_seams.len().max(1) as f32;
@@ -4261,17 +4266,31 @@ fn couple_adjacent_paints(
             && after_p90 <= 2.3_f32.max(0.80 * before_p90)
             && score <= 0.0
         {
-            for (position, &member) in members.iter().enumerate() {
-                paints[member] = proposed[position].clone();
-                errors[member] = paint_stats_against_labs(
-                    &source_labs,
-                    &data_samples[member],
-                    source.width,
-                    &paints[member],
-                )
-                .mean;
-                accepted += 1;
-            }
+            let updates = members
+                .iter()
+                .enumerate()
+                .map(|(position, &member)| {
+                    let paint = proposed[position].clone();
+                    let error = paint_stats_against_labs(
+                        &source_labs,
+                        &data_samples[member],
+                        source.width,
+                        &paint,
+                    )
+                    .mean;
+                    (member, paint, error)
+                })
+                .collect();
+            group_updates.lock().unwrap().push(updates);
+        }
+    });
+    let mut group_updates = group_updates.into_inner().unwrap();
+    group_updates.sort_by_key(|updates| updates.first().map(|value| value.0).unwrap_or(usize::MAX));
+    let accepted = group_updates.iter().map(Vec::len).sum();
+    for updates in group_updates {
+        for (member, paint, error) in updates {
+            paints[member] = paint;
+            errors[member] = error;
         }
     }
     accepted
@@ -4281,10 +4300,11 @@ pub fn fit_all(
     source: &Raster,
     boundary_source: &Raster,
     segmentation: &Segmentation,
+    strong_branches: &crate::ridge::StrongRidgeBranches,
     config: &Config,
 ) -> (Vec<Paint>, GradientSummary) {
+    let fit_started = std::time::Instant::now();
     let source_labs = lab_pixels(source);
-    let strong_branches = crate::ridge::strong_branches(&segmentation.canonical);
     let mut region_indices = vec![Vec::<usize>::new(); segmentation.regions.len()];
     let mut region_paint_indices = vec![Vec::<usize>::new(); segmentation.regions.len()];
     for (index, &label) in segmentation.labels.iter().enumerate() {
@@ -4293,9 +4313,16 @@ pub fn fit_all(
             region_paint_indices[label as usize].push(index);
         }
     }
+    if config.retain_diagnostics {
+        eprintln!(
+            "picvec paint substage setup: {:.3}s",
+            fit_started.elapsed().as_secs_f64()
+        );
+    }
+    let initial_started = std::time::Instant::now();
     let fitted: Vec<(Paint, f32)> = region_indices
-        .iter()
-        .zip(&region_paint_indices)
+        .par_iter()
+        .zip(region_paint_indices.par_iter())
         .enumerate()
         .map(|(label, (indices, paint_indices))| {
             let strong_dark = indices
@@ -4347,12 +4374,19 @@ pub fn fit_all(
             )
         })
         .collect();
+    if config.retain_diagnostics {
+        eprintln!(
+            "picvec paint substage initial: {:.3}s",
+            initial_started.elapsed().as_secs_f64()
+        );
+    }
     let mut paints: Vec<Paint> = fitted.iter().map(|value| value.0.clone()).collect();
     let mut errors: Vec<f32> = fitted.iter().map(|value| value.1).collect();
     if let Ok(prefix) = std::env::var("PICVEC_PAINT_DIAGNOSTICS") {
         save_paint_kinds(&format!("{prefix}-initial.json"), &paints);
         save_paint_details(&format!("{prefix}-initial-details.json"), &paints);
     }
+    let harmonize_started = std::time::Instant::now();
     let coupled = harmonize_adjacent_paints(
         source,
         boundary_source,
@@ -4363,10 +4397,17 @@ pub fn fit_all(
         &mut errors,
         config,
     );
+    if config.retain_diagnostics {
+        eprintln!(
+            "picvec paint substage harmonize: {:.3}s",
+            harmonize_started.elapsed().as_secs_f64()
+        );
+    }
     if let Ok(prefix) = std::env::var("PICVEC_PAINT_DIAGNOSTICS") {
         save_paint_kinds(&format!("{prefix}-harmonized.json"), &paints);
         save_paint_details(&format!("{prefix}-harmonized-details.json"), &paints);
     }
+    let coupling_started = std::time::Instant::now();
     let locally_coupled = couple_adjacent_paints(
         source,
         boundary_source,
@@ -4377,6 +4418,12 @@ pub fn fit_all(
         &mut errors,
         config,
     );
+    if config.retain_diagnostics {
+        eprintln!(
+            "picvec paint substage couple: {:.3}s",
+            coupling_started.elapsed().as_secs_f64()
+        );
+    }
     if let Ok(prefix) = std::env::var("PICVEC_PAINT_DIAGNOSTICS") {
         save_paint_kinds(&format!("{prefix}-coupled.json"), &paints);
         save_paint_details(&format!("{prefix}-coupled-details.json"), &paints);

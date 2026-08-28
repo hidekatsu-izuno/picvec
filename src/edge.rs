@@ -1,6 +1,6 @@
 use rayon::prelude::*;
 use serde::Serialize;
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::color::{delta_e2000, delta_e2000_pairs, delta_e76, lab_pixels_to_rgb, Lab};
 use crate::config::Config;
@@ -2727,21 +2727,58 @@ fn point_tangents(points: &[[f64; 2]]) -> Vec<[f64; 2]> {
         .collect()
 }
 
-fn remove_profile_overlap(candidates: Vec<SourceEdge>, owners: &[SourceEdge]) -> Vec<SourceEdge> {
-    if owners.is_empty() {
-        return candidates;
+const PROFILE_OVERLAP_DISTANCE: f64 = 1.5;
+
+#[derive(Default)]
+struct ProfileOverlapIndex {
+    cells: HashMap<(i32, i32), Vec<([f64; 2], [f64; 2])>>,
+}
+
+impl ProfileOverlapIndex {
+    fn from_edges(edges: &[SourceEdge]) -> Self {
+        let mut index = Self::default();
+        index.insert_edges(edges);
+        index
     }
-    let owner_samples: Vec<([f64; 2], [f64; 2])> = owners
-        .iter()
-        .flat_map(|edge| {
+
+    fn insert_edges(&mut self, edges: &[SourceEdge]) {
+        for edge in edges {
             let tangents = point_tangents(&edge.points);
-            edge.points
-                .iter()
-                .copied()
-                .zip(tangents)
-                .collect::<Vec<_>>()
-        })
-        .collect();
+            for (point, tangent) in edge.points.iter().copied().zip(tangents) {
+                self.cells
+                    .entry((point[0].floor() as i32, point[1].floor() as i32))
+                    .or_default()
+                    .push((point, tangent));
+            }
+        }
+    }
+
+    fn overlaps(&self, point: [f64; 2], tangent: [f64; 2], cosine: f64) -> bool {
+        let cell_x = point[0].floor() as i32;
+        let cell_y = point[1].floor() as i32;
+        for dy in -2..=2 {
+            for dx in -2..=2 {
+                let Some(samples) = self.cells.get(&(cell_x + dx, cell_y + dy)) else {
+                    continue;
+                };
+                if samples.iter().any(|(owner_point, owner_tangent)| {
+                    (point[0] - owner_point[0]).hypot(point[1] - owner_point[1])
+                        <= PROFILE_OVERLAP_DISTANCE
+                        && (tangent[0] * owner_tangent[0] + tangent[1] * owner_tangent[1]).abs()
+                            >= cosine
+                }) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+}
+
+fn remove_profile_overlap_indexed(
+    candidates: Vec<SourceEdge>,
+    owners: &ProfileOverlapIndex,
+) -> Vec<SourceEdge> {
     let cosine = 20.0_f64.to_radians().cos();
     let mut result = Vec::new();
     for candidate in candidates {
@@ -2753,13 +2790,7 @@ fn remove_profile_overlap(candidates: Vec<SourceEdge>, owners: &[SourceEdge]) ->
             .points
             .iter()
             .zip(&tangents)
-            .map(|(point, tangent)| {
-                !owner_samples.iter().any(|(owner_point, owner_tangent)| {
-                    (point[0] - owner_point[0]).hypot(point[1] - owner_point[1]) <= 1.5
-                        && (tangent[0] * owner_tangent[0] + tangent[1] * owner_tangent[1]).abs()
-                            >= cosine
-                })
-            })
+            .map(|(&point, &tangent)| !owners.overlaps(point, tangent, cosine))
             .collect();
         let mut index = 0_usize;
         while index < keep.len() {
@@ -2803,11 +2834,11 @@ fn nonoverlapping_extensions(
         };
         length(second).total_cmp(&length(first))
     });
-    let mut accepted = owners.to_vec();
+    let mut accepted = ProfileOverlapIndex::from_edges(owners);
     let mut extensions = Vec::new();
     for candidate in candidates {
-        let remaining = remove_profile_overlap(vec![candidate], &accepted);
-        accepted.extend(remaining.iter().cloned());
+        let remaining = remove_profile_overlap_indexed(vec![candidate], &accepted);
+        accepted.insert_edges(&remaining);
         extensions.extend(remaining);
     }
     extensions
@@ -3461,13 +3492,136 @@ pub fn perceptual_smooth(image: &Raster, config: &Config) -> Raster {
 
 #[cfg(test)]
 mod tests {
-    use super::NumpyPcg64;
+    use super::{
+        nonoverlapping_extensions, point_tangents, NumpyPcg64, SourceEdge, PROFILE_OVERLAP_DISTANCE,
+    };
+
+    fn edge(points: Vec<[f64; 2]>) -> SourceEdge {
+        SourceEdge {
+            points,
+            width: 1.0,
+            role: "test",
+            width_samples: Vec::new(),
+        }
+    }
+
+    fn direct_remove(candidates: Vec<SourceEdge>, owners: &[SourceEdge]) -> Vec<SourceEdge> {
+        if owners.is_empty() {
+            return candidates;
+        }
+        let owner_samples: Vec<([f64; 2], [f64; 2])> = owners
+            .iter()
+            .flat_map(|owner| {
+                owner
+                    .points
+                    .iter()
+                    .copied()
+                    .zip(point_tangents(&owner.points))
+            })
+            .collect();
+        let cosine = 20.0_f64.to_radians().cos();
+        let mut result = Vec::new();
+        for candidate in candidates {
+            if candidate.points.len() < 2 {
+                continue;
+            }
+            let tangents = point_tangents(&candidate.points);
+            let keep: Vec<bool> = candidate
+                .points
+                .iter()
+                .zip(&tangents)
+                .map(|(point, tangent)| {
+                    !owner_samples.iter().any(|(owner_point, owner_tangent)| {
+                        (point[0] - owner_point[0]).hypot(point[1] - owner_point[1])
+                            <= PROFILE_OVERLAP_DISTANCE
+                            && (tangent[0] * owner_tangent[0] + tangent[1] * owner_tangent[1]).abs()
+                                >= cosine
+                    })
+                })
+                .collect();
+            let mut index = 0_usize;
+            while index < keep.len() {
+                if !keep[index] {
+                    index += 1;
+                    continue;
+                }
+                let mut first = index;
+                while index + 1 < keep.len() && keep[index + 1] {
+                    index += 1;
+                }
+                let mut last = index;
+                index += 1;
+                first = first.saturating_sub(1);
+                if last + 1 < candidate.points.len() {
+                    last += 1;
+                }
+                if last > first {
+                    result.push(SourceEdge {
+                        points: candidate.points[first..=last].to_vec(),
+                        width: candidate.width,
+                        role: candidate.role,
+                        width_samples: candidate.width_samples.clone(),
+                    });
+                }
+            }
+        }
+        result
+    }
+
+    fn direct_extensions(
+        mut candidates: Vec<SourceEdge>,
+        owners: &[SourceEdge],
+    ) -> Vec<SourceEdge> {
+        candidates.sort_by(|first, second| {
+            let length = |value: &SourceEdge| {
+                value
+                    .points
+                    .windows(2)
+                    .map(|pair| (pair[1][0] - pair[0][0]).hypot(pair[1][1] - pair[0][1]))
+                    .sum::<f64>()
+            };
+            length(second).total_cmp(&length(first))
+        });
+        let mut accepted = owners.to_vec();
+        let mut extensions = Vec::new();
+        for candidate in candidates {
+            let remaining = direct_remove(vec![candidate], &accepted);
+            accepted.extend(remaining.iter().cloned());
+            extensions.extend(remaining);
+        }
+        extensions
+    }
 
     #[test]
     fn numpy_seed_zero_permutation_matches_reference() {
         assert_eq!(
             NumpyPcg64::permutation(10),
             vec![4, 6, 2, 7, 3, 5, 9, 0, 8, 1]
+        );
+    }
+
+    #[test]
+    fn indexed_profile_overlap_matches_direct_scan_and_incremental_ownership() {
+        let owners = vec![edge(
+            (-8..=8).map(|x| [x as f64 * 0.75 - 0.25, 2.25]).collect(),
+        )];
+        let candidates = vec![
+            edge((-12..=12).map(|x| [x as f64 * 0.5, 3.1]).collect()),
+            edge((-8..=8).map(|y| [0.25, y as f64 * 0.75]).collect()),
+            edge((-8..=8).map(|x| [x as f64 * 0.75, -0.1]).collect()),
+            edge((-8..=8).map(|x| [x as f64 * 0.75, 4.0]).collect()),
+        ];
+        let expected = direct_extensions(candidates.clone(), &owners);
+        let actual = nonoverlapping_extensions(candidates, &owners);
+        assert_eq!(
+            actual
+                .iter()
+                .map(|value| value.points.as_slice())
+                .collect::<Vec<_>>(),
+            expected
+                .iter()
+                .map(|value| value.points.as_slice())
+                .collect::<Vec<_>>()
         );
     }
 }

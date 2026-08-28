@@ -458,8 +458,15 @@ pub fn vectorize(input: &Path, output: &Path, config: &Config) -> Result<Summary
         processing.height,
     );
     report_progress(config, "thin-paint-ownership", started, &mut checkpoint);
-    segmentation.paint_samples =
-        crate::ridge::adjust_paint_samples(&segmentation.canonical, &segmentation.paint_samples);
+    let ridge_analysis = crate::ridge::analyze(&segmentation.canonical);
+    segmentation.paint_samples = crate::ridge::adjust_paint_samples_from_analysis(
+        &segmentation.canonical,
+        &segmentation.paint_samples,
+        &ridge_analysis,
+    );
+    let strong_branches =
+        crate::ridge::strong_branches_from_analysis(&segmentation.canonical, &ridge_analysis);
+    drop(ridge_analysis);
     save_mask_diagnostic(
         "fitted-paint-samples",
         &segmentation.paint_samples,
@@ -476,7 +483,13 @@ pub fn vectorize(input: &Path, output: &Path, config: &Config) -> Result<Summary
     report_progress(config, "adaptive-paint-patches", started, &mut checkpoint);
     let (geometry, geometry_report) = build_geometry(&segmentation);
     report_progress(config, "shared-geometry", started, &mut checkpoint);
-    let (paints, gradient_report) = fit_all(&paint_reference, &processing, &segmentation, config);
+    let (paints, gradient_report) = fit_all(
+        &paint_reference,
+        &processing,
+        &segmentation,
+        &strong_branches,
+        config,
+    );
     report_progress(config, "paint-fitting", started, &mut checkpoint);
     let paint_render = render_svg_preview(
         output,

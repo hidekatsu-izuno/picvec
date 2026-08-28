@@ -27,6 +27,19 @@ pub struct StrongRidgeBranches {
     pub bright: Vec<bool>,
 }
 
+#[derive(Clone, Debug)]
+pub struct RidgeAnalysis {
+    evidence: RidgeEvidence,
+    labs: Vec<Lab>,
+}
+
+pub fn analyze(image: &Raster) -> RidgeAnalysis {
+    RidgeAnalysis {
+        evidence: detect(image),
+        labs: lab_pixels(image),
+    }
+}
+
 #[inline]
 fn reflect_index(mut value: isize, length: usize) -> usize {
     let length = length as isize;
@@ -526,9 +539,12 @@ fn strong_branch_support(
 
 /// Return the source-supported long chromatic-dark and bright ridge branches
 /// used by the Python Paint fitter to exclude antialiased shoulder samples.
-pub fn strong_branches(image: &Raster) -> StrongRidgeBranches {
-    let evidence = detect(image);
-    let labs = lab_pixels(image);
+pub fn strong_branches_from_analysis(
+    image: &Raster,
+    analysis: &RidgeAnalysis,
+) -> StrongRidgeBranches {
+    let evidence = &analysis.evidence;
+    let labs = &analysis.labs;
     let dark_candidates: Vec<bool> = evidence
         .dark_mask
         .iter()
@@ -541,11 +557,11 @@ pub fn strong_branches(image: &Raster) -> StrongRidgeBranches {
         .zip(&dark_candidates)
         .map(|(&mask, &dark)| mask && !dark)
         .collect();
-    let black_ridges = propagate_black_ridges(&dark_candidates, &labs, image.width, image.height);
+    let black_ridges = propagate_black_ridges(&dark_candidates, labs, image.width, image.height);
     let chromatic_dark_ridges: Vec<bool> = dark_candidates
         .iter()
         .zip(&black_ridges)
-        .zip(&labs)
+        .zip(labs)
         .map(|((&candidate, &black), lab)| candidate && !black && lab.a.hypot(lab.b) >= 18.0)
         .collect();
     let minimum_span = 14.0 * image.width.max(image.height) as f32 / 1024.0;
@@ -567,6 +583,10 @@ pub fn strong_branches(image: &Raster) -> StrongRidgeBranches {
             minimum_span.max(0.5),
         ),
     }
+}
+
+pub fn strong_branches(image: &Raster) -> StrongRidgeBranches {
+    strong_branches_from_analysis(image, &analyze(image))
 }
 
 fn local_extreme(lightness: &[f32], width: usize, height: usize, minimum: bool) -> Vec<f32> {
@@ -596,10 +616,14 @@ fn local_extreme(lightness: &[f32], width: usize, height: usize, minimum: bool) 
     result
 }
 
-pub fn adjust_paint_samples(image: &Raster, original: &[bool]) -> Vec<bool> {
+pub fn adjust_paint_samples_from_analysis(
+    image: &Raster,
+    original: &[bool],
+    analysis: &RidgeAnalysis,
+) -> Vec<bool> {
     assert_eq!(image.pixels.len(), original.len());
-    let evidence = detect(image);
-    let labs = lab_pixels(image);
+    let evidence = &analysis.evidence;
+    let labs = &analysis.labs;
     let dark_candidates: Vec<bool> = evidence
         .dark_mask
         .iter()
@@ -612,11 +636,11 @@ pub fn adjust_paint_samples(image: &Raster, original: &[bool]) -> Vec<bool> {
         .zip(&dark_candidates)
         .map(|(&mask, &dark)| mask && !dark)
         .collect();
-    let dark_black = propagate_black_ridges(&dark_candidates, &labs, image.width, image.height);
+    let dark_black = propagate_black_ridges(&dark_candidates, labs, image.width, image.height);
     let dark: Vec<bool> = dark_candidates
         .iter()
         .zip(&dark_black)
-        .zip(&labs)
+        .zip(labs)
         .map(|((&candidate, &black), lab)| {
             candidate && !black && lab.a.hypot(lab.b) >= 18.0 || black
         })
@@ -636,4 +660,33 @@ pub fn adjust_paint_samples(image: &Raster, original: &[bool]) -> Vec<bool> {
         }
     }
     samples
+}
+
+pub fn adjust_paint_samples(image: &Raster, original: &[bool]) -> Vec<bool> {
+    adjust_paint_samples_from_analysis(image, original, &analyze(image))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shared_analysis_matches_independent_ridge_consumers() {
+        let mut image = Raster::blank(32, 24, [0.82, 0.82, 0.82]);
+        for x in 4..28 {
+            image.pixels[7 * image.width + x] = [0.05, 0.08, 0.12];
+            image.pixels[16 * image.width + x] = [0.96, 0.75, 0.12];
+        }
+        let original = vec![true; image.pixels.len()];
+        let analysis = analyze(&image);
+
+        assert_eq!(
+            adjust_paint_samples_from_analysis(&image, &original, &analysis),
+            adjust_paint_samples(&image, &original)
+        );
+        let shared = strong_branches_from_analysis(&image, &analysis);
+        let independent = strong_branches(&image);
+        assert_eq!(shared.dark, independent.dark);
+        assert_eq!(shared.bright, independent.bright);
+    }
 }

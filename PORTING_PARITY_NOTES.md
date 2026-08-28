@@ -203,12 +203,42 @@ and unsupported dark regions.
     buckets while retaining the reference's global best-candidate ordering;
     the viewport1 structural stage fell from 32.6 s to 0.44 s without changing
     its SVG bytes. Boundary-protection queries are indexed by incident label,
-    and independent initial Paint fits run in parallel with ordered proposal
-    collection. A native automatic run of viewport2 (1600 x 1067, 78,618
-    regions) still takes 208 s and emits 22 MB. The remaining direct
-    profile-overlap search is quadratic; its output now agrees, so a
-    spatial-index replacement must be guarded by exact graph/mask regression
-    tests.
+    and independent initial Paint fits run in parallel with indexed collection,
+    which preserves region order. A later parity sync had accidentally changed
+    this loop back to sequential iteration; restoring the indexed parallel
+    iterator reduced car 768 px Paint fitting from 63.991 s to 39.620 s and
+    total time from 74.807 s to 50.198 s, with byte-identical car and dog SVGs.
+    Each harmonization pass now also evaluates its independent adjacent-owner
+    proposals in parallel, then restores the reference decision order with the
+    existing complete score/owner sort before applying any proposal. On car at
+    768 px this reduced the harmonization substage from 34.939 s to 0.557 s and
+    total time from 52.074 s to 16.829 s. Car and dog SVGs remained
+    byte-identical, including all internal DeltaE00 and SSIM values.
+    Local Paint coupling now likewise fits independent member geometries and
+    solves the three fixed RGB systems with indexed parallel iterators. Car
+    coupling fell from 4.408 s to 3.506 s and total time from 16.829 s to
+    15.799 s; the small dog coupling case also stayed neutral-to-faster at
+    0.289 s to 0.284 s. Both SVGs remained byte-identical.
+    Disjoint coupling groups are now evaluated against one immutable Paint
+    snapshot in parallel and their accepted assignments are applied in label
+    order. This further reduced car coupling from 3.506 s to 1.239 s and total
+    time from 15.799 s to 13.737 s; dog coupling fell from 0.284 s to 0.263 s.
+    The car and dog SVG hashes were again unchanged.
+    Final-canonical ridge evidence and Lab values are now computed once and
+    shared by Paint-sample adjustment and strong-branch selection; the former
+    implementation repeated the complete detector immediately in Paint
+    fitting. Car Paint setup fell from 1.195 s to 0.031 s and total time from
+    13.737 s to 12.504 s. Dog Paint setup fell from 6.968 s to 0.099 s and
+    total time from 35.451 s to 28.287 s. Both SVGs remained byte-identical.
+    Normal-profile overlap removal now keeps its accepted-owner samples in a
+    one-pixel spatial index instead of rebuilding and scanning the complete
+    sample list for every candidate. The exact 1.5 px distance and 20 degree
+    tangent gates, candidate ordering, and incremental ownership semantics are
+    unchanged and covered by a direct-scan equivalence test. On a dense,
+    spatially separated profile workload the release build fell from 511.3 ms
+    to 4.1 ms (124x); the car 768 SVG remained byte-identical at 845,706 bytes
+    with unchanged DeltaE00 and SSIM. A native automatic run of viewport2
+    (1600 x 1067, 78,618 regions) still takes 208 s and emits 22 MB.
 
 7. **Illumination/ridge Paint ownership.**  Python computes broad
     shade/light masks, encodes `paint_key = parent * 3 + tone`, partitions dark
