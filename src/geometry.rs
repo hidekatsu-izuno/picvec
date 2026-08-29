@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
+use rayon::prelude::*;
 use serde::Serialize;
 
 use crate::segment::Segmentation;
@@ -4992,12 +4993,19 @@ fn build_shared_chains(
         .into_iter()
         .collect();
     pairs.sort_by_key(|value| value.0);
+    let mut tasks = Vec::<(RegionPair, Vec<u64>)>::new();
     for (pair, pair_edges) in pairs {
         let pair_edges: HashSet<EdgeKey> = pair_edges.into_iter().collect();
         for track in trace_edge_chains(&pair_edges, &junctions, stride) {
-            if track.len() < 2 {
-                continue;
+            if track.len() >= 2 {
+                tasks.push((pair, track));
             }
+        }
+    }
+    let results: Vec<_> = tasks
+        .into_par_iter()
+        .enumerate()
+        .map(|(chain_id, (pair, track))| {
             let raw_edges: Vec<(u64, u64)> = track
                 .windows(2)
                 .map(|vertices| (vertices[0], vertices[1]))
@@ -5006,7 +5014,7 @@ fn build_shared_chains(
                 57_usize, 221, 462, 1473, 1519, 1788, 2360, 2361, 2398, 2410, 3278, 3417, 3418,
                 3419, 3912, 5322,
             ]
-            .contains(&chains.len());
+            .contains(&chain_id);
             let diagnostic_spans = if stage_diagnostics_enabled && target_stage_boundary {
                 raw_edges
                     .iter()
@@ -5384,9 +5392,10 @@ fn build_shared_chains(
                     },
                 };
             }
-            if stage_diagnostics_enabled && target_stage_boundary {
-                stage_diagnostics.insert(
-                    chains.len().to_string(),
+            let stage_diagnostic =
+                (stage_diagnostics_enabled && target_stage_boundary).then(|| {
+                    (
+                        chain_id.to_string(),
                     serde_json::json!({
                         "raw": raw.iter().map(|point| [point.x, point.y]).collect::<Vec<_>>(),
                         "source": source.iter().map(|point| [point.x, point.y]).collect::<Vec<_>>(),
@@ -5397,17 +5406,16 @@ fn build_shared_chains(
                         "direct_diagnostics": direct_diagnostics,
                         "smoothing_candidates": smoothing_candidate_diagnostics,
                     }),
-                );
-            }
+                    )
+                });
             let mut points: Vec<Point> = segments.iter().map(|segment| segment.start()).collect();
             if !closed {
                 if let Some(last) = segments.last() {
                     points.push(last.end());
                 }
             }
-            let chain_id = chains.len();
-            if diagnostics_enabled {
-                diagnostics.push(shared_chain_diagnostic(
+            let diagnostic = diagnostics_enabled.then(|| {
+                shared_chain_diagnostic(
                     chain_id,
                     pair,
                     &raw_edges,
@@ -5415,11 +5423,8 @@ fn build_shared_chains(
                     closed,
                     stride,
                     &adaptive.regularized_observations,
-                ));
-            }
-            for &(first, second) in &raw_edges {
-                lookup.insert(EdgeKey::new(first, second), (chain_id, first, second));
-            }
+                )
+            });
             if !closed && points.is_empty() {
                 // Keep the representation structurally valid even when a
                 // degenerate adaptive span returned no curve.
@@ -5436,12 +5441,31 @@ fn build_shared_chains(
                     points.push(last.end());
                 }
             }
-            chains.push(SharedChain {
-                points,
-                segments,
-                closed,
-            });
+            (
+                SharedChain {
+                    points,
+                    segments,
+                    closed,
+                },
+                raw_edges,
+                diagnostic,
+                stage_diagnostic,
+            )
+        })
+        .collect();
+    for (chain_id, (chain, raw_edges, diagnostic, stage_diagnostic)) in
+        results.into_iter().enumerate()
+    {
+        if let Some(diagnostic) = diagnostic {
+            diagnostics.push(diagnostic);
         }
+        if let Some((key, diagnostic)) = stage_diagnostic {
+            stage_diagnostics.insert(key, diagnostic);
+        }
+        for (first, second) in raw_edges {
+            lookup.insert(EdgeKey::new(first, second), (chain_id, first, second));
+        }
+        chains.push(chain);
     }
     if let Some(path) = std::env::var_os("PICVEC_GEOMETRY_DIAGNOSTICS") {
         if let Ok(encoded) = serde_json::to_vec(&diagnostics) {

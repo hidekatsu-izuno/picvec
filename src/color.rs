@@ -229,12 +229,27 @@ pub fn delta_e2000(first: Lab, second: Lab) -> f32 {
 /// dispatch and float32 degree/radian constants.
 pub fn delta_e2000_pairs(first: &[Lab], second: &[Lab]) -> Vec<f32> {
     assert_eq!(first.len(), second.len());
+    delta_e2000_map(first, |index| second[index])
+}
+
+/// CIEDE2000 from every contiguous Lab value to one common reference.
+///
+/// Keeping the comparison in one batch lets the dispatched elementary
+/// functions process complete SIMD vectors.  Calling `delta_e2000` in a
+/// tight nearest-colour loop would otherwise dispatch a one-lane vector for
+/// every candidate.
+pub fn delta_e2000_to_many(first: &[Lab], second: Lab) -> Vec<f32> {
+    delta_e2000_map(first, |_| second)
+}
+
+fn delta_e2000_map(first: &[Lab], second: impl Fn(usize) -> Lab) -> Vec<f32> {
     let mut initial = Vec::with_capacity(first.len());
     let mut atan_y_first = Vec::with_capacity(first.len());
     let mut atan_x_first = Vec::with_capacity(first.len());
     let mut atan_y_second = Vec::with_capacity(first.len());
     let mut atan_x_second = Vec::with_capacity(first.len());
-    for (&first, &second) in first.iter().zip(second) {
+    for (index, &first) in first.iter().enumerate() {
+        let second = second(index);
         let c1 = first.a.hypot(first.b);
         let c2 = second.a.hypot(second.b);
         let c_bar = (c1 + c2) * 0.5;
@@ -351,6 +366,22 @@ mod tests {
         let b = rgb_to_lab([0.1, 0.4, 0.9]);
         assert!((delta_e2000(a, b) - delta_e2000(b, a)).abs() < 1e-4);
         assert!(delta_e2000(a, a) < 1e-5);
+    }
+
+    #[test]
+    fn ciede2000_common_reference_batch_matches_scalar_dispatch() {
+        let reference = rgb_to_lab([0.27, 0.61, 0.84]);
+        let values: Vec<Lab> = (0..33)
+            .map(|index| {
+                let amount = index as f32 / 32.0;
+                rgb_to_lab([amount, 1.0 - amount, 0.2 + 0.6 * amount])
+            })
+            .collect();
+        let scalar: Vec<f32> = values
+            .iter()
+            .map(|&value| delta_e2000(value, reference))
+            .collect();
+        assert_eq!(delta_e2000_to_many(&values, reference), scalar);
     }
 
     #[test]

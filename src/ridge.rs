@@ -9,6 +9,8 @@
 
 use std::collections::VecDeque;
 
+use rayon::prelude::*;
+
 use crate::color::{delta_e2000, Lab};
 use crate::edge::{lab_pixels, preprocess_lab_pixels};
 use crate::raster::Raster;
@@ -109,21 +111,24 @@ fn correlate_axis(
 ) -> Vec<f32> {
     let radius = (weights.len() / 2) as isize;
     let mut output = vec![0.0_f32; input.len()];
-    for y in 0..height {
-        for x in 0..width {
-            let mut sum = 0.0_f64;
-            for (position, &weight) in weights.iter().enumerate() {
-                let offset = position as isize - radius;
-                let (sample_x, sample_y) = if axis == 0 {
-                    (x, reflect_index(y as isize + offset, height))
-                } else {
-                    (reflect_index(x as isize + offset, width), y)
-                };
-                sum += input[sample_y * width + sample_x] as f64 * weight;
+    output
+        .par_chunks_mut(width)
+        .enumerate()
+        .for_each(|(y, row)| {
+            for (x, output) in row.iter_mut().enumerate() {
+                let mut sum = 0.0_f64;
+                for (position, &weight) in weights.iter().enumerate() {
+                    let offset = position as isize - radius;
+                    let (sample_x, sample_y) = if axis == 0 {
+                        (x, reflect_index(y as isize + offset, height))
+                    } else {
+                        (reflect_index(x as isize + offset, width), y)
+                    };
+                    sum += input[sample_y * width + sample_x] as f64 * weight;
+                }
+                *output = sum as f32;
             }
-            output[y * width + x] = sum as f32;
-        }
-    }
+        });
     output
 }
 
@@ -149,29 +154,32 @@ fn meijering(input: &[f32], width: usize, height: usize, sigmas: &[f64]) -> Vec<
         let hrr = gaussian_filter(&gradient_row, width, height, sigma, [1, 0]);
         let hrc = gaussian_filter(&gradient_row, width, height, sigma, [0, 1]);
         let hcc = gaussian_filter(&gradient_column, width, height, sigma, [0, 1]);
-        let mut values = vec![0.0_f32; input.len()];
-        let mut maximum = 0.0_f32;
-        for index in 0..values.len() {
-            let centre = (hrr[index] + hcc[index]) / 2.0;
-            let difference = (hrr[index] - hcc[index]) / 2.0;
-            let half_root = (hrc[index] * hrc[index] + difference * difference).sqrt();
-            let first = centre + half_root;
-            let second = centre - half_root;
-            let first_normalized = first + (1.0_f32 / 3.0) * second;
-            let second_normalized = (1.0_f32 / 3.0) * first + second;
-            let selected = if first_normalized.abs() >= second_normalized.abs() {
-                first_normalized
-            } else {
-                second_normalized
-            }
-            .max(0.0);
-            values[index] = selected;
-            maximum = maximum.max(selected);
-        }
+        let values: Vec<f32> = (0..input.len())
+            .into_par_iter()
+            .map(|index| {
+                let centre = (hrr[index] + hcc[index]) / 2.0;
+                let difference = (hrr[index] - hcc[index]) / 2.0;
+                let half_root = (hrc[index] * hrc[index] + difference * difference).sqrt();
+                let first = centre + half_root;
+                let second = centre - half_root;
+                let first_normalized = first + (1.0_f32 / 3.0) * second;
+                let second_normalized = (1.0_f32 / 3.0) * first + second;
+                if first_normalized.abs() >= second_normalized.abs() {
+                    first_normalized
+                } else {
+                    second_normalized
+                }
+                .max(0.0)
+            })
+            .collect();
+        let maximum = values.par_iter().copied().reduce(|| 0.0, f32::max);
         if maximum > 0.0 {
-            for (destination, value) in filtered.iter_mut().zip(values) {
-                *destination = destination.max(value / maximum);
-            }
+            filtered
+                .par_iter_mut()
+                .zip(values.into_par_iter())
+                .for_each(|(destination, value)| {
+                    *destination = destination.max(value / maximum);
+                });
         }
     }
     filtered
@@ -222,26 +230,29 @@ fn morphology(
     dilate: bool,
 ) -> Vec<f32> {
     let mut output = vec![0.0_f32; input.len()];
-    for y in 0..height {
-        for x in 0..width {
-            let mut selected = if dilate {
-                f32::NEG_INFINITY
-            } else {
-                f32::INFINITY
-            };
-            for &(offset_x, offset_y) in offsets {
-                let sample_x = reflect_index(x as isize + offset_x, width);
-                let sample_y = reflect_index(y as isize + offset_y, height);
-                let value = input[sample_y * width + sample_x];
-                selected = if dilate {
-                    selected.max(value)
+    output
+        .par_chunks_mut(width)
+        .enumerate()
+        .for_each(|(y, row)| {
+            for (x, output) in row.iter_mut().enumerate() {
+                let mut selected = if dilate {
+                    f32::NEG_INFINITY
                 } else {
-                    selected.min(value)
+                    f32::INFINITY
                 };
+                for &(offset_x, offset_y) in offsets {
+                    let sample_x = reflect_index(x as isize + offset_x, width);
+                    let sample_y = reflect_index(y as isize + offset_y, height);
+                    let value = input[sample_y * width + sample_x];
+                    selected = if dilate {
+                        selected.max(value)
+                    } else {
+                        selected.min(value)
+                    };
+                }
+                *output = selected;
             }
-            output[y * width + x] = selected;
-        }
-    }
+        });
     output
 }
 
@@ -254,10 +265,13 @@ fn top_hats(input: &[f32], width: usize, height: usize, radii: &[usize]) -> (Vec
         let opened = morphology(&eroded, width, height, &offsets, true);
         let dilated = morphology(input, width, height, &offsets, true);
         let closed = morphology(&dilated, width, height, &offsets, false);
-        for index in 0..input.len() {
-            bright[index] = bright[index].max(input[index] - opened[index]);
-            dark[index] = dark[index].max(closed[index] - input[index]);
-        }
+        dark.par_iter_mut()
+            .zip(bright.par_iter_mut())
+            .enumerate()
+            .for_each(|(index, (dark, bright))| {
+                *bright = bright.max(input[index] - opened[index]);
+                *dark = dark.max(closed[index] - input[index]);
+            });
     }
     (dark, bright)
 }
@@ -289,7 +303,7 @@ fn robust_unit(values: &[f32]) -> Vec<f32> {
         return vec![0.0; values.len()];
     }
     values
-        .iter()
+        .par_iter()
         .map(|&value| ((value.max(0.0) as f64 / scale) as f32).clamp(0.0, 1.0))
         .collect()
 }
@@ -342,7 +356,7 @@ pub fn detect(image: &Raster) -> RidgeEvidence {
     // skimage.rgb2lab.  Their matrices differ enough to move normalized ridge
     // responses across the strong-branch threshold.
     let labs = preprocess_lab_pixels(image);
-    let luminance: Vec<f32> = labs.iter().map(|value| value.l / 100.0).collect();
+    let luminance: Vec<f32> = labs.par_iter().map(|value| value.l / 100.0).collect();
     let scale = width.max(height) as f64 / 1024.0;
     let sigmas: Vec<f64> = [1.0, 1.5, 2.0, 3.0, 4.0]
         .into_iter()
@@ -355,7 +369,7 @@ pub fn detect(image: &Raster) -> RidgeEvidence {
     radii.sort_unstable();
     radii.dedup();
     let dark_hessian = meijering(&luminance, width, height, &sigmas);
-    let inverted: Vec<f32> = luminance.iter().map(|&value| -value).collect();
+    let inverted: Vec<f32> = luminance.par_iter().map(|&value| -value).collect();
     let bright_hessian = meijering(&inverted, width, height, &sigmas);
     let (dark_tophat, bright_tophat) = top_hats(&luminance, width, height, &radii);
     let dark_hessian = robust_unit(&dark_hessian);
@@ -364,16 +378,20 @@ pub fn detect(image: &Raster) -> RidgeEvidence {
     let bright_tophat_unit = robust_unit(&bright_tophat);
     let mut dark_response = vec![0.0_f32; luminance.len()];
     let mut bright_response = vec![0.0_f32; luminance.len()];
-    for index in 0..luminance.len() {
-        dark_response[index] = (dark_hessian[index] * dark_tophat_unit[index]).sqrt();
-        bright_response[index] = (bright_hessian[index] * bright_tophat_unit[index]).sqrt();
-        if dark_tophat[index] < 0.015 {
-            dark_response[index] = 0.0;
-        }
-        if bright_tophat[index] < 0.015 {
-            bright_response[index] = 0.0;
-        }
-    }
+    dark_response
+        .par_iter_mut()
+        .zip(bright_response.par_iter_mut())
+        .enumerate()
+        .for_each(|(index, (dark_response, bright_response))| {
+            *dark_response = (dark_hessian[index] * dark_tophat_unit[index]).sqrt();
+            *bright_response = (bright_hessian[index] * bright_tophat_unit[index]).sqrt();
+            if dark_tophat[index] < 0.015 {
+                *dark_response = 0.0;
+            }
+            if bright_tophat[index] < 0.015 {
+                *bright_response = 0.0;
+            }
+        });
     let dark_mask = hysteresis(&dark_response, width, height, 0.08, 0.20);
     let bright_mask = hysteresis(&bright_response, width, height, 0.08, 0.20);
     RidgeEvidence {
@@ -591,28 +609,31 @@ pub fn strong_branches(image: &Raster) -> StrongRidgeBranches {
 
 fn local_extreme(lightness: &[f32], width: usize, height: usize, minimum: bool) -> Vec<f32> {
     let mut result = vec![0.0_f32; lightness.len()];
-    for y in 0..height {
-        for x in 0..width {
-            let mut selected = if minimum {
-                f32::INFINITY
-            } else {
-                f32::NEG_INFINITY
-            };
-            for dy in -1_isize..=1 {
-                for dx in -1_isize..=1 {
-                    let sx = (x as isize + dx).clamp(0, width as isize - 1) as usize;
-                    let sy = (y as isize + dy).clamp(0, height as isize - 1) as usize;
-                    let value = lightness[sy * width + sx];
-                    selected = if minimum {
-                        selected.min(value)
-                    } else {
-                        selected.max(value)
-                    };
+    result
+        .par_chunks_mut(width)
+        .enumerate()
+        .for_each(|(y, row)| {
+            for (x, output) in row.iter_mut().enumerate() {
+                let mut selected = if minimum {
+                    f32::INFINITY
+                } else {
+                    f32::NEG_INFINITY
+                };
+                for dy in -1_isize..=1 {
+                    for dx in -1_isize..=1 {
+                        let sx = (x as isize + dx).clamp(0, width as isize - 1) as usize;
+                        let sy = (y as isize + dy).clamp(0, height as isize - 1) as usize;
+                        let value = lightness[sy * width + sx];
+                        selected = if minimum {
+                            selected.min(value)
+                        } else {
+                            selected.max(value)
+                        };
+                    }
                 }
+                *output = selected;
             }
-            result[y * width + x] = selected;
-        }
-    }
+        });
     result
 }
 

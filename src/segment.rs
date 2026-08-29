@@ -2,7 +2,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 use serde::Serialize;
 
-use crate::color::{delta_e2000, lab_pixels_to_rgb, lab_to_rgb, rgb_to_lab, Lab};
+use crate::color::{
+    delta_e2000, delta_e2000_to_many, lab_pixels_to_rgb, lab_to_rgb, rgb_to_lab, Lab,
+};
 use crate::config::Config;
 use crate::edge::{lab_pixels, EdgeRoles};
 use crate::raster::{percentile, Raster};
@@ -288,8 +290,10 @@ fn build_palette(lab: &[Lab], config: &Config) -> (Vec<u32>, Vec<Lab>, usize) {
         // cell with every existing palette representative.  The former
         // bucket shortcut could omit the true CIEDE2000 nearest colour after
         // a representative moved, changing both ownership and topology.
-        let best = (0..palette.len())
-            .map(|index| (index, delta_e2000(palette[index].lab, colour)))
+        let palette_labs: Vec<Lab> = palette.iter().map(|entry| entry.lab).collect();
+        let best = delta_e2000_to_many(&palette_labs, colour)
+            .into_iter()
+            .enumerate()
             .min_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
         let selected = if let Some((index, distance)) = best {
             let threshold = adaptive_tolerance((palette[index].lab.l + colour.l) * 0.5, config);
