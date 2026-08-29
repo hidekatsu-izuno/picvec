@@ -1191,10 +1191,173 @@ fn native_antialias_width(
     })
 }
 
+/// Find a coreless quantisation sleeve between two durable faces. Sharpened
+/// raster artwork can put both a light overshoot and a dark
+/// undershoot around an edge.  Those samples are not necessarily a convex
+/// mixture of the two face colours, so the colour-only antialias test below
+/// cannot recover their ownership.  Topologically, however, they remain a
+/// native-width strip with the same two faces on opposite sides.
+///
+/// Source-supported medial ridges are deliberately excluded. A face barrier
+/// alone only proves that the two durable faces must remain separate; it does
+/// not make every coreless quantisation band between them a third Paint face.
+#[allow(clippy::too_many_arguments)]
+fn boundary_sleeve_assignment(
+    component: &[usize],
+    labels: &[u32],
+    label: u32,
+    stable: &[bool],
+    parent_lab: &[Lab],
+    roles: &EdgeRoles,
+    width: usize,
+    height: usize,
+) -> Option<(u32, u32, Vec<bool>)> {
+    let protected = component
+        .iter()
+        .filter(|&&index| roles.visible_ridge_centres[index])
+        .count();
+    // A sleeve can touch a protected contour at its endpoint or at a curve
+    // junction.  Reject it only when the protection follows a meaningful
+    // fraction of its own length.
+    if component.is_empty() || protected * 16 > component.len() {
+        return None;
+    }
+
+    // For every sleeve pixel, retain the nearest sample of each stable owner
+    // in the native antialias radius.  Counting an owner at most once per
+    // pixel prevents a large face from winning solely because it occupies
+    // more of the neighbourhood disk.
+    let mut nearby = Vec::<HashMap<u32, (isize, isize, isize)>>::with_capacity(component.len());
+    let mut support = HashMap::<u32, usize>::new();
+    for &index in component {
+        let x = index % width;
+        let y = index / width;
+        let mut owners = HashMap::<u32, (isize, isize, isize)>::new();
+        for dy in -3_isize..=3 {
+            for dx in -3_isize..=3 {
+                let distance_squared = dx * dx + dy * dy;
+                if distance_squared == 0 || distance_squared > 9 {
+                    continue;
+                }
+                let px = x as isize + dx;
+                let py = y as isize + dy;
+                if px < 0 || py < 0 || px >= width as isize || py >= height as isize {
+                    continue;
+                }
+                let owner = labels[py as usize * width + px as usize];
+                if owner == label || !stable[owner as usize] {
+                    continue;
+                }
+                match owners.entry(owner) {
+                    std::collections::hash_map::Entry::Occupied(mut entry) => {
+                        if distance_squared < entry.get().0 {
+                            entry.insert((distance_squared, dx, dy));
+                        }
+                    }
+                    std::collections::hash_map::Entry::Vacant(entry) => {
+                        entry.insert((distance_squared, dx, dy));
+                    }
+                }
+            }
+        }
+        for &owner in owners.keys() {
+            *support.entry(owner).or_default() += 1;
+        }
+        nearby.push(owners);
+    }
+
+    let mut min_x = width;
+    let mut min_y = height;
+    let mut max_x = 0_usize;
+    let mut max_y = 0_usize;
+    for &index in component {
+        let x = index % width;
+        let y = index / width;
+        min_x = min_x.min(x);
+        min_y = min_y.min(y);
+        max_x = max_x.max(x);
+        max_y = max_y.max(y);
+    }
+    let one_pixel_run = min_x == max_x || min_y == max_y;
+    let required_both = if one_pixel_run {
+        (component.len() * 2).div_ceil(3)
+    } else {
+        (component.len() * 4).div_ceil(5)
+    };
+    let required_opposite = if one_pixel_run {
+        (component.len() * 2).div_ceil(3)
+    } else {
+        (component.len() * 3).div_ceil(4)
+    };
+    let mut candidates: Vec<(u32, usize)> = support.into_iter().collect();
+    candidates
+        .sort_unstable_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+    candidates.truncate(4);
+    if candidates.len() < 2 {
+        return None;
+    }
+
+    let mut best = None::<((usize, usize, usize), u32, u32)>;
+    for first_index in 0..candidates.len() - 1 {
+        let (first, first_support) = candidates[first_index];
+        for &(second, second_support) in candidates.iter().skip(first_index + 1) {
+            if delta_e2000(parent_lab[first as usize], parent_lab[second as usize]) < 4.6 {
+                continue;
+            }
+            let mut both = 0_usize;
+            let mut opposite = 0_usize;
+            for owners in &nearby {
+                let (Some(&(_, first_dx, first_dy)), Some(&(_, second_dx, second_dy))) =
+                    (owners.get(&first), owners.get(&second))
+                else {
+                    continue;
+                };
+                both += 1;
+                if first_dx * second_dx + first_dy * second_dy <= 0 {
+                    opposite += 1;
+                }
+            }
+            if both < required_both || opposite < required_opposite {
+                continue;
+            }
+            // Broad support from any third durable face makes this a real
+            // junction rather than a two-sided boundary sleeve.
+            if candidates.iter().any(|&(owner, amount)| {
+                owner != first && owner != second && amount * 4 > component.len()
+            }) {
+                continue;
+            }
+            let score = (opposite, both, first_support + second_support);
+            if best
+                .as_ref()
+                .map(|(current, _, _)| score > *current)
+                .unwrap_or(true)
+            {
+                best = Some((score, first, second));
+            }
+        }
+    }
+    let (_, first, second) = best?;
+
+    let assignment = nearby
+        .iter()
+        .map(|owners| match (owners.get(&first), owners.get(&second)) {
+            (Some(&(first_distance, _, _)), Some(&(second_distance, _, _))) => {
+                first_distance <= second_distance
+            }
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (None, None) => false,
+        })
+        .collect();
+    Some((first, second, assignment))
+}
+
 fn correct_antialias_partition(
     image: &Raster,
     labels: &[u32],
     count: usize,
+    roles: &EdgeRoles,
 ) -> AntialiasCorrection {
     let mut core = vec![true; labels.len()];
     for y in 0..image.height {
@@ -1305,12 +1468,25 @@ fn correct_antialias_partition(
         .collect();
 
     let mut contacts = vec![HashMap::<u32, usize>::new(); count];
+    let mut component_adjacency = vec![HashSet::<u32>::new(); count];
+    let mut touching_adjacency = vec![HashSet::<u32>::new(); count];
+    let mut record_touch = |first: usize, second: usize| {
+        let left = labels[first] as usize;
+        let right = labels[second] as usize;
+        if left == right {
+            return;
+        }
+        touching_adjacency[left].insert(right as u32);
+        touching_adjacency[right].insert(left as u32);
+    };
     let mut record_contact = |first: usize, second: usize| {
         let left = labels[first] as usize;
         let right = labels[second] as usize;
         if left == right {
             return;
         }
+        component_adjacency[left].insert(right as u32);
+        component_adjacency[right].insert(left as u32);
         if stable[right] {
             *contacts[left].entry(right as u32).or_default() += 1;
         }
@@ -1323,14 +1499,623 @@ fn correct_antialias_partition(
             let index = y * image.width + x;
             if x + 1 < image.width {
                 record_contact(index, index + 1);
+                record_touch(index, index + 1);
             }
             if y + 1 < image.height {
                 record_contact(index, index + image.width);
+                record_touch(index, index + image.width);
+                if x > 0 {
+                    record_touch(index, index + image.width - 1);
+                }
+                if x + 1 < image.width {
+                    record_touch(index, index + image.width + 1);
+                }
             }
         }
     }
 
     let components = component_pixels(labels, count);
+    let mut sleeve_candidates = vec![None::<(u32, u32, Vec<bool>)>; count];
+    for label in 0..count {
+        let component = &components[label];
+        if core_counts[label] == 0
+            && native_antialias_width(component, labels, label as u32, image.width, image.height)
+        {
+            sleeve_candidates[label] = boundary_sleeve_assignment(
+                component,
+                labels,
+                label as u32,
+                &stable,
+                &parent_lab,
+                roles,
+                image.width,
+                image.height,
+            );
+        }
+    }
+    // Quantisation often changes colour every one or two samples along an
+    // antialiased curve.  Evaluate those adjacent labels as one sleeve group:
+    // a sequence with more than four pixels is boundary sampling, while an
+    // isolated tiny non-mixture mark remains independent Paint.
+    let sleeve_pair = |candidate: &(u32, u32, Vec<bool>)| {
+        if candidate.0 < candidate.1 {
+            (candidate.0, candidate.1)
+        } else {
+            (candidate.1, candidate.0)
+        }
+    };
+    // A shallow raster edge can alternate between a four-pixel overshoot run
+    // and one parent-face pixel. Those runs do not touch, so ordinary
+    // component adjacency leaves a repeated row of rectangular Paint faces.
+    // Bridge only a sequence of at least three identical four-pixel sleeves,
+    // across exactly one parent-owned gap. This identifies raster sampling
+    // phase without broadening adjacency for isolated marks or corner-touching
+    // details such as the car mirror.
+    let mut gap_adjacency = vec![HashSet::<u32>::new(); count];
+    const GAP_OFFSETS: [(isize, isize); 12] = [
+        (-2, -1),
+        (-2, 0),
+        (-2, 1),
+        (-1, -2),
+        (-1, 2),
+        (0, -2),
+        (0, 2),
+        (1, -2),
+        (1, 2),
+        (2, -1),
+        (2, 0),
+        (2, 1),
+    ];
+    for label in 0..count {
+        let Some(candidate) = sleeve_candidates[label].as_ref() else {
+            continue;
+        };
+        if components[label].len() != 4 {
+            continue;
+        }
+        let pair = sleeve_pair(candidate);
+        for &index in &components[label] {
+            let x = index % image.width;
+            let y = index / image.width;
+            for (dx, dy) in GAP_OFFSETS {
+                let px = x as isize + dx;
+                let py = y as isize + dy;
+                if px < 0 || py < 0 || px >= image.width as isize || py >= image.height as isize {
+                    continue;
+                }
+                let neighbour = labels[py as usize * image.width + px as usize] as usize;
+                if neighbour <= label
+                    || components[neighbour].len() != 4
+                    || touching_adjacency[label].contains(&(neighbour as u32))
+                    || sleeve_candidates[neighbour].as_ref().map(sleeve_pair) != Some(pair)
+                {
+                    continue;
+                }
+                let gap_is_parent_owned = if dx.abs() == 2 {
+                    let middle_x = (x as isize + dx.signum()) as usize;
+                    let start_y = y.min(py as usize);
+                    let end_y = y.max(py as usize);
+                    (start_y..=end_y).all(|middle_y| {
+                        matches!(labels[middle_y * image.width + middle_x], owner if owner == pair.0 || owner == pair.1)
+                    })
+                } else {
+                    let middle_y = (y as isize + dy.signum()) as usize;
+                    let start_x = x.min(px as usize);
+                    let end_x = x.max(px as usize);
+                    (start_x..=end_x).all(|middle_x| {
+                        matches!(labels[middle_y * image.width + middle_x], owner if owner == pair.0 || owner == pair.1)
+                    })
+                };
+                if gap_is_parent_owned {
+                    gap_adjacency[label].insert(neighbour as u32);
+                    gap_adjacency[neighbour].insert(label as u32);
+                }
+            }
+        }
+    }
+    let mut gap_visited = vec![false; count];
+    for start in 0..count {
+        if gap_visited[start] || gap_adjacency[start].is_empty() {
+            continue;
+        }
+        let mut queue = VecDeque::from([start]);
+        let mut group = Vec::new();
+        gap_visited[start] = true;
+        while let Some(label) = queue.pop_front() {
+            group.push(label);
+            for &neighbour in &gap_adjacency[label] {
+                let neighbour = neighbour as usize;
+                if !gap_visited[neighbour] {
+                    gap_visited[neighbour] = true;
+                    queue.push_back(neighbour);
+                }
+            }
+        }
+        if group.len() < 3 {
+            continue;
+        }
+        for label in group {
+            for &neighbour in &gap_adjacency[label] {
+                component_adjacency[label].insert(neighbour);
+            }
+        }
+    }
+    let mut sleeve_accepted = vec![false; count];
+    let mut sleeve_visited = vec![false; count];
+    for start in 0..count {
+        if sleeve_candidates[start].is_none() {
+            continue;
+        }
+        if sleeve_visited[start] {
+            continue;
+        }
+        let mut queue = VecDeque::from([start]);
+        let mut group = Vec::new();
+        let mut area = 0_usize;
+        let group_pair = sleeve_pair(sleeve_candidates[start].as_ref().unwrap());
+        sleeve_visited[start] = true;
+        while let Some(label) = queue.pop_front() {
+            let expected_pair = sleeve_pair(sleeve_candidates[label].as_ref().unwrap());
+            group.push(label);
+            area += components[label].len();
+            for &neighbour in &component_adjacency[label] {
+                let neighbour = neighbour as usize;
+                if sleeve_visited[neighbour] {
+                    continue;
+                }
+                let Some(neighbour_candidate) = sleeve_candidates[neighbour].as_ref() else {
+                    continue;
+                };
+                if sleeve_pair(neighbour_candidate) != expected_pair {
+                    continue;
+                }
+                sleeve_visited[neighbour] = true;
+                queue.push_back(neighbour);
+            }
+        }
+        let minimum_parent_lightness = parent_lab[group_pair.0 as usize]
+            .l
+            .min(parent_lab[group_pair.1 as usize].l);
+        // A real dark outline is often quantized into several adjacent
+        // coreless labels. Protect each source-supported or genuinely
+        // near-black label, but do not let a short protected tail preserve a
+        // much longer run of grey or coloured antialias samples. This keeps a
+        // black contour intact without retaining its raster-phase shoulders.
+        let group_dark_boundary_support = group
+            .iter()
+            .flat_map(|&label| components[label].iter())
+            .filter(|&&index| roles.dark_boundary[index])
+            .count();
+        let group_dark_extremum = group
+            .iter()
+            .flat_map(|&label| components[label].iter())
+            .filter(|&&index| {
+                source_lab[index].l < 25.0 && source_lab[index].l + 6.0 < minimum_parent_lightness
+            })
+            .count();
+        let mut accepted_labels = Vec::new();
+        if area > 4 {
+            if group_dark_boundary_support * 16 <= area && group_dark_extremum * 4 < area * 3 {
+                accepted_labels.extend(group.iter().copied());
+            } else if area >= 24
+                && group.len() >= 3
+                && group_dark_boundary_support > 0
+                && group_dark_boundary_support * 6 <= area
+                && group_dark_extremum * 4 < area * 3
+            {
+                // A long coloured antialias sleeve can terminate in a short
+                // authored outline. Split protection only for that specific
+                // shape; ordinary groups retain the conservative all-or-none
+                // decision above.
+                for &label in &group {
+                    let component = &components[label];
+                    let dark_boundary_support = component
+                        .iter()
+                        .filter(|&&index| roles.dark_boundary[index])
+                        .count();
+                    let dark_extremum = component
+                        .iter()
+                        .filter(|&&index| {
+                            source_lab[index].l < 25.0
+                                && source_lab[index].l + 6.0 < minimum_parent_lightness
+                        })
+                        .count();
+                    if dark_boundary_support * 16 <= component.len()
+                        && dark_extremum * 4 < component.len() * 3
+                    {
+                        accepted_labels.push(label);
+                    }
+                }
+            }
+        }
+        for label in accepted_labels {
+            sleeve_accepted[label] = true;
+        }
+    }
+
+    // A dark antialiased contour is frequently quantized into a chain of
+    // one-pixel Paint labels. Keeping every shade as an independent face
+    // exposes their raster rectangles in the SVG even though their union is
+    // one authored outline. Consolidate only strongly dark-boundary-supported
+    // coreless fragments, and keep the result as one dark Paint owner rather
+    // than absorbing the contour into either adjacent face.
+    let mut dark_outline_candidate = vec![false; count];
+    let mut dark_outline_lightness = vec![0.0_f32; count];
+    for label in 0..count {
+        let component = &components[label];
+        if component.is_empty()
+            || component.len() > 64
+            || core_counts[label] != 0
+            || component
+                .iter()
+                .any(|&index| roles.visible_ridge_centres[index])
+            || !native_antialias_width(component, labels, label as u32, image.width, image.height)
+        {
+            continue;
+        }
+        let mut lightness = component
+            .iter()
+            .map(|&index| source_lab[index].l)
+            .collect::<Vec<_>>();
+        let median_lightness = median_channel(&mut lightness);
+        dark_outline_lightness[label] = median_lightness;
+        let dark_support = component
+            .iter()
+            .filter(|&&index| roles.dark_boundary[index])
+            .count();
+        if dark_support * 4 < component.len() * 3 {
+            continue;
+        }
+        if median_lightness >= 50.0 {
+            continue;
+        }
+        dark_outline_candidate[label] = true;
+    }
+    let mut dark_outline_owner = vec![None::<u32>; count];
+    let mut dark_outline_visited = vec![false; count];
+    for start in 0..count {
+        if !dark_outline_candidate[start] || dark_outline_visited[start] {
+            continue;
+        }
+        let mut queue = VecDeque::from([start]);
+        let mut group = Vec::new();
+        let mut area = 0_usize;
+        let mut dark_support = 0_usize;
+        let mut near_black = 0_usize;
+        dark_outline_visited[start] = true;
+        while let Some(label) = queue.pop_front() {
+            group.push(label);
+            let component = &components[label];
+            area += component.len();
+            dark_support += component
+                .iter()
+                .filter(|&&index| roles.dark_boundary[index])
+                .count();
+            near_black += component
+                .iter()
+                .filter(|&&index| source_lab[index].l < 25.0)
+                .count();
+            for &neighbour in &component_adjacency[label] {
+                let neighbour = neighbour as usize;
+                if dark_outline_candidate[neighbour] && !dark_outline_visited[neighbour] {
+                    dark_outline_visited[neighbour] = true;
+                    queue.push_back(neighbour);
+                }
+            }
+        }
+        if group.len() < 2 || area > 256 || dark_support * 10 < area * 9 || near_black * 2 < area {
+            continue;
+        }
+        let mut stable_contacts = HashMap::<usize, usize>::new();
+        for &label in &group {
+            for (&candidate, &contact) in &contacts[label] {
+                let candidate = candidate as usize;
+                if parent_lab[candidate].l < 25.0 {
+                    *stable_contacts.entry(candidate).or_default() += contact;
+                }
+            }
+        }
+        let mut stable_dark_faces = stable_contacts.into_iter().collect::<Vec<_>>();
+        stable_dark_faces.sort_unstable_by(|left, right| {
+            right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0))
+        });
+        // Long contours amplify a one-pixel ownership break at their endpoint:
+        // fitting the fragmented run and its durable black continuation as
+        // separate paths can round away their narrow junction. Join only a
+        // long run to the near-black stable face it actually contacts. Short
+        // marks retain the independent owner selected below.
+        let stable_owner = if area >= 96 {
+            stable_dark_faces
+                .iter()
+                .copied()
+                .filter(|&(label, _)| parent_lab[label].l < 25.0)
+                .max_by(|left, right| left.1.cmp(&right.1).then_with(|| right.0.cmp(&left.0)))
+                .map(|(label, _)| label)
+        } else {
+            None
+        };
+        let mut owner = stable_owner;
+        for &label in &group {
+            if stable_owner.is_some() {
+                break;
+            }
+            if dark_outline_lightness[label] >= 25.0 {
+                continue;
+            }
+            let replace = owner
+                .map(|current| {
+                    components[label].len() > components[current].len()
+                        || (components[label].len() == components[current].len() && label < current)
+                })
+                .unwrap_or(true);
+            if replace {
+                owner = Some(label);
+            }
+        }
+        let Some(owner) = owner else {
+            continue;
+        };
+        for label in group {
+            dark_outline_owner[label] = Some(owner as u32);
+        }
+    }
+
+    // Quantisation also leaves same-material microfaces along a multi-tone
+    // edge. They are not two-parent sleeves: a nearby gradient subdivision
+    // appears as a third durable owner and correctly makes the sleeve test
+    // conservative. A coreless native-width face can still be
+    // returned wholesale to a touching durable owner when its own source
+    // colour is perceptually the same. Propagate only through already proven
+    // microfaces so a short run of raster samples reaches the durable face;
+    // a dark outline has no colour-compatible owner and remains independent.
+    let mut component_source_lab = vec![Lab::default(); count];
+    let mut same_material_candidate = vec![false; count];
+    for label in 0..count {
+        let component = &components[label];
+        if component.is_empty()
+            || component.len() > 64
+            || stable[label]
+            || sleeve_accepted[label]
+            || dark_outline_owner[label].is_some()
+            || component
+                .iter()
+                .any(|&index| roles.visible_ridge_centres[index])
+            || !native_antialias_width(component, labels, label as u32, image.width, image.height)
+        {
+            continue;
+        }
+        let mut min_x = image.width;
+        let mut min_y = image.height;
+        let mut max_x = 0_usize;
+        let mut max_y = 0_usize;
+        let mut lightness = Vec::with_capacity(component.len());
+        let mut green_red = Vec::with_capacity(component.len());
+        let mut blue_yellow = Vec::with_capacity(component.len());
+        for &index in component {
+            let x = index % image.width;
+            let y = index / image.width;
+            min_x = min_x.min(x);
+            min_y = min_y.min(y);
+            max_x = max_x.max(x);
+            max_y = max_y.max(y);
+            lightness.push(source_lab[index].l);
+            green_red.push(source_lab[index].a);
+            blue_yellow.push(source_lab[index].b);
+        }
+        let box_width = max_x - min_x + 1;
+        let box_height = max_y - min_y + 1;
+        if box_width.min(box_height) > 6 {
+            continue;
+        }
+        component_source_lab[label] = Lab {
+            l: median_channel(&mut lightness),
+            a: median_channel(&mut green_red),
+            b: median_channel(&mut blue_yellow),
+        };
+        same_material_candidate[label] = true;
+    }
+    // A sharpened dark outline can itself be quantized into coreless Paint
+    // fragments.  In that case the light ringing shoulder beside it has only
+    // one stable face, so the two-durable-face sleeve detector cannot assign
+    // it.  Recover that topology after the dark fragments have acquired one
+    // Paint owner: the shoulder must follow both the proven outline and one
+    // durable face for most of its length, carry dark-boundary support, and be
+    // a modest lightness overshoot of that face.
+    let mut outline_shoulder_assignment = vec![None::<(u32, u32, Vec<bool>)>; count];
+    for label in 0..count {
+        if !same_material_candidate[label] || components[label].len() < 4 {
+            continue;
+        }
+        let component = &components[label];
+        if !component.iter().any(|&index| roles.dark_boundary[index]) {
+            continue;
+        }
+        let mut face_support = HashMap::<u32, usize>::new();
+        let mut outline_support = HashMap::<u32, usize>::new();
+        for &index in component {
+            let x = index % image.width;
+            let y = index / image.width;
+            let mut nearby_faces = HashSet::<u32>::new();
+            let mut nearby_outlines = HashSet::<u32>::new();
+            for neighbour in [
+                (x > 0).then(|| index - 1),
+                (x + 1 < image.width).then(|| index + 1),
+                (y > 0).then(|| index - image.width),
+                (y + 1 < image.height).then(|| index + image.width),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                let neighbour_label = labels[neighbour] as usize;
+                if stable[neighbour_label] {
+                    nearby_faces.insert(neighbour_label as u32);
+                }
+                if let Some(owner) = dark_outline_owner[neighbour_label] {
+                    nearby_outlines.insert(owner);
+                }
+            }
+            for owner in nearby_faces {
+                *face_support.entry(owner).or_default() += 1;
+            }
+            for owner in nearby_outlines {
+                *outline_support.entry(owner).or_default() += 1;
+            }
+        }
+        let Some((outline, _)) = outline_support
+            .into_iter()
+            .filter(|&(_, support)| support * 3 >= component.len() * 2)
+            .max_by(|left, right| left.1.cmp(&right.1).then_with(|| right.0.cmp(&left.0)))
+        else {
+            continue;
+        };
+        let mut best = None::<(f32, usize, u32)>;
+        for (owner, support) in face_support {
+            if support * 3 < component.len() * 2 {
+                continue;
+            }
+            let face = parent_lab[owner as usize];
+            let overshoot = component_source_lab[label].l - face.l;
+            if face.l < 25.0 || !(0.0..=12.0).contains(&overshoot) {
+                continue;
+            }
+            let error = delta_e2000(component_source_lab[label], face);
+            if error > 12.0 {
+                continue;
+            }
+            let replace = best
+                .map(|current| {
+                    error < current.0
+                        || (error == current.0
+                            && (support > current.1 || (support == current.1 && owner < current.2)))
+                })
+                .unwrap_or(true);
+            if replace {
+                best = Some((error, support, owner));
+            }
+        }
+        let Some((_, _, face)) = best else {
+            continue;
+        };
+        let face_assignment = component
+            .iter()
+            .map(|&index| {
+                let x = index % image.width;
+                let y = index / image.width;
+                let mut face_distance = isize::MAX;
+                let mut outline_distance = isize::MAX;
+                for dy in -3_isize..=3 {
+                    for dx in -3_isize..=3 {
+                        let distance = dx * dx + dy * dy;
+                        if distance == 0 || distance > 9 {
+                            continue;
+                        }
+                        let px = x as isize + dx;
+                        let py = y as isize + dy;
+                        if px < 0
+                            || py < 0
+                            || px >= image.width as isize
+                            || py >= image.height as isize
+                        {
+                            continue;
+                        }
+                        let neighbour_label = labels[py as usize * image.width + px as usize];
+                        if neighbour_label == face {
+                            face_distance = face_distance.min(distance);
+                        }
+                        if dark_outline_owner[neighbour_label as usize] == Some(outline) {
+                            outline_distance = outline_distance.min(distance);
+                        }
+                    }
+                }
+                // On a one-pixel ringing band the distances tie. Its colour
+                // is an overshoot of the face, so retain that face on ties.
+                face_distance <= outline_distance
+            })
+            .collect();
+        outline_shoulder_assignment[label] = Some((face, outline, face_assignment));
+    }
+    let mut material_owner = vec![None::<u32>; count];
+    for (label, &is_stable) in stable.iter().enumerate() {
+        if is_stable {
+            material_owner[label] = Some(label as u32);
+        }
+    }
+    loop {
+        let previous = material_owner.clone();
+        let mut changed = 0_usize;
+        for label in 0..count {
+            if !same_material_candidate[label] || previous[label].is_some() {
+                continue;
+            }
+            let component = &components[label];
+            let mut owner_contacts = HashMap::<u32, usize>::new();
+            for &index in component {
+                let x = index % image.width;
+                let y = index / image.width;
+                for neighbour in [
+                    (x > 0).then(|| index - 1),
+                    (x + 1 < image.width).then(|| index + 1),
+                    (y > 0).then(|| index - image.width),
+                    (y + 1 < image.height).then(|| index + image.width),
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    let neighbour_label = labels[neighbour] as usize;
+                    if neighbour_label == label {
+                        continue;
+                    }
+                    if let Some(owner) = previous[neighbour_label] {
+                        *owner_contacts.entry(owner).or_default() += 1;
+                    }
+                }
+            }
+            let mut best = None::<(f32, usize, u32)>;
+            for (owner, contact) in owner_contacts {
+                if contact * 2 < component.len() {
+                    continue;
+                }
+                let error = delta_e2000(component_source_lab[label], parent_lab[owner as usize]);
+                let owner_lab = parent_lab[owner as usize];
+                // Saturated colour transitions can move farther in chroma
+                // than in lightness.  A substantial native-width shoulder
+                // that follows one owner for most of its length is still the
+                // owner's raster coverage, but isolated coloured marks must
+                // retain the stricter same-material limit.
+                let strongly_attached_light_shoulder = component.len() >= 8
+                    && component_source_lab[label].l >= 50.0
+                    && (component_source_lab[label].l - owner_lab.l).abs() <= 6.0
+                    && contact * 3 >= component.len() * 2;
+                let maximum_error = if strongly_attached_light_shoulder {
+                    8.5
+                } else {
+                    7.2
+                };
+                if error > maximum_error {
+                    continue;
+                }
+                let replace = best
+                    .map(|current| {
+                        error < current.0
+                            || (error == current.0
+                                && (contact > current.1
+                                    || (contact == current.1 && owner < current.2)))
+                    })
+                    .unwrap_or(true);
+                if replace {
+                    best = Some((error, contact, owner));
+                }
+            }
+            if let Some((_, _, owner)) = best {
+                material_owner[label] = Some(owner);
+                changed += 1;
+            }
+        }
+        if changed == 0 {
+            break;
+        }
+    }
+
     let mut corrected = labels.to_vec();
     let mut split_regions = 0_usize;
     for label in 0..count {
@@ -1338,6 +2123,52 @@ fn correct_antialias_partition(
         if component.is_empty()
             || !native_antialias_width(component, labels, label as u32, image.width, image.height)
         {
+            continue;
+        }
+        if let Some(owner) = dark_outline_owner[label] {
+            if owner != label as u32 {
+                for &index in component {
+                    corrected[index] = owner;
+                }
+                split_regions += 1;
+            }
+            continue;
+        }
+        if sleeve_accepted[label] {
+            if let Some((first, second, first_assignment)) = &sleeve_candidates[label] {
+                for (offset, &index) in component.iter().enumerate() {
+                    corrected[index] = if first_assignment[offset] {
+                        *first
+                    } else {
+                        *second
+                    };
+                    antialias[index] = true;
+                    paint_samples[index] = false;
+                }
+                split_regions += 1;
+                continue;
+            }
+        }
+        if let Some((face, outline, face_assignment)) = &outline_shoulder_assignment[label] {
+            for (offset, &index) in component.iter().enumerate() {
+                corrected[index] = if face_assignment[offset] {
+                    *face
+                } else {
+                    *outline
+                };
+                antialias[index] = true;
+                paint_samples[index] = false;
+            }
+            split_regions += 1;
+            continue;
+        }
+        if let Some(owner) = material_owner[label].filter(|&owner| owner != label as u32) {
+            for &index in component {
+                corrected[index] = owner;
+                antialias[index] = true;
+                paint_samples[index] = false;
+            }
+            split_regions += 1;
             continue;
         }
         let mut candidates: Vec<(u32, usize)> = contacts[label]
@@ -1498,6 +2329,7 @@ fn correct_antialias_partition(
         }
         split_regions += 1;
     }
+
     let mut compact_map = vec![u32::MAX; count];
     let mut present = vec![false; count];
     for &label in &corrected {
@@ -1576,7 +2408,7 @@ pub fn segment(image: &Raster, roles: &EdgeRoles, config: &Config) -> Segmentati
             .map(|&palette| lab_to_rgb(palette_lab[palette as usize]))
             .collect(),
     );
-    let correction = correct_antialias_partition(image, &labels, count);
+    let correction = correct_antialias_partition(image, &labels, count, roles);
     let labels = correction.labels;
     let count = labels
         .iter()
@@ -2564,7 +3396,8 @@ mod tests {
                 }
             }
         }
-        let correction = correct_antialias_partition(&image, &labels, 3);
+        let roles = classify(&image);
+        let correction = correct_antialias_partition(&image, &labels, 3, &roles);
         assert_eq!(correction.split_regions, 1);
         assert_ne!(correction.labels[3], correction.labels[4]);
         assert!(correction.paint_samples[3..=4].iter().all(|&value| !value));
@@ -2587,7 +3420,8 @@ mod tests {
         image.pixels[intermediate] = [0.47; 3];
         labels[intermediate] = 1;
 
-        let correction = correct_antialias_partition(&image, &labels, 3);
+        let roles = classify(&image);
+        let correction = correct_antialias_partition(&image, &labels, 3, &roles);
 
         assert_eq!(
             correction.labels[intermediate],
@@ -2614,7 +3448,8 @@ mod tests {
         image.pixels[distinct] = [1.0, 0.0, 0.0];
         labels[distinct] = 1;
 
-        let correction = correct_antialias_partition(&image, &labels, 3);
+        let roles = classify(&image);
+        let correction = correct_antialias_partition(&image, &labels, 3, &roles);
 
         assert_ne!(
             correction.labels[distinct],
@@ -2629,7 +3464,7 @@ mod tests {
     }
 
     #[test]
-    fn elongated_intermediate_feature_is_not_absorbed_as_compact_coverage() {
+    fn elongated_monotonic_boundary_band_is_absorbed() {
         let width = 7;
         let height = 9;
         let mut image = Raster::blank(width, height, [0.0, 0.0, 0.0]);
@@ -2647,13 +3482,527 @@ mod tests {
             labels[index] = 1;
         }
 
-        let correction = correct_antialias_partition(&image, &labels, 3);
+        let roles = classify(&image);
+        let correction = correct_antialias_partition(&image, &labels, 3, &roles);
+
+        for y in 2..=6 {
+            let index = y * width + 3;
+            assert_ne!(correction.labels[index], 1);
+            assert!(!correction.paint_samples[index]);
+        }
+        assert_eq!(correction.split_regions, 1);
+    }
+
+    #[test]
+    fn source_supported_medial_ridge_is_not_absorbed_as_a_sleeve() {
+        let width = 7;
+        let height = 9;
+        let mut image = Raster::blank(width, height, [0.0, 0.0, 0.0]);
+        let mut labels = vec![0_u32; width * height];
+        for y in 0..height {
+            for x in 3..width {
+                let index = y * width + x;
+                image.pixels[index] = [1.0; 3];
+                labels[index] = 2;
+            }
+        }
+        for y in 2..=6 {
+            let index = y * width + 3;
+            image.pixels[index] = [0.47; 3];
+            labels[index] = 1;
+        }
+        let mut roles = classify(&image);
+        for y in 2..=6 {
+            roles.visible_ridge_centres[y * width + 3] = true;
+        }
+
+        let correction = correct_antialias_partition(&image, &labels, 3, &roles);
         let middle = 4 * width + 3;
 
-        assert_ne!(correction.labels[middle], correction.labels[4 * width + 2]);
-        assert_ne!(correction.labels[middle], correction.labels[4 * width + 4]);
+        assert_eq!(correction.labels[middle], 1);
         assert!(correction.paint_samples[middle]);
         assert_eq!(correction.split_regions, 0);
+    }
+
+    #[test]
+    fn fragmented_dark_outline_is_not_absorbed_as_a_boundary_sleeve() {
+        let width = 7;
+        let height = 9;
+        let first = [0.78, 0.91, 0.95];
+        let second = [0.90, 0.22, 0.21];
+        let mut image = Raster::blank(width, height, first);
+        let mut labels = vec![0_u32; width * height];
+        for y in 0..height {
+            for x in 3..width {
+                let index = y * width + x;
+                image.pixels[index] = second;
+                labels[index] = 6;
+            }
+        }
+        for (offset, y) in (2..=6).enumerate() {
+            let index = y * width + 3;
+            image.pixels[index] = [0.03; 3];
+            labels[index] = 1 + offset as u32;
+        }
+        let mut roles = classify(&image);
+        assert!((2..=6).any(|y| roles.dark_boundary[y * width + 3]));
+        // The colour-extremum guard must preserve the authored outline even
+        // when the graph classifier has a local gap.
+        roles.dark_boundary.fill(false);
+
+        let correction = correct_antialias_partition(&image, &labels, 7, &roles);
+
+        for y in 2..=6 {
+            let index = y * width + 3;
+            assert!((1..=5).contains(&correction.labels[index]));
+            assert!(correction.paint_samples[index]);
+        }
+        assert_eq!(correction.split_regions, 0);
+    }
+
+    #[test]
+    fn fragmented_dark_boundary_labels_share_one_paint_owner() {
+        let width = 7;
+        let height = 9;
+        let first = [0.78, 0.91, 0.95];
+        let second = [0.90, 0.22, 0.21];
+        let mut image = Raster::blank(width, height, first);
+        let mut labels = vec![0_u32; width * height];
+        for y in 0..height {
+            for x in 3..width {
+                let index = y * width + x;
+                image.pixels[index] = second;
+                labels[index] = 6;
+            }
+        }
+        for (offset, y) in (2..=6).enumerate() {
+            let index = y * width + 3;
+            image.pixels[index] = [0.03; 3];
+            labels[index] = 1 + offset as u32;
+        }
+        let mut roles = classify(&image);
+        for y in 2..=6 {
+            let index = y * width + 3;
+            roles.dark_boundary[index] = true;
+            roles.visible_ridge_centres[index] = false;
+        }
+
+        let correction = correct_antialias_partition(&image, &labels, 7, &roles);
+        let outline = correction.labels[2 * width + 3];
+        assert_ne!(outline, correction.labels[2 * width + 2]);
+        assert_ne!(outline, correction.labels[2 * width + 4]);
+        for y in 2..=6 {
+            let index = y * width + 3;
+            assert_eq!(correction.labels[index], outline);
+            assert!(correction.paint_samples[index]);
+        }
+        assert_eq!(correction.split_regions, 4);
+    }
+
+    #[test]
+    fn long_fragmented_dark_boundary_joins_a_durable_black_endpoint() {
+        let width = 106;
+        let height = 9;
+        let light = [0.85, 0.90, 0.92];
+        let dark = [0.03; 3];
+        let mut image = Raster::blank(width, height, light);
+        let mut labels = vec![0_u32; width * height];
+        for (offset, x) in (2..=97).enumerate() {
+            let index = 4 * width + x;
+            image.pixels[index] = dark;
+            labels[index] = 1 + offset as u32;
+        }
+        for y in 2..=6 {
+            for x in 98..=102 {
+                let index = y * width + x;
+                image.pixels[index] = dark;
+                labels[index] = 97;
+            }
+        }
+        let mut roles = classify(&image);
+        for x in 2..=97 {
+            let index = 4 * width + x;
+            roles.dark_boundary[index] = true;
+            roles.visible_ridge_centres[index] = false;
+        }
+
+        let correction = correct_antialias_partition(&image, &labels, 98, &roles);
+        let durable = correction.labels[4 * width + 98];
+        for x in 2..=97 {
+            assert_eq!(correction.labels[4 * width + x], durable);
+        }
+        assert_eq!(correction.split_regions, 96);
+    }
+
+    #[test]
+    fn dark_outline_tail_does_not_preserve_coloured_sleeve_prefix() {
+        let width = 7;
+        let height = 31;
+        let first = [0.78, 0.91, 0.95];
+        let second = [0.90, 0.22, 0.21];
+        let mut image = Raster::blank(width, height, first);
+        let mut labels = vec![0_u32; width * height];
+        for y in 0..height {
+            for x in 3..width {
+                let index = y * width + x;
+                image.pixels[index] = second;
+                labels[index] = 4;
+            }
+        }
+        for y in 2..=13 {
+            let index = y * width + 3;
+            image.pixels[index] = [0.86, 0.98, 1.0];
+            labels[index] = 1;
+        }
+        for y in 14..=25 {
+            let index = y * width + 3;
+            image.pixels[index] = [0.50, 0.20, 0.20];
+            labels[index] = 2;
+        }
+        for y in 26..=28 {
+            let index = y * width + 3;
+            image.pixels[index] = [0.03; 3];
+            labels[index] = 3;
+        }
+
+        let mut roles = classify(&image);
+        roles.dark_boundary.fill(false);
+        for y in 2..=28 {
+            roles.visible_ridge_centres[y * width + 3] = false;
+        }
+        for y in 26..=28 {
+            roles.dark_boundary[y * width + 3] = true;
+        }
+
+        let correction = correct_antialias_partition(&image, &labels, 5, &roles);
+
+        for y in 2..=25 {
+            let index = y * width + 3;
+            assert!(matches!(correction.labels[index], 0 | 4));
+            assert!(!correction.paint_samples[index]);
+        }
+        let outline_label = correction.labels[26 * width + 3];
+        assert_ne!(outline_label, correction.labels[26 * width + 2]);
+        assert_ne!(outline_label, correction.labels[26 * width + 4]);
+        for y in 26..=28 {
+            let index = y * width + 3;
+            assert_eq!(correction.labels[index], outline_label);
+            assert!(correction.paint_samples[index]);
+        }
+        assert_eq!(correction.split_regions, 2);
+    }
+
+    #[test]
+    fn adjacent_single_pixel_quantisation_labels_form_one_sleeve() {
+        let width = 7;
+        let height = 9;
+        let first = [0.78, 0.91, 0.95];
+        let second = [0.90, 0.22, 0.21];
+        let mut image = Raster::blank(width, height, first);
+        let mut labels = vec![0_u32; width * height];
+        for y in 0..height {
+            for x in 3..width {
+                let index = y * width + x;
+                image.pixels[index] = second;
+                labels[index] = 6;
+            }
+        }
+        for (offset, y) in (2..=6).enumerate() {
+            let index = y * width + 3;
+            image.pixels[index] = [0.86, 0.98, 1.0];
+            labels[index] = 1 + offset as u32;
+        }
+        let mut roles = classify(&image);
+        for y in 2..=6 {
+            roles.visible_ridge_centres[y * width + 3] = false;
+        }
+
+        let correction = correct_antialias_partition(&image, &labels, 7, &roles);
+
+        for y in 2..=6 {
+            let index = y * width + 3;
+            assert!(matches!(correction.labels[index], 0 | 6));
+            assert!(!correction.paint_samples[index]);
+        }
+        assert_eq!(correction.split_regions, 5);
+    }
+
+    #[test]
+    fn repeated_four_pixel_sleeves_bridge_one_parent_pixel_gap() {
+        let width = 26;
+        let height = 12;
+        let first = [0.78, 0.91, 0.95];
+        let second = [0.90, 0.22, 0.21];
+        let mut image = Raster::blank(width, height, first);
+        let mut labels = vec![0_u32; width * height];
+
+        for x in 0..width {
+            let boundary_y = if x < 2 {
+                8
+            } else if x < 22 {
+                8 - (x - 2) / 5
+            } else {
+                4
+            };
+            for y in boundary_y..height {
+                let index = y * width + x;
+                image.pixels[index] = second;
+                labels[index] = 5;
+            }
+        }
+        for group in 0..4 {
+            let y = 8 - group;
+            let start_x = 2 + group * 5;
+            for x in start_x..start_x + 4 {
+                let index = y * width + x;
+                image.pixels[index] = [0.86, 0.98, 1.0];
+                labels[index] = 1 + group as u32;
+            }
+        }
+
+        let mut roles = classify(&image);
+        for group in 0..4 {
+            let y = 8 - group;
+            let start_x = 2 + group * 5;
+            for x in start_x..start_x + 4 {
+                roles.visible_ridge_centres[y * width + x] = false;
+            }
+        }
+
+        let correction = correct_antialias_partition(&image, &labels, 6, &roles);
+
+        for group in 0..4 {
+            let y = 8 - group;
+            let start_x = 2 + group * 5;
+            for x in start_x..start_x + 4 {
+                let index = y * width + x;
+                assert!(matches!(correction.labels[index], 0 | 5));
+                assert!(!correction.paint_samples[index]);
+            }
+        }
+        assert_eq!(correction.split_regions, 4);
+    }
+
+    #[test]
+    fn thin_same_material_microface_returns_to_durable_owner() {
+        let width = 9;
+        let height = 9;
+        let durable = [0.92, 0.24, 0.22];
+        let mut image = Raster::blank(width, height, durable);
+        let mut labels = vec![0_u32; width * height];
+        for x in 2..=5 {
+            let index = 4 * width + x;
+            image.pixels[index] = [0.96, 0.28, 0.26];
+            labels[index] = 1;
+        }
+        let mut roles = classify(&image);
+        for x in 2..=5 {
+            roles.visible_ridge_centres[4 * width + x] = false;
+        }
+
+        let correction = correct_antialias_partition(&image, &labels, 2, &roles);
+
+        for x in 2..=5 {
+            let index = 4 * width + x;
+            assert_eq!(correction.labels[index], 0);
+            assert!(!correction.paint_samples[index]);
+        }
+        assert_eq!(correction.split_regions, 1);
+    }
+
+    #[test]
+    fn substantial_chroma_shoulder_returns_to_lightness_matched_owner() {
+        let width = 12;
+        let height = 14;
+        // This pair reproduces a saturated red transition where the native
+        // samples differ little in lightness but slightly exceed the normal
+        // same-material chroma tolerance.
+        let durable = [0.778_05, 0.352_321, 0.363_366];
+        let shoulder = [0.916_967, 0.347_291, 0.317_088];
+        let error = delta_e2000(rgb_to_lab(durable), rgb_to_lab(shoulder));
+        assert!((7.2..=8.5).contains(&error));
+
+        let mut image = Raster::blank(width, height, durable);
+        let mut labels = vec![0_u32; width * height];
+        for y in 3..=10 {
+            for x in 5..=6 {
+                let index = y * width + x;
+                image.pixels[index] = shoulder;
+                labels[index] = 1;
+            }
+        }
+        let mut roles = classify(&image);
+        for y in 3..=10 {
+            for x in 5..=6 {
+                roles.visible_ridge_centres[y * width + x] = false;
+            }
+        }
+
+        let correction = correct_antialias_partition(&image, &labels, 2, &roles);
+
+        for y in 3..=10 {
+            for x in 5..=6 {
+                let index = y * width + x;
+                assert_eq!(correction.labels[index], 0);
+                assert!(!correction.paint_samples[index]);
+            }
+        }
+        assert_eq!(correction.split_regions, 1);
+    }
+
+    #[test]
+    fn short_chroma_mark_keeps_independent_paint() {
+        let width = 11;
+        let height = 11;
+        let durable = [0.778_05, 0.352_321, 0.363_366];
+        let shoulder = [0.916_967, 0.347_291, 0.317_088];
+        let mut image = Raster::blank(width, height, durable);
+        let mut labels = vec![0_u32; width * height];
+        for x in 2..=8 {
+            let index = 5 * width + x;
+            image.pixels[index] = shoulder;
+            labels[index] = 1;
+        }
+        let mut roles = classify(&image);
+        for x in 2..=8 {
+            roles.visible_ridge_centres[5 * width + x] = false;
+        }
+
+        let correction = correct_antialias_partition(&image, &labels, 2, &roles);
+
+        for x in 2..=8 {
+            let index = 5 * width + x;
+            assert_eq!(correction.labels[index], 1);
+            assert!(correction.paint_samples[index]);
+        }
+        assert_eq!(correction.split_regions, 0);
+    }
+
+    #[test]
+    fn ringing_shoulder_beside_fragmented_dark_outline_returns_to_face() {
+        let width = 10;
+        let height = 14;
+        let face = [0.450_583, 0.340_051, 0.353_434];
+        let shoulder = [0.510_028, 0.431_782, 0.453_044];
+        let outline = [0.03; 3];
+        let error = delta_e2000(rgb_to_lab(face), rgb_to_lab(shoulder));
+        assert!(error > 7.2 && error <= 12.0);
+
+        let mut image = Raster::blank(width, height, face);
+        let mut labels = vec![3_u32; width * height];
+        for y in 1..=12 {
+            let index = y * width;
+            image.pixels[index] = outline;
+            labels[index] = if y <= 6 { 1 } else { 2 };
+        }
+        for y in 3..=9 {
+            let index = y * width + 1;
+            image.pixels[index] = shoulder;
+            labels[index] = 4;
+        }
+        image.pixels[6 * width + 2] = shoulder;
+        labels[6 * width + 2] = 4;
+        let mut roles = classify(&image);
+        for y in 1..=12 {
+            let index = y * width;
+            roles.dark_boundary[index] = true;
+            roles.visible_ridge_centres[index] = false;
+        }
+        for y in 3..=9 {
+            let index = y * width + 1;
+            roles.dark_boundary[index] = y == 6;
+            roles.visible_ridge_centres[index] = false;
+        }
+        roles.visible_ridge_centres[6 * width + 2] = false;
+
+        let correction = correct_antialias_partition(&image, &labels, 5, &roles);
+
+        for y in 3..=9 {
+            let index = y * width + 1;
+            let expected = if y == 6 { index - 1 } else { index + 1 };
+            assert_eq!(correction.labels[index], correction.labels[expected]);
+            assert!(!correction.paint_samples[index]);
+        }
+        assert_eq!(
+            correction.labels[6 * width + 2],
+            correction.labels[6 * width + 3]
+        );
+        assert!(!correction.paint_samples[6 * width + 2]);
+    }
+
+    #[test]
+    fn elongated_ringing_sleeve_is_returned_to_parent_faces() {
+        let width = 7;
+        let height = 9;
+        let first = [0.78, 0.91, 0.95];
+        let second = [0.90, 0.22, 0.21];
+        let mut image = Raster::blank(width, height, first);
+        let mut labels = vec![0_u32; width * height];
+        for y in 0..height {
+            for x in 3..width {
+                let index = y * width + x;
+                image.pixels[index] = second;
+                labels[index] = 2;
+            }
+        }
+        for y in 2..=6 {
+            let index = y * width + 3;
+            // A sharpened-edge overshoot is deliberately outside the convex
+            // colour segment between the two durable faces.
+            image.pixels[index] = [0.86, 0.98, 1.0];
+            labels[index] = 1;
+        }
+
+        let mut roles = classify(&image);
+        for y in 2..=6 {
+            let index = y * width + 3;
+            roles.visible_ridge_centres[index] = false;
+        }
+        let correction = correct_antialias_partition(&image, &labels, 3, &roles);
+
+        for y in 2..=6 {
+            let index = y * width + 3;
+            assert_ne!(correction.labels[index], 1);
+            assert!(!correction.paint_samples[index]);
+        }
+        assert_eq!(correction.split_regions, 1);
+    }
+
+    #[test]
+    fn medium_dark_ringing_is_not_promoted_to_a_black_outline() {
+        let width = 7;
+        let height = 9;
+        let first = [0.78, 0.91, 0.95];
+        let second = [0.90, 0.22, 0.21];
+        let mut image = Raster::blank(width, height, first);
+        let mut labels = vec![0_u32; width * height];
+        for y in 0..height {
+            for x in 3..width {
+                let index = y * width + x;
+                image.pixels[index] = second;
+                labels[index] = 2;
+            }
+        }
+        for y in 2..=6 {
+            let index = y * width + 3;
+            image.pixels[index] = [0.50, 0.20, 0.20];
+            labels[index] = 1;
+        }
+        let mut roles = classify(&image);
+        for y in 2..=6 {
+            let index = y * width + 3;
+            roles.dark_boundary[index] = false;
+            roles.visible_ridge_centres[index] = false;
+        }
+
+        let correction = correct_antialias_partition(&image, &labels, 3, &roles);
+
+        for y in 2..=6 {
+            let index = y * width + 3;
+            assert!(matches!(correction.labels[index], 0 | 2));
+            assert!(!correction.paint_samples[index]);
+        }
+        assert_eq!(correction.split_regions, 1);
     }
 
     #[test]

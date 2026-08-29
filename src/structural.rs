@@ -1552,6 +1552,67 @@ fn classify_boundary_role(
     }
 }
 
+/// A short dark extremum at an already-dark material boundary is commonly a
+/// resize/sharpening undershoot, not an authored constant-width ink stroke.
+/// Keep it in Paint so shared geometry can follow the source boundary without
+/// turning the run into a round-capped structural capsule.
+///
+/// This is intentionally a whole-profile ownership decision rather than a
+/// coordinate or raster mask. Long contours remain structural, as do short
+/// contours with a light incident face; only the ambiguous short run between
+/// two dark faces is returned to Paint.
+fn paint_owned_dark_boundary_undershoot(
+    stroke: &StructuralStroke,
+    source_lab: &[Lab],
+    width: usize,
+    height: usize,
+) -> bool {
+    if stroke.role != "ridge-on-boundary" || stroke.points.len() < 3 {
+        return false;
+    }
+    let precise_points = stroke.precise_points.clone().unwrap_or_else(|| {
+        stroke
+            .points
+            .iter()
+            .map(|point| [point.x as f64, point.y as f64])
+            .collect()
+    });
+    let length = precise_points
+        .windows(2)
+        .map(|pair| (pair[1][0] - pair[0][0]).hypot(pair[1][1] - pair[0][1]))
+        .sum::<f64>();
+    if length > 5.0 * stroke.width.max(0.4) as f64 {
+        return false;
+    }
+
+    let mut dark_sides = 0_usize;
+    let mut undershoot = 0_usize;
+    for (index, &point) in precise_points.iter().enumerate() {
+        let [nx, ny] = precise_normal_at(&precise_points, index);
+        let sample = |offset: f64| {
+            bilinear_lab_precise(
+                source_lab,
+                width,
+                height,
+                [point[0] + offset * nx, point[1] + offset * ny],
+            )
+        };
+        let sides = [sample(-1.5), sample(1.5)];
+        let centre = [-0.75_f64, 0.0, 0.75]
+            .into_iter()
+            .map(sample)
+            .min_by(|first, second| first.l.total_cmp(&second.l))
+            .unwrap_or_else(|| sample(0.0));
+        if sides[0].l.max(sides[1].l) < 30.0 {
+            dark_sides += 1;
+        }
+        if centre.l + 6.0 < sides[0].l.min(sides[1].l) {
+            undershoot += 1;
+        }
+    }
+    dark_sides * 10 >= precise_points.len() * 9 && undershoot * 4 >= precise_points.len() * 3
+}
+
 fn boundary_profile_flags(
     stroke: &StructuralStroke,
     source_lab: &[Lab],
@@ -3286,7 +3347,9 @@ pub fn select_missing_with_junctions(
             visible_graph.push(stroke);
         } else {
             stroke.role = classify_boundary_role(&stroke, &source_lab, width, height);
-            boundary_graph.push(stroke);
+            if !paint_owned_dark_boundary_undershoot(&stroke, &source_lab, width, height) {
+                boundary_graph.push(stroke);
+            }
         }
     }
     let mut missing_support = vec![false; width * height];
@@ -3715,6 +3778,76 @@ pub fn select_missing_with_junctions(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn horizontal_boundary_stroke(last_x: usize) -> StructuralStroke {
+        StructuralStroke {
+            points: (2..=last_x)
+                .map(|x| Point {
+                    x: x as f32 + 0.5,
+                    y: 4.5,
+                })
+                .collect(),
+            path_data: None,
+            precise_points: None,
+            color: [0.02; 3],
+            width: 2.0,
+            role: "ridge-on-boundary",
+            width_samples: Vec::new(),
+        }
+    }
+
+    fn dark_boundary_profile(light_side: f32) -> Vec<Lab> {
+        let width = 18;
+        let height = 9;
+        let mut values = vec![Lab::default(); width * height];
+        for y in 0..height {
+            let lightness = if y < 4 {
+                light_side
+            } else if y == 4 {
+                5.0
+            } else {
+                22.0
+            };
+            for x in 0..width {
+                values[y * width + x] = Lab {
+                    l: lightness,
+                    a: 0.0,
+                    b: 0.0,
+                };
+            }
+        }
+        values
+    }
+
+    #[test]
+    fn short_dark_boundary_undershoot_stays_paint_owned() {
+        let source_lab = dark_boundary_profile(18.0);
+        assert!(paint_owned_dark_boundary_undershoot(
+            &horizontal_boundary_stroke(10),
+            &source_lab,
+            18,
+            9,
+        ));
+    }
+
+    #[test]
+    fn ordinary_or_long_boundary_ridge_remains_structural() {
+        let light_incident_face = dark_boundary_profile(70.0);
+        assert!(!paint_owned_dark_boundary_undershoot(
+            &horizontal_boundary_stroke(10),
+            &light_incident_face,
+            18,
+            9,
+        ));
+
+        let dark_incident_faces = dark_boundary_profile(18.0);
+        assert!(!paint_owned_dark_boundary_undershoot(
+            &horizontal_boundary_stroke(14),
+            &dark_incident_faces,
+            18,
+            9,
+        ));
+    }
 
     #[test]
     fn thinning_keeps_a_line_connected() {
