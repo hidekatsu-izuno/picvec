@@ -125,7 +125,7 @@ pub fn skimage_lab_values_to_rgb(labs: &[Lab]) -> Vec<[f32; 3]> {
         rgb.push([
             value[0] * 3.240_481_4 + value[1] * -1.537_151_6 + value[2] * -0.498_536_32,
             value[0] * -0.969_254_9 + value[1] * 1.875_99 + value[2] * 0.041_555_93,
-            value[0] * 0.055_646_64 + value[1] * -0.204_041_35 + value[2] * 1.057_311_0,
+            value[0] * 0.055_646_64 + value[1] * -0.204_041_35 + value[2] * 1.057_311,
         ]);
     }
     let mut gamma_values = Vec::<f32>::new();
@@ -140,16 +140,16 @@ pub fn skimage_lab_values_to_rgb(labs: &[Lab]) -> Vec<[f32; 3]> {
     }
     crate::svml::pow_f32_in_place(&mut gamma_values, 1.0 / 2.4);
     for (row, value) in rgb.iter_mut().enumerate() {
-        for channel in 0..3 {
+        for (channel, entry) in value.iter_mut().enumerate() {
             if let Some(position) = gamma_positions
                 .iter()
                 .position(|&candidate| candidate == (row, channel))
             {
-                value[channel] = 1.055 * gamma_values[position] - 0.055;
+                *entry = 1.055 * gamma_values[position] - 0.055;
             } else {
-                value[channel] *= 12.92;
+                *entry *= 12.92;
             }
-            value[channel] = value[channel].clamp(0.0, 1.0);
+            *entry = entry.clamp(0.0, 1.0);
         }
     }
     rgb

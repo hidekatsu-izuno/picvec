@@ -226,7 +226,7 @@ fn parse_path(value: &str) -> Option<Vec<Subpath>> {
             command = None;
             continue;
         }
-        let mut point = |index: &mut usize| -> Option<VectorPoint> {
+        let point = |index: &mut usize| -> Option<VectorPoint> {
             let mut point = VectorPoint {
                 x: number(&tokens, index)?,
                 y: number(&tokens, index)?,
@@ -692,6 +692,7 @@ fn rect_geometry(subpath: &Subpath) -> Option<(f64, f64, f64, f64)> {
     (width > 0.0 && height > 0.0).then_some((xs[0], ys[0], width, height))
 }
 
+#[allow(clippy::needless_range_loop)]
 fn solve_three_by_three(mut matrix: [[f64; 3]; 3], mut values: [f64; 3]) -> Option<[f64; 3]> {
     for pivot in 0..3 {
         let selected = (pivot..3).max_by(|&first, &second| {

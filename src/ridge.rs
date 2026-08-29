@@ -641,9 +641,7 @@ pub fn adjust_paint_samples_from_analysis(
         .iter()
         .zip(&dark_black)
         .zip(labs)
-        .map(|((&candidate, &black), lab)| {
-            candidate && !black && lab.a.hypot(lab.b) >= 18.0 || black
-        })
+        .map(|((&candidate, &black), lab)| black || candidate && lab.a.hypot(lab.b) >= 18.0)
         .collect();
     let lightness: Vec<f32> = labs.iter().map(|lab| lab.l).collect();
     let minima = local_extreme(&lightness, image.width, image.height, true);

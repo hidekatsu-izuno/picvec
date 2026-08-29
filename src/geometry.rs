@@ -309,15 +309,6 @@ fn is_canvas_vertex(vertex: u64, stride: usize, width: usize, height: usize) -> 
     point.x == 0.0 || point.y == 0.0 || point.x == width as f32 || point.y == height as f32
 }
 
-fn is_canvas_edge(first: u64, second: u64, stride: usize, width: usize, height: usize) -> bool {
-    let first = point_from_vertex(first, stride);
-    let second = point_from_vertex(second, stride);
-    (first.x == 0.0 && second.x == 0.0)
-        || (first.y == 0.0 && second.y == 0.0)
-        || (first.x == width as f32 && second.x == width as f32)
-        || (first.y == height as f32 && second.y == height as f32)
-}
-
 fn normalized(vector: Point) -> Point {
     let length = (vector.x * vector.x + vector.y * vector.y).sqrt();
     if length <= 1e-8 {
@@ -328,50 +319,6 @@ fn normalized(vector: Point) -> Point {
             y: vector.y / length,
         }
     }
-}
-
-fn trace_topology_strand(
-    start: u64,
-    following: u64,
-    continuation: &HashMap<(u64, u64), u64>,
-    remaining: &mut HashSet<EdgeKey>,
-) -> Vec<u64> {
-    let mut strand = vec![start, following];
-    remaining.remove(&EdgeKey::new(start, following));
-    let (mut previous, mut current) = (start, following);
-    while let Some(&next) = continuation.get(&(current, previous)) {
-        let edge = EdgeKey::new(current, next);
-        if !remaining.remove(&edge) {
-            break;
-        }
-        strand.push(next);
-        previous = current;
-        current = next;
-        if current == start {
-            break;
-        }
-    }
-    if strand.last() != Some(&start) {
-        // The seed edge may be in the middle of an open strand.  Extend its
-        // other direction too; otherwise HashSet iteration would split one
-        // physical curve at an arbitrary point.
-        let mut prefix = Vec::<u64>::new();
-        previous = following;
-        current = start;
-        while let Some(&next) = continuation.get(&(current, previous)) {
-            let edge = EdgeKey::new(current, next);
-            if !remaining.remove(&edge) {
-                break;
-            }
-            prefix.push(next);
-            previous = current;
-            current = next;
-        }
-        prefix.reverse();
-        prefix.extend(strand);
-        strand = prefix;
-    }
-    strand
 }
 
 fn trace_edge_chains(
@@ -439,24 +386,6 @@ fn trace_edge_chains(
         trace(edge.0, edge.1, &mut remaining, &mut chains);
     }
     chains
-}
-
-fn projected_to_segment(point: Point, start: Point, end: Point) -> Point {
-    let direction = Point {
-        x: end.x - start.x,
-        y: end.y - start.y,
-    };
-    let squared = direction.x * direction.x + direction.y * direction.y;
-    if squared <= 1e-8 {
-        return start;
-    }
-    let parameter = (((point.x - start.x) * direction.x + (point.y - start.y) * direction.y)
-        / squared)
-        .clamp(0.0, 1.0);
-    Point {
-        x: start.x + parameter * direction.x,
-        y: start.y + parameter * direction.y,
-    }
 }
 
 fn straight_cubic(start: Point, end: Point) -> CurveSegment {
@@ -994,69 +923,6 @@ fn potrace_master_curves(
     (indices, curves)
 }
 
-fn regularize_strand_positions(
-    strand: &[u64],
-    stride: usize,
-    proposals: &mut HashMap<u64, Vec<Point>>,
-) {
-    if strand.len() < 3 {
-        return;
-    }
-    let closed = strand.first() == strand.last();
-    let vertex_slice = if closed {
-        &strand[..strand.len() - 1]
-    } else {
-        strand
-    };
-    let raw: Vec<Point> = vertex_slice
-        .iter()
-        .map(|&vertex| point_from_vertex(vertex, stride))
-        .collect();
-    let simplified = if closed {
-        simplify_grid_closed(&raw, std::f32::consts::FRAC_1_SQRT_2)
-    } else {
-        simplify_grid_open(&raw, std::f32::consts::FRAC_1_SQRT_2)
-    };
-    if simplified.len() < 2 {
-        return;
-    }
-    let segment_count = if closed {
-        simplified.len()
-    } else {
-        simplified.len() - 1
-    };
-    for (offset, (&vertex, &point)) in vertex_slice.iter().zip(&raw).enumerate() {
-        // Open strand endpoints are material junctions without a continuation
-        // on one side. Keep them exact; another strand may attach there.
-        if !closed && (offset == 0 || offset + 1 == raw.len()) {
-            continue;
-        }
-        let target = (0..segment_count)
-            .map(|index| {
-                projected_to_segment(
-                    point,
-                    simplified[index],
-                    simplified[(index + 1) % simplified.len()],
-                )
-            })
-            .min_by(|first, second| point.distance(*first).total_cmp(&point.distance(*second)))
-            .unwrap_or(point);
-        let delta = Point {
-            x: target.x - point.x,
-            y: target.y - point.y,
-        };
-        let distance = (delta.x * delta.x + delta.y * delta.y).sqrt();
-        if distance <= 1e-6 {
-            continue;
-        }
-        let amount = (0.5 / distance).min(1.0);
-        proposals.entry(vertex).or_default().push(Point {
-            x: point.x + delta.x * amount,
-            y: point.y + delta.y * amount,
-        });
-    }
-}
-
 #[derive(Clone, Debug)]
 struct RegularizedStrand {
     points: Vec<Point>,
@@ -1532,7 +1398,7 @@ fn boundary_topology(
         };
         let mut ordered: Vec<u64> = neighbours.iter().copied().collect();
         ordered.sort_by_key(|&value| vertex_lex_key(value, stride));
-        let mut pairings: Vec<(u64, u64)> = match ordered.as_slice() {
+        let pairings: Vec<(u64, u64)> = match ordered.as_slice() {
             [first, second] => vec![(*first, *second)],
             [first, second, third] => {
                 let alternatives = [(*first, *second), (*first, *third), (*second, *third)];
@@ -1621,10 +1487,7 @@ fn boundary_topology(
         let mut strand = vec![start, following];
         remaining.remove(&EdgeKey::new(start, following));
         let (mut previous, mut current) = (start, following);
-        loop {
-            let Some(&next) = continuation.get(&(current, previous)) else {
-                break;
-            };
+        while let Some(&next) = continuation.get(&(current, previous)) {
             let edge = EdgeKey::new(current, next);
             if !remaining.remove(&edge) {
                 break;
@@ -2288,6 +2151,7 @@ fn enforce_observed_coordinate_monotonicity(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn fit_smoothed_chain(
     smoothed: &[Point],
     raw: &[Point],
@@ -2307,7 +2171,7 @@ fn fit_smoothed_chain(
     if base.len() < 2 {
         return Vec::new();
     }
-    let (mut ordered, ordered_raw, mut split_indices, ordered_monotone) = if closed {
+    let (mut ordered, ordered_raw, split_indices, ordered_monotone) = if closed {
         let start = fixed.iter().copied().min().unwrap_or_else(|| {
             (0..base.len())
                 .min_by(|&first, &second| {
@@ -2404,6 +2268,7 @@ fn fit_smoothed_chain(
     curves
 }
 
+#[allow(clippy::too_many_arguments)]
 fn fit_shared_boundary_candidate(
     points: &[Point],
     closed: bool,
@@ -4756,23 +4621,23 @@ fn fit_adaptive_boundary_geometry(
                         let point = point_from_vertex(track[fit_start - 1], stride);
                         [point.x, point.y]
                     });
-                    let start_connection_spans = (fit_start > 0)
-                        .then(|| {
-                            edge_spans
-                                .get(&EdgeKey::new(track[fit_start - 1], track[fit_start]))
-                                .into_iter()
-                                .flatten()
-                                .map(|piece| {
-                                    serde_json::json!({
-                                        "id": piece.master_id,
-                                        "start": piece.start_parameter,
-                                        "end": piece.end_parameter,
-                                        "curve": encode_curve(&piece.curve),
-                                    })
+                    let start_connection_spans = if fit_start > 0 {
+                        edge_spans
+                            .get(&EdgeKey::new(track[fit_start - 1], track[fit_start]))
+                            .into_iter()
+                            .flatten()
+                            .map(|piece| {
+                                serde_json::json!({
+                                    "id": piece.master_id,
+                                    "start": piece.start_parameter,
+                                    "end": piece.end_parameter,
+                                    "curve": encode_curve(&piece.curve),
                                 })
-                                .collect::<Vec<_>>()
-                        })
-                        .unwrap_or_default();
+                            })
+                            .collect::<Vec<_>>()
+                    } else {
+                        Vec::new()
+                    };
                     continuity_diagnostics.push(serde_json::json!({
                         "source_len": raw.len(),
                         "baseline_len": baseline.len(),
@@ -5636,7 +5501,7 @@ fn shared_region_loop(
     chains: &[SharedChain],
     lookup: &EdgeChainLookup,
     cubics: &mut usize,
-    lines: &mut usize,
+    _lines: &mut usize,
 ) -> Result<(Vec<Point>, String), SharedLoopFailure> {
     if vertices.len() < 3 {
         return Err(SharedLoopFailure::Empty);
@@ -5777,88 +5642,6 @@ pub fn open_path_data(points: &[Point]) -> String {
         }
     }
     output
-}
-
-fn primitive_for(
-    loops: &[Vec<Point>],
-    region: usize,
-    segmentation: &Segmentation,
-) -> Option<Primitive> {
-    let statistics = &segmentation.regions[region];
-    let raster_width = statistics.max_x.saturating_sub(statistics.min_x);
-    let raster_height = statistics.max_y.saturating_sub(statistics.min_y);
-    if raster_width * raster_height == statistics.area {
-        return Some(Primitive::Rect {
-            x: statistics.min_x as f32,
-            y: statistics.min_y as f32,
-            width: raster_width as f32,
-            height: raster_height as f32,
-        });
-    }
-    if loops.len() != 1 {
-        return None;
-    }
-    let points = &loops[0];
-    if points.len() < 4 {
-        return None;
-    }
-    let min_x = points.iter().map(|p| p.x).fold(f32::INFINITY, f32::min);
-    let max_x = points.iter().map(|p| p.x).fold(f32::NEG_INFINITY, f32::max);
-    let min_y = points.iter().map(|p| p.y).fold(f32::INFINITY, f32::min);
-    let max_y = points.iter().map(|p| p.y).fold(f32::NEG_INFINITY, f32::max);
-    let width = max_x - min_x;
-    let height = max_y - min_y;
-    let region_area = segmentation.regions[region].area;
-    let corners = remove_collinear(points);
-    if corners.len() == 4 && ((width * height) - region_area as f32).abs() <= 1.0 {
-        return Some(Primitive::Rect {
-            x: min_x,
-            y: min_y,
-            width,
-            height,
-        });
-    }
-    if points.len() < 8 || width < 4.0 || height < 4.0 {
-        return None;
-    }
-    let cx = (min_x + max_x) * 0.5;
-    let cy = (min_y + max_y) * 0.5;
-    let rx = width * 0.5;
-    let ry = height * 0.5;
-    let residual = points
-        .iter()
-        .map(|p| (((p.x - cx) / rx).powi(2) + ((p.y - cy) / ry).powi(2) - 1.0).abs())
-        .sum::<f32>()
-        / points.len() as f32;
-    let ellipse_area = std::f32::consts::PI * rx * ry;
-    let area_error = (ellipse_area - region_area as f32).abs() / region_area.max(1) as f32;
-    let mut mismatch = 0_usize;
-    let mut union = 0_usize;
-    for y in statistics.min_y.saturating_sub(1)..(statistics.max_y + 1).min(segmentation.height) {
-        for x in statistics.min_x.saturating_sub(1)..(statistics.max_x + 1).min(segmentation.width)
-        {
-            let actual = segmentation.labels[y * segmentation.width + x] == region as u32;
-            let predicted = (((x as f32 + 0.5 - cx) / rx).powi(2)
-                + ((y as f32 + 0.5 - cy) / ry).powi(2))
-                <= 1.0;
-            mismatch += usize::from(actual != predicted);
-            union += usize::from(actual || predicted);
-        }
-    }
-    let mask_error = mismatch as f32 / union.max(1) as f32;
-    if residual < 0.18 && area_error < 0.12 && mask_error <= 0.015 {
-        if (rx - ry).abs() / rx.max(ry) < 0.035 {
-            Some(Primitive::Circle {
-                cx,
-                cy,
-                radius: (rx + ry) * 0.5,
-            })
-        } else {
-            Some(Primitive::Ellipse { cx, cy, rx, ry })
-        }
-    } else {
-        None
-    }
 }
 
 fn paint_order_ranks(segmentation: &Segmentation) -> Vec<usize> {

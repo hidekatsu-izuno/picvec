@@ -2134,7 +2134,7 @@ fn median_rgb(mut samples: Vec<[f32; 3]>) -> [f32; 3] {
     for channel in 0..3 {
         samples.sort_by(|first, second| first[channel].total_cmp(&second[channel]));
         let middle = samples.len() / 2;
-        result[channel] = if samples.len() % 2 == 0 {
+        result[channel] = if samples.len().is_multiple_of(2) {
             0.5 * (samples[middle - 1][channel] + samples[middle][channel])
         } else {
             samples[middle][channel]
@@ -2187,7 +2187,7 @@ fn sample_graph_color(source: &Raster, stroke: &StructuralStroke) -> [f32; 3] {
         let median = |values: &mut Vec<f32>| {
             values.sort_by(f32::total_cmp);
             let middle = values.len() / 2;
-            if values.len() % 2 == 0 {
+            if values.len().is_multiple_of(2) {
                 0.5 * (values[middle - 1] + values[middle])
             } else {
                 values[middle]
@@ -2311,9 +2311,7 @@ fn remove_graph_aligned_overlap(
             }
             let mut last = index;
             index += 1;
-            if first > 0 {
-                first -= 1;
-            }
+            first = first.saturating_sub(1);
             if last + 1 < edge.points.len() {
                 last += 1;
             }
@@ -2714,6 +2712,7 @@ fn split_graph_polyline_midpoint(points: &[Point]) -> (Vec<Point>, Vec<Point>) {
     (points.to_vec(), vec![points[points.len() - 1]])
 }
 
+#[allow(clippy::too_many_arguments)]
 fn extend_graph_mutual_supported_continuations(
     mut current: Vec<StructuralStroke>,
     support: &[bool],
@@ -3091,6 +3090,7 @@ fn snap_graph_junction_endpoints(
     current
 }
 
+#[allow(clippy::too_many_arguments)]
 fn snap_graph_to_paint_junctions(
     mut current: Vec<StructuralStroke>,
     nodes: &[Point],
@@ -3278,7 +3278,7 @@ pub fn select_missing_with_junctions(
         }
     }
 
-    let graph_candidates = structural.strokes.iter().cloned().collect::<Vec<_>>();
+    let graph_candidates = structural.strokes.to_vec();
     let mut visible_graph = Vec::new();
     let mut boundary_graph = Vec::new();
     for mut stroke in graph_candidates {
@@ -3325,7 +3325,7 @@ pub fn select_missing_with_junctions(
 
     let mut complete_profile_edges = Vec::new();
     let mut interval_edges = Vec::new();
-    for (stroke, (_, valley)) in boundary_graph.into_iter().zip(boundary_flags.into_iter()) {
+    for (stroke, (_, valley)) in boundary_graph.into_iter().zip(boundary_flags) {
         let complete_threshold = match stroke.role {
             "coloured-ridge-on-boundary" => 0.30,
             "dark-boundary" => 0.90,

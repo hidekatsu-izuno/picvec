@@ -79,10 +79,10 @@ fn numpy_exp_f32(mut value: f32) -> f32 {
     value = quadrant.mul_add(-6.931_457_5e-1, value);
     value = quadrant.mul_add(-1.428_606_8e-6, value);
 
-    let mut numerator = 5.082_762_7e-4_f32.mul_add(value, 6.757_897e-3);
+    let mut numerator = 5.082_763e-4_f32.mul_add(value, 6.757_897e-3);
     numerator = numerator.mul_add(value, 5.114_512e-2);
     numerator = numerator.mul_add(value, 2.473_615_4e-1);
-    numerator = numerator.mul_add(value, 7.257_664_8e-1);
+    numerator = numerator.mul_add(value, 7.257_665e-1);
     numerator = numerator.mul_add(value, 1.0);
     let mut denominator = 2.159_509_4e-2_f32.mul_add(value, -2.742_335_5e-1);
     denominator = denominator.mul_add(value, 1.0);

@@ -810,13 +810,6 @@ struct AntialiasCorrection {
 }
 
 #[derive(Clone, Debug)]
-struct FlowEdge {
-    to: usize,
-    reverse: usize,
-    capacity: f64,
-}
-
-#[derive(Clone, Debug)]
 struct PreflowEdge {
     to: usize,
     reverse: usize,
@@ -1131,9 +1124,9 @@ fn networkx_preflow_cut_assignment(
             height = max_height;
             work = 0;
         } else if levels[old_height].active.is_empty() && levels[old_height].inactive.is_empty() {
-            for node in 0..n {
-                if heights[node] > old_height && heights[node] <= max_height {
-                    heights[node] = n + 1;
+            for node_height in heights.iter_mut().take(n) {
+                if *node_height > old_height && *node_height <= max_height {
+                    *node_height = n + 1;
                 }
             }
             rebuild_preflow_levels(&mut levels, &heights, &excess, source, sink);
@@ -1169,182 +1162,6 @@ fn networkx_preflow_cut_assignment(
         }
     }
     assignment
-}
-
-fn add_flow_edge(graph: &mut [Vec<FlowEdge>], from: usize, to: usize, capacity: f64) {
-    let forward_reverse = graph[to].len();
-    let reverse_reverse = graph[from].len();
-    graph[from].push(FlowEdge {
-        to,
-        reverse: forward_reverse,
-        capacity,
-    });
-    graph[to].push(FlowEdge {
-        to: from,
-        reverse: reverse_reverse,
-        capacity: 0.0,
-    });
-}
-
-fn add_bidirectional_flow_edge(
-    graph: &mut [Vec<FlowEdge>],
-    first: usize,
-    second: usize,
-    first_capacity: f64,
-    second_capacity: f64,
-) {
-    let first_reverse = graph[second].len();
-    let second_reverse = graph[first].len();
-    graph[first].push(FlowEdge {
-        to: second,
-        reverse: first_reverse,
-        capacity: first_capacity,
-    });
-    graph[second].push(FlowEdge {
-        to: first,
-        reverse: second_reverse,
-        capacity: second_capacity,
-    });
-}
-
-fn flow_levels(graph: &[Vec<FlowEdge>], source: usize) -> Vec<i32> {
-    let mut levels = vec![-1_i32; graph.len()];
-    let mut queue = VecDeque::from([source]);
-    levels[source] = 0;
-    while let Some(vertex) = queue.pop_front() {
-        for edge in &graph[vertex] {
-            if edge.capacity > 0.0 && levels[edge.to] < 0 {
-                levels[edge.to] = levels[vertex] + 1;
-                queue.push_back(edge.to);
-            }
-        }
-    }
-    levels
-}
-
-fn send_flow(
-    vertex: usize,
-    sink: usize,
-    available: f64,
-    levels: &[i32],
-    offsets: &mut [usize],
-    graph: &mut [Vec<FlowEdge>],
-) -> f64 {
-    if vertex == sink {
-        return available;
-    }
-    while offsets[vertex] < graph[vertex].len() {
-        let edge_index = offsets[vertex];
-        let to = graph[vertex][edge_index].to;
-        if graph[vertex][edge_index].capacity > 0.0 && levels[to] == levels[vertex] + 1 {
-            let capacity = graph[vertex][edge_index].capacity;
-            let sent = send_flow(to, sink, available.min(capacity), levels, offsets, graph);
-            if sent > 0.0 {
-                let reverse = graph[vertex][edge_index].reverse;
-                graph[vertex][edge_index].capacity -= sent;
-                graph[to][reverse].capacity += sent;
-                return sent;
-            }
-        }
-        offsets[vertex] += 1;
-    }
-    0.0
-}
-
-fn graph_cut_assignment(
-    component: &[usize],
-    alpha: &[f32],
-    first_seed: &[bool],
-    second_seed: &[bool],
-    width: usize,
-) -> Vec<bool> {
-    let count = component.len();
-    let source = count;
-    let sink = count + 1;
-    let mut lookup = HashMap::<usize, usize>::with_capacity(count);
-    for (local, &index) in component.iter().enumerate() {
-        lookup.insert(index, local);
-    }
-    let mut graph = vec![Vec::<FlowEdge>::new(); count + 2];
-    let hard = 1_000_000.0_f64;
-    for (local, &index) in component.iter().enumerate() {
-        let value = alpha[local].clamp(0.0, 1.0) as f64;
-        add_flow_edge(
-            &mut graph,
-            source,
-            local,
-            if first_seed[index] {
-                hard
-            } else {
-                value * value
-            },
-        );
-        add_flow_edge(
-            &mut graph,
-            local,
-            sink,
-            if second_seed[index] {
-                hard
-            } else {
-                (1.0 - value) * (1.0 - value)
-            },
-        );
-        let x = index % width;
-        for neighbour in [Some(index + width), (x + 1 < width).then_some(index + 1)]
-            .into_iter()
-            .flatten()
-        {
-            if let Some(&other) = lookup.get(&neighbour) {
-                // NetworkX represents the two authored directed edges as one
-                // residual edge pair with capacity in both directions.  Two
-                // independent forward/reverse pairs have the same nominal
-                // cut energy but a different residual plateau and therefore
-                // choose a different owner when several minimum cuts tie.
-                add_bidirectional_flow_edge(&mut graph, local, other, 0.15, 0.15);
-            }
-        }
-    }
-    loop {
-        let levels = flow_levels(&graph, source);
-        if levels[sink] < 0 {
-            break;
-        }
-        let mut offsets = vec![0_usize; graph.len()];
-        loop {
-            let sent = send_flow(
-                source,
-                sink,
-                f64::INFINITY,
-                &levels,
-                &mut offsets,
-                &mut graph,
-            );
-            if sent <= 0.0 {
-                break;
-            }
-        }
-    }
-    // NetworkX's minimum_cut asks which nodes can still reach the sink in
-    // the residual graph and returns the complementary, maximal source side.
-    // Using source reachability instead selects the minimal source side; both
-    // cuts have the same energy, but the latter moves a thin AA tail to the
-    // opposite Paint owner on flat plateaus.
-    let mut reaches_sink = vec![false; graph.len()];
-    let mut queue = VecDeque::from([sink]);
-    reaches_sink[sink] = true;
-    while let Some(vertex) = queue.pop_front() {
-        for from in 0..graph.len() {
-            if !reaches_sink[from]
-                && graph[from]
-                    .iter()
-                    .any(|edge| edge.to == vertex && edge.capacity > 0.0)
-            {
-                reaches_sink[from] = true;
-                queue.push_back(from);
-            }
-        }
-    }
-    reaches_sink[..count].iter().map(|&value| !value).collect()
 }
 
 fn native_antialias_width(
@@ -1938,7 +1755,7 @@ pub fn split_adaptive_paint_patches(
                 let middle = values.len() / 2;
                 if values.is_empty() {
                     0.0
-                } else if values.len() % 2 == 0 {
+                } else if values.len().is_multiple_of(2) {
                     (values[middle - 1] + values[middle]) * 0.5
                 } else {
                     values[middle]
@@ -2041,7 +1858,7 @@ pub fn split_adaptive_paint_patches(
             }
             deltas.sort_by(f32::total_cmp);
             let middle = deltas.len() / 2;
-            let median_delta = if deltas.len() % 2 == 0 {
+            let median_delta = if deltas.len().is_multiple_of(2) {
                 (deltas[middle - 1] + deltas[middle]) * 0.5
             } else {
                 deltas[middle]
@@ -2634,7 +2451,7 @@ pub fn refine_thin_paint_ownership(
                 }
                 continue;
             }
-            let retained = proposal.iter().any(|&owner| owner == label as u32);
+            let retained = proposal.contains(&(label as u32));
             let changed_owners: HashSet<u32> = proposal
                 .iter()
                 .filter_map(|&owner| (owner != label as u32).then_some(owner))

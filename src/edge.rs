@@ -2540,10 +2540,11 @@ fn point_tangents(points: &[[f64; 2]]) -> Vec<[f64; 2]> {
 }
 
 const PROFILE_OVERLAP_DISTANCE: f64 = 1.5;
+type ProfileOverlapSample = ([f64; 2], [f64; 2]);
 
 #[derive(Default)]
 struct ProfileOverlapIndex {
-    cells: HashMap<(i32, i32), Vec<([f64; 2], [f64; 2])>>,
+    cells: HashMap<(i32, i32), Vec<ProfileOverlapSample>>,
 }
 
 impl ProfileOverlapIndex {

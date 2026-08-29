@@ -190,8 +190,8 @@ fn mean_color(source: &Raster, indices: &[usize]) -> [f32; 3] {
 fn mean_color_f64(source: &Raster, indices: &[usize]) -> [f32; 3] {
     let mut result = [0.0_f64; 3];
     for &index in indices {
-        for channel in 0..3 {
-            result[channel] += source.pixels[index][channel] as f64;
+        for (channel, sum) in result.iter_mut().enumerate() {
+            *sum += source.pixels[index][channel] as f64;
         }
     }
     let divisor = indices.len().max(1) as f64;
@@ -826,52 +826,6 @@ fn legacy_linear_geometry_parameters(
     (start, end, parameters)
 }
 
-fn fitted_radial_geometries(
-    source: &Raster,
-    samples: &[usize],
-    region_bounds: Bounds,
-) -> Vec<(Point, Point)> {
-    if samples.len() < 3 {
-        return Vec::new();
-    }
-    let lightness: Vec<f32> =
-        preprocess_color_values(samples.iter().map(|&index| source.pixels[index]).collect())
-            .into_iter()
-            .map(|value| value.l)
-            .collect();
-    let mut ordered = lightness.clone();
-    let lower = percentile(ordered.clone(), 0.20);
-    let upper = percentile(std::mem::take(&mut ordered), 0.80);
-    let radius = Point {
-        x: ((region_bounds.max_x - region_bounds.min_x) * 0.5).max(0.5),
-        y: ((region_bounds.max_y - region_bounds.min_y) * 0.5).max(0.5),
-    };
-    [true, false]
-        .into_iter()
-        .filter_map(|bright| {
-            let mut weighted = Point::default();
-            let mut total = 0.0_f32;
-            for (&index, &value) in samples.iter().zip(&lightness) {
-                let weight = if bright {
-                    (value - lower).max(0.0) + 1e-3
-                } else {
-                    (upper - value).max(0.0) + 1e-3
-                };
-                weighted.x += (index % source.width) as f32 * weight;
-                weighted.y += (index / source.width) as f32 * weight;
-                total += weight;
-            }
-            (total > 1e-6).then_some((
-                Point {
-                    x: weighted.x / total,
-                    y: weighted.y / total,
-                },
-                radius,
-            ))
-        })
-        .collect()
-}
-
 fn linear_parameter(index: usize, width: usize, start: Point, end: Point) -> f32 {
     let point = Point {
         x: (index % width) as f32,
@@ -971,60 +925,6 @@ fn gradient_error(
         .zip(parameters.iter().copied())
         .collect();
     paint_error(source, samples, |index| interpolate(stops, lookup[&index]))
-}
-
-fn add_gradient_stops(
-    source: &Raster,
-    samples: &[usize],
-    parameters: &[f32],
-    template: &Paint,
-    initial_stops: Vec<ColorStop>,
-    initial_stats: ErrorStats,
-    maximum: usize,
-) -> (Paint, ErrorStats) {
-    let mut offsets = vec![0.0_f64, 1.0];
-    let mut current_stops = initial_stops;
-    let mut current_stats = initial_stats;
-    let mut accepted_stops = current_stops.clone();
-    let mut accepted_stats = current_stats;
-    let initial_objective = objective(initial_stats);
-    while offsets.len() < maximum.clamp(2, 5) {
-        let mut best: Option<(f32, f64, Vec<ColorStop>, ErrorStats)> = None;
-        for step in 1..=9 {
-            let offset = 0.1_f64 + (step - 1) as f64 * 0.1_f64;
-            if offsets.iter().any(|&value| (value - offset).abs() < 0.075) {
-                continue;
-            }
-            let mut proposed = offsets.clone();
-            proposed.push(offset);
-            proposed.sort_by(f64::total_cmp);
-            let stops = fitted_stops(source, samples, parameters, &proposed);
-            let stats = gradient_error(source, samples, parameters, &stops);
-            let candidate = objective(stats);
-            if best
-                .as_ref()
-                .map(|value| candidate < value.0)
-                .unwrap_or(true)
-            {
-                best = Some((candidate, offset, stops, stats));
-            }
-        }
-        let Some((candidate, chosen, stops, stats)) = best else {
-            break;
-        };
-        if candidate >= objective(current_stats) {
-            break;
-        }
-        offsets.push(chosen);
-        offsets.sort_by(f64::total_cmp);
-        current_stops = stops;
-        current_stats = stats;
-        if initial_objective - candidate >= 0.15 {
-            accepted_stops = current_stops.clone();
-            accepted_stats = current_stats;
-        }
-    }
-    (paint_with_stops(template, accepted_stops), accepted_stats)
 }
 
 fn weighted_median_lab(values: &[(f32, f32)]) -> f32 {
@@ -1257,7 +1157,7 @@ fn legacy_gradient_candidate(
     let mut candidates = Vec::<(Paint, ErrorStats)>::new();
     let lightness: Vec<f32> = samples.iter().map(|&index| source_labs[index].l).collect();
     let fitted_directions = fitted_linear_directions_from_lightness(source, samples, &lightness);
-    let mut directions = if directional_only && !fitted_directions.is_empty() {
+    let directions = if directional_only && !fitted_directions.is_empty() {
         vec![fitted_directions[0]]
     } else {
         let mut defaults = vec![
@@ -1488,6 +1388,7 @@ fn office_gradient_candidate(
     accepted.then_some((gradient, gradient_stats))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn fit_region(
     label: usize,
     source: &Raster,
@@ -1547,6 +1448,7 @@ fn office_gain_is_sufficient(
         && office.percentile <= selected.percentile + 1e-4
 }
 
+#[allow(clippy::too_many_arguments)]
 fn fit_region_samples(
     label: usize,
     source: &Raster,
@@ -1588,8 +1490,8 @@ fn fit_region_samples(
     // normal faces.  Small faces start from Solid and may only use the
     // bounded Office model below when it passes the same strict improvement
     // gate as a legacy Solid-to-gradient promotion.
-    let (mut selected, mut selected_stats) = if small_region {
-        (Paint::Solid { color: solid_color }, solid_error)
+    let mut selected = if small_region {
+        Paint::Solid { color: solid_color }
     } else {
         // Preserve the reference's two independent model families.  The
         // legacy robust three-stop model competes with Solid first; only then
@@ -1611,15 +1513,16 @@ fn fit_region_samples(
         if solid_error.mean - legacy_stats.mean >= minimum_improvement
             && legacy_stats.mean <= solid_error.mean * 0.88
         {
-            (legacy, legacy_stats)
+            legacy
         } else {
-            (Paint::Solid { color: solid_color }, solid_error)
+            Paint::Solid { color: solid_color }
         }
     };
     // `_fit_stops` ranks legacy geometries using its three-stop basis, then
     // `_spec_error_stats` re-samples the selected exported Paint before the
     // Office candidate comparison.
-    selected_stats = paint_stats_against_labs(source_labs, samples, source.width, &selected);
+    let mut selected_stats =
+        paint_stats_against_labs(source_labs, samples, source.width, &selected);
 
     let office_candidate = office_gradient_candidate(
         source,
@@ -1932,9 +1835,10 @@ fn merge_profile_is_smooth(source: &Raster, samples: &[usize], parameters: &[f32
             } else {
                 (positions[index] - positions[left]) / (positions[right] - positions[left])
             };
-            for channel in 0..3 {
-                profile[index][channel] =
-                    profile[left][channel] * (1.0 - amount) + profile[right][channel] * amount;
+            let left_color = profile[left];
+            let right_color = profile[right];
+            for (channel, value) in profile[index].iter_mut().enumerate() {
+                *value = left_color[channel] * (1.0 - amount) + right_color[channel] * amount;
             }
         }
     }
@@ -1943,9 +1847,9 @@ fn merge_profile_is_smooth(source: &Raster, samples: &[usize], parameters: &[f32
         .collect();
     let kernel_sum = kernel.iter().sum::<f64>();
     let original = profile.clone();
-    for index in 0..bin_count {
-        for channel in 0..3 {
-            profile[index][channel] = (kernel
+    for (index, color) in profile.iter_mut().enumerate() {
+        for (channel, value) in color.iter_mut().enumerate() {
+            *value = (kernel
                 .iter()
                 .enumerate()
                 .map(|(kernel_index, &weight)| {
@@ -3176,7 +3080,7 @@ fn smooth_paint_boundaries(
             if selected.len() < minimum_length.max(1) {
                 continue;
             }
-            let mut errors: Vec<f32> = selected.iter().map(|&index| edges[index].2).collect();
+            let errors: Vec<f32> = selected.iter().map(|&index| edges[index].2).collect();
             let boundary_median = median(&mut errors.clone());
             let boundary_p90 = percentile(errors, 0.90);
             if !include_non_smooth && (boundary_median > 1.5 || boundary_p90 > 3.0) {
@@ -3233,7 +3137,6 @@ fn harmonize_adjacent_paints(
     source: &Raster,
     boundary_source: &Raster,
     segmentation: &Segmentation,
-    region_indices: &[Vec<usize>],
     region_paint_indices: &[Vec<usize>],
     paints: &mut [Paint],
     errors: &mut [f32],
@@ -3609,7 +3512,6 @@ fn couple_linear(
 struct CouplingBoundary {
     boundary: SmoothPaintBoundary,
     seam_p90: f32,
-    seam_mean: f32,
     same_paint_key: bool,
 }
 
@@ -3693,61 +3595,6 @@ fn patch_boundary_halo(boundary: &SmoothPaintBoundary, segmentation: &Segmentati
         }
     }
     result
-}
-
-fn promote_solid_geometry(source: &Raster, samples: &[usize]) -> Paint {
-    let region_bounds = bounds(samples, source.width);
-    let offsets = [0.0_f64, 0.25, 0.5, 0.75, 1.0];
-    let mut directions = fitted_linear_directions(source, samples);
-    directions.extend([
-        (1.0, 0.0),
-        (0.0, 1.0),
-        (
-            std::f32::consts::FRAC_1_SQRT_2,
-            std::f32::consts::FRAC_1_SQRT_2,
-        ),
-        (
-            std::f32::consts::FRAC_1_SQRT_2,
-            -std::f32::consts::FRAC_1_SQRT_2,
-        ),
-    ]);
-    let mut best: Option<(f32, Paint)> = None;
-    for direction in directions {
-        let (start, end) = fitted_linear_geometry(samples, source.width, direction);
-        let parameters: Vec<f32> = samples
-            .iter()
-            .map(|&index| linear_parameter(index, source.width, start, end))
-            .collect();
-        let stops = fitted_stops(source, samples, &parameters, &offsets);
-        let paint = Paint::Linear {
-            preset: LinearPreset::Fitted,
-            start,
-            end,
-            stops,
-        };
-        let score = objective(paint_stats(source, samples, &paint));
-        if best.as_ref().map(|value| score < value.0).unwrap_or(true) {
-            best = Some((score, paint));
-        }
-    }
-    best.map(|value| value.1).unwrap_or_else(|| {
-        let (start, end) = linear_geometry(LinearPreset::LeftToRight, region_bounds);
-        Paint::Linear {
-            preset: LinearPreset::LeftToRight,
-            start,
-            end,
-            stops: vec![
-                ColorStop {
-                    offset: 0.0,
-                    color: mean_color(source, samples).map(f64::from),
-                },
-                ColorStop {
-                    offset: 1.0,
-                    color: mean_color(source, samples).map(f64::from),
-                },
-            ],
-        }
-    })
 }
 
 fn extended_linear_geometry(
@@ -3883,8 +3730,8 @@ fn fit_coupled_geometry(
             for second in 0..5 {
                 normal[first][second] += basis[first] * basis[second];
             }
-            for channel in 0..3 {
-                rhs[channel][first] += basis[first] * source.pixels[sample][channel] as f64;
+            for (channel, target) in rhs.iter_mut().enumerate() {
+                target[first] += basis[first] * source.pixels[sample][channel] as f64;
             }
         }
     }
@@ -4031,13 +3878,11 @@ fn couple_adjacent_paints(
             continue;
         }
         let seam_deltas = seam_errors_at_points(&paints[left], &paints[right], &boundary.points);
-        let seam_mean = numpy_sum_f32(&seam_deltas) / seam_deltas.len().max(1) as f32;
         let seam_p90 = percentile(seam_deltas, 0.90);
         if seam_p90 >= 0.75 || same_paint_key {
             candidates.push(CouplingBoundary {
                 boundary,
                 seam_p90,
-                seam_mean,
                 same_paint_key,
             });
         }
@@ -4681,7 +4526,6 @@ pub fn fit_all(
         source,
         boundary_source,
         segmentation,
-        &region_indices,
         &region_paint_indices,
         &mut paints,
         &mut errors,
