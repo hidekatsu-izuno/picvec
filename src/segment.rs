@@ -22,7 +22,6 @@ pub struct SegmentationSummary {
     pub compatible_region_merges: usize,
     pub paint_aware_region_merge_proposals: usize,
     pub paint_aware_region_merges: usize,
-    pub paint_aware_merge_render_rejected: bool,
     /// Adjacent final regions whose serialized Paint is exactly identical
     /// and can therefore share one topology owner without a colour change.
     pub exact_paint_region_merges: usize,
@@ -40,7 +39,7 @@ pub struct SegmentationSummary {
     pub thin_paint_examined: usize,
     pub thin_paint_protected: usize,
     pub thin_paint_refined: usize,
-    pub thin_paint_rollbacks: usize,
+    pub thin_paint_preflight_rejected: usize,
     pub thin_paint_reassigned_pixels: usize,
     pub thin_paint_removed_regions: usize,
     pub adaptive_patch_candidate_faces: usize,
@@ -1535,7 +1534,7 @@ fn correct_antialias_partition(
         if candidates.len() < 2 {
             continue;
         }
-        let mut best: Option<(f32, u32, u32, Vec<f32>)> = None;
+        let mut best: Option<(f32, u32, u32, Vec<f32>, bool)> = None;
         for first_index in 0..candidates.len() - 1 {
             let first = candidates[first_index].0;
             for &(second, _) in candidates.iter().skip(first_index + 1) {
@@ -1559,11 +1558,38 @@ fn correct_antialias_partition(
                     alpha.push(amount);
                     errors.push(error);
                 }
-                if !valid
-                    || alpha.is_empty()
-                    || percentile(alpha.clone(), 0.10) > 0.35
-                    || percentile(alpha.clone(), 0.90) < 0.65
-                {
+                if !valid || alpha.is_empty() {
+                    continue;
+                }
+                let lower_alpha = percentile(alpha.clone(), 0.10);
+                let upper_alpha = percentile(alpha.clone(), 0.90);
+                let spans_both_parents = lower_alpha <= 0.35 && upper_alpha >= 0.65;
+                // A rasterised curve regularly produces isolated intermediate
+                // coverage pixels between two full-colour faces. Such a
+                // component cannot span both alpha tails and therefore cannot
+                // be split by the graph cut below, but keeping it as a third
+                // Paint face turns the raster sampling phase into periodic SVG
+                // bumps. Accept only compact, genuinely intermediate mixtures;
+                // a distinct small mark still fails the two-parent mixture
+                // error test above, while an elongated thin feature is not
+                // classified as compact coverage.
+                let compact_intermediate =
+                    component.len() <= 4 && lower_alpha >= 0.08 && upper_alpha <= 0.92 && {
+                        let mut min_x = image.width;
+                        let mut min_y = image.height;
+                        let mut max_x = 0_usize;
+                        let mut max_y = 0_usize;
+                        for &index in component {
+                            let x = index % image.width;
+                            let y = index / image.width;
+                            min_x = min_x.min(x);
+                            min_y = min_y.min(y);
+                            max_x = max_x.max(x);
+                            max_y = max_y.max(y);
+                        }
+                        max_x.saturating_sub(min_x) <= 2 && max_y.saturating_sub(min_y) <= 2
+                    };
+                if !spans_both_parents && !compact_intermediate {
                     continue;
                 }
                 let score = percentile(errors, 0.90);
@@ -1572,11 +1598,17 @@ fn correct_antialias_partition(
                     .map(|current| score < current.0)
                     .unwrap_or(true)
                 {
-                    best = Some((score, first, second, alpha));
+                    best = Some((
+                        score,
+                        first,
+                        second,
+                        alpha,
+                        compact_intermediate && !spans_both_parents,
+                    ));
                 }
             }
         }
-        let Some((_, first, second, alpha)) = best else {
+        let Some((_, first, second, alpha, absorb_compact)) = best else {
             continue;
         };
         let mut first_seed = vec![false; labels.len()];
@@ -1599,13 +1631,17 @@ fn correct_antialias_partition(
         {
             continue;
         }
-        let first_assignment = networkx_preflow_cut_assignment(
-            component,
-            &alpha,
-            &first_seed,
-            &second_seed,
-            image.width,
-        );
+        let first_assignment = if absorb_compact {
+            alpha.iter().map(|&amount| amount >= 0.5).collect()
+        } else {
+            networkx_preflow_cut_assignment(
+                component,
+                &alpha,
+                &first_seed,
+                &second_seed,
+                image.width,
+            )
+        };
         if let Ok(path) = std::env::var("PICVEC_ANTIALIAS_DIAGNOSTIC") {
             let diagnostic_index = 911_usize.saturating_mul(image.width).saturating_add(383);
             if component.contains(&diagnostic_index) {
@@ -1631,7 +1667,7 @@ fn correct_antialias_partition(
             }
         }
         let first_count = first_assignment.iter().filter(|&&value| value).count();
-        if first_count == 0 || first_count == component.len() {
+        if !absorb_compact && (first_count == 0 || first_count == component.len()) {
             continue;
         }
         for (offset, &index) in component.iter().enumerate() {
@@ -1756,7 +1792,6 @@ pub fn segment(image: &Raster, roles: &EdgeRoles, config: &Config) -> Segmentati
             compatible_region_merges: merged_components,
             paint_aware_region_merge_proposals: 0,
             paint_aware_region_merges: 0,
-            paint_aware_merge_render_rejected: false,
             exact_paint_region_merges: 0,
             source_supported_paint_merges: 0,
             preserved_independent_materials: preserved,
@@ -1769,7 +1804,7 @@ pub fn segment(image: &Raster, roles: &EdgeRoles, config: &Config) -> Segmentati
             thin_paint_examined: 0,
             thin_paint_protected: 0,
             thin_paint_refined: 0,
-            thin_paint_rollbacks: 0,
+            thin_paint_preflight_rejected: 0,
             thin_paint_reassigned_pixels: 0,
             thin_paint_removed_regions: 0,
             adaptive_patch_candidate_faces: 0,
@@ -2448,8 +2483,10 @@ pub fn regularize_boundaries(
 }
 
 /// Return unsupported dark one-pixel Paint shoulders to a neighbouring face.
-/// Genuine line endpoints are protected by a one-sided rollback, and pixels
-/// already transferred to the structural centre-line owner are never changed.
+/// A component-local ownership proposal is validated before it is committed,
+/// so genuine line endpoints never require a mutation followed by rollback.
+/// Pixels already transferred to the structural centre-line owner are never
+/// changed.
 pub fn refine_thin_paint_ownership(
     source: &Raster,
     segmentation: &mut Segmentation,
@@ -2485,9 +2522,10 @@ pub fn refine_thin_paint_ownership(
     let mut examined = 0;
     let mut protected_components = 0;
     let mut refined = 0;
-    let mut rollbacks = 0;
+    let mut preflight_rejected = 0;
     let mut reassigned = 0;
     let mut visited = vec![false; original.len()];
+    let mut component_position = vec![u32::MAX; original.len()];
     for label in 0..count {
         if prototypes[label].l > 25.0 || pixels[label].is_empty() {
             continue;
@@ -2537,24 +2575,33 @@ pub fn refine_thin_paint_ownership(
                 protected_components += 1;
                 continue;
             }
-            let before: Vec<u32> = component.iter().map(|&index| output[index]).collect();
+            for (position, &index) in component.iter().enumerate() {
+                component_position[index] = position as u32;
+            }
+            let mut proposal: Vec<u32> = component.iter().map(|&index| output[index]).collect();
             let mut changes = 0;
             loop {
                 let mut selected = Vec::<(usize, u32)>::new();
-                for &index in &component {
-                    if output[index] != label as u32 {
+                for (position, &index) in component.iter().enumerate() {
+                    if proposal[position] != label as u32 {
                         continue;
                     }
                     let x = index % segmentation.width;
                     let y = index / segmentation.width;
                     let mut best: Option<(u32, f32)> = None;
-                    let neighbours = [
-                        (y > 0).then(|| output[index - segmentation.width]),
-                        (y + 1 < segmentation.height).then(|| output[index + segmentation.width]),
-                        (x > 0).then(|| output[index - 1]),
-                        (x + 1 < segmentation.width).then(|| output[index + 1]),
+                    let neighbour_indices = [
+                        (y > 0).then(|| index - segmentation.width),
+                        (y + 1 < segmentation.height).then(|| index + segmentation.width),
+                        (x > 0).then(|| index - 1),
+                        (x + 1 < segmentation.width).then(|| index + 1),
                     ];
-                    for owner in neighbours.into_iter().flatten() {
+                    for neighbour in neighbour_indices.into_iter().flatten() {
+                        let neighbour_position = component_position[neighbour];
+                        let owner = if neighbour_position == u32::MAX {
+                            output[neighbour]
+                        } else {
+                            proposal[neighbour_position as usize]
+                        };
                         if owner == label as u32 || !has_interior[owner as usize] {
                             continue;
                         }
@@ -2569,7 +2616,7 @@ pub fn refine_thin_paint_ownership(
                     if let Some((owner, error)) = best {
                         let current = delta_e2000(source_lab[index], prototypes[label]);
                         if error + 1e-4 < current {
-                            selected.push((index, owner));
+                            selected.push((position, owner));
                         }
                     }
                 }
@@ -2577,26 +2624,32 @@ pub fn refine_thin_paint_ownership(
                     break;
                 }
                 changes += selected.len();
-                for (index, owner) in selected {
-                    output[index] = owner;
+                for (position, owner) in selected {
+                    proposal[position] = owner;
                 }
             }
             if changes == 0 {
+                for &index in &component {
+                    component_position[index] = u32::MAX;
+                }
                 continue;
             }
-            let retained = component.iter().any(|&index| output[index] == label as u32);
-            let changed_owners: HashSet<u32> = component
+            let retained = proposal.iter().any(|&owner| owner == label as u32);
+            let changed_owners: HashSet<u32> = proposal
                 .iter()
-                .filter_map(|&index| (output[index] != label as u32).then_some(output[index]))
+                .filter_map(|&owner| (owner != label as u32).then_some(owner))
                 .collect();
             if retained && changed_owners.len() < 2 {
-                for (&index, owner) in component.iter().zip(before) {
+                preflight_rejected += 1;
+            } else {
+                for (&index, owner) in component.iter().zip(proposal) {
                     output[index] = owner;
                 }
-                rollbacks += 1;
-            } else {
                 reassigned += changes;
                 refined += 1;
+            }
+            for &index in &component {
+                component_position[index] = u32::MAX;
             }
         }
     }
@@ -2612,7 +2665,7 @@ pub fn refine_thin_paint_ownership(
     segmentation.summary.thin_paint_examined = examined;
     segmentation.summary.thin_paint_protected = protected_components;
     segmentation.summary.thin_paint_refined = refined;
-    segmentation.summary.thin_paint_rollbacks = rollbacks;
+    segmentation.summary.thin_paint_preflight_rejected = preflight_rejected;
     segmentation.summary.thin_paint_reassigned_pixels = reassigned;
     segmentation.summary.thin_paint_removed_regions = count.saturating_sub(new_count);
 }
@@ -2698,5 +2751,139 @@ mod tests {
         assert_eq!(correction.split_regions, 1);
         assert_ne!(correction.labels[3], correction.labels[4]);
         assert!(correction.paint_samples[3..=4].iter().all(|&value| !value));
+    }
+
+    #[test]
+    fn isolated_intermediate_antialias_pixel_is_absorbed_by_a_parent_face() {
+        let width = 7;
+        let height = 7;
+        let mut image = Raster::blank(width, height, [0.0, 0.0, 0.0]);
+        let mut labels = vec![0_u32; width * height];
+        for y in 0..height {
+            for x in 3..width {
+                let index = y * width + x;
+                image.pixels[index] = [1.0; 3];
+                labels[index] = 2;
+            }
+        }
+        let intermediate = 3 * width + 3;
+        image.pixels[intermediate] = [0.47; 3];
+        labels[intermediate] = 1;
+
+        let correction = correct_antialias_partition(&image, &labels, 3);
+
+        assert_eq!(
+            correction.labels[intermediate],
+            correction.labels[3 * width + 2]
+        );
+        assert!(!correction.paint_samples[intermediate]);
+        assert_eq!(correction.split_regions, 1);
+    }
+
+    #[test]
+    fn isolated_colour_not_explained_by_its_neighbours_remains_paint() {
+        let width = 7;
+        let height = 7;
+        let mut image = Raster::blank(width, height, [0.0, 0.0, 0.0]);
+        let mut labels = vec![0_u32; width * height];
+        for y in 0..height {
+            for x in 3..width {
+                let index = y * width + x;
+                image.pixels[index] = [1.0; 3];
+                labels[index] = 2;
+            }
+        }
+        let distinct = 3 * width + 3;
+        image.pixels[distinct] = [1.0, 0.0, 0.0];
+        labels[distinct] = 1;
+
+        let correction = correct_antialias_partition(&image, &labels, 3);
+
+        assert_ne!(
+            correction.labels[distinct],
+            correction.labels[3 * width + 2]
+        );
+        assert_ne!(
+            correction.labels[distinct],
+            correction.labels[3 * width + 4]
+        );
+        assert!(correction.paint_samples[distinct]);
+        assert_eq!(correction.split_regions, 0);
+    }
+
+    #[test]
+    fn elongated_intermediate_feature_is_not_absorbed_as_compact_coverage() {
+        let width = 7;
+        let height = 9;
+        let mut image = Raster::blank(width, height, [0.0, 0.0, 0.0]);
+        let mut labels = vec![0_u32; width * height];
+        for y in 0..height {
+            for x in 3..width {
+                let index = y * width + x;
+                image.pixels[index] = [1.0; 3];
+                labels[index] = 2;
+            }
+        }
+        for y in 2..=6 {
+            let index = y * width + 3;
+            image.pixels[index] = [0.47; 3];
+            labels[index] = 1;
+        }
+
+        let correction = correct_antialias_partition(&image, &labels, 3);
+        let middle = 4 * width + 3;
+
+        assert_ne!(correction.labels[middle], correction.labels[4 * width + 2]);
+        assert_ne!(correction.labels[middle], correction.labels[4 * width + 4]);
+        assert!(correction.paint_samples[middle]);
+        assert_eq!(correction.split_regions, 0);
+    }
+
+    #[test]
+    fn thin_paint_rejects_one_sided_erosion_before_commit() {
+        let width = 10;
+        let height = 5;
+        let mut source = Raster::blank(width, height, [0.2; 3]);
+        let mut labels = vec![0_u32; width * height];
+        for y in 0..height {
+            for x in 0..width {
+                let index = y * width + x;
+                if x >= 6 {
+                    labels[index] = 1;
+                    source.pixels[index] = [0.9; 3];
+                } else if x >= 4 {
+                    labels[index] = 2;
+                    source.pixels[index] = if x == 4 { [0.2; 3] } else { [0.0; 3] };
+                }
+            }
+        }
+        let canonical = Raster::new(
+            width,
+            height,
+            labels
+                .iter()
+                .map(|&label| match label {
+                    0 => [0.2; 3],
+                    1 => [0.9; 3],
+                    _ => [0.0; 3],
+                })
+                .collect(),
+        );
+        let regions = region_stats(&source, &labels, 3);
+        let original = labels.clone();
+        let mut segmentation = Segmentation {
+            width,
+            height,
+            labels,
+            paint_keys: vec![0, 1, 2],
+            paint_samples: vec![true; width * height],
+            canonical,
+            regions,
+            summary: SegmentationSummary::default(),
+        };
+        refine_thin_paint_ownership(&source, &mut segmentation, &vec![false; width * height]);
+        assert_eq!(segmentation.labels, original);
+        assert_eq!(segmentation.summary.thin_paint_preflight_rejected, 1);
+        assert_eq!(segmentation.summary.thin_paint_reassigned_pixels, 0);
     }
 }

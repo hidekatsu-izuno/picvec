@@ -2,7 +2,7 @@ use rayon::prelude::*;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use crate::color::{delta_e2000, delta_e2000_pairs, delta_e76, lab_pixels_to_rgb, Lab};
+use crate::color::{delta_e2000, delta_e2000_pairs, lab_pixels_to_rgb, Lab};
 use crate::config::Config;
 use crate::raster::{percentile, Raster};
 
@@ -63,17 +63,6 @@ pub struct EdgeRoles {
     pub visible_ridge_graph: Vec<SourceEdge>,
     pub dark_boundary_graph: Vec<SourceEdge>,
     pub summary: EdgeSummary,
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-struct Measurement {
-    gradient: f32,
-    ridge_response: f32,
-    darkness: f32,
-    side_agreement: bool,
-    valley_response: f32,
-    gx: f32,
-    gy: f32,
 }
 
 pub fn lab_pixels(image: &Raster) -> Vec<Lab> {
@@ -241,13 +230,6 @@ pub fn preprocess_lab_values(pixels: &[[f32; 3]]) -> Vec<Lab> {
     result
 }
 
-#[inline]
-fn at(values: &[Lab], width: usize, height: usize, x: isize, y: isize) -> Lab {
-    let px = x.clamp(0, width.saturating_sub(1) as isize) as usize;
-    let py = y.clamp(0, height.saturating_sub(1) as isize) as usize;
-    values[py * width + px]
-}
-
 pub fn dilate(mask: &[bool], width: usize, height: usize, radius: usize) -> Vec<bool> {
     if radius == 0 {
         return mask.to_vec();
@@ -345,259 +327,6 @@ pub fn erode(mask: &[bool], width: usize, height: usize, radius: usize) -> Vec<b
         .collect()
 }
 
-fn filter_ridge_components(
-    candidates: &[bool],
-    measurements: &[Measurement],
-    width: usize,
-    height: usize,
-    minimum_span: usize,
-    minimum_elongation: f32,
-) -> Vec<bool> {
-    let mut result = vec![false; candidates.len()];
-    let mut seen = vec![false; candidates.len()];
-    for start in 0..candidates.len() {
-        if !candidates[start] || seen[start] {
-            continue;
-        }
-        let mut queue = VecDeque::from([start]);
-        let mut component = Vec::new();
-        let mut min_x = width;
-        let mut min_y = height;
-        let mut max_x = 0;
-        let mut max_y = 0;
-        let mut darkness = 0.0;
-        seen[start] = true;
-        while let Some(index) = queue.pop_front() {
-            component.push(index);
-            let x = index % width;
-            let y = index / width;
-            min_x = min_x.min(x);
-            min_y = min_y.min(y);
-            max_x = max_x.max(x + 1);
-            max_y = max_y.max(y + 1);
-            darkness += measurements[index].darkness;
-            for dy in -1_isize..=1 {
-                for dx in -1_isize..=1 {
-                    if dx == 0 && dy == 0 {
-                        continue;
-                    }
-                    let px = x as isize + dx;
-                    let py = y as isize + dy;
-                    if px < 0 || py < 0 || px >= width as isize || py >= height as isize {
-                        continue;
-                    }
-                    let neighbour = py as usize * width + px as usize;
-                    if candidates[neighbour] && !seen[neighbour] {
-                        seen[neighbour] = true;
-                        queue.push_back(neighbour);
-                    }
-                }
-            }
-        }
-        let box_width = max_x.saturating_sub(min_x).max(1);
-        let box_height = max_y.saturating_sub(min_y).max(1);
-        let span = box_width.max(box_height);
-        let thickness = box_width.min(box_height);
-        let elongation = span as f32 / thickness as f32;
-        let fill = component.len() as f32 / (box_width * box_height).max(1) as f32;
-        let mean_darkness = darkness / component.len().max(1) as f32;
-        let line_like = component.len() >= 4
-            && span >= minimum_span
-            && mean_darkness >= 3.5
-            && ((elongation >= minimum_elongation && fill <= 0.72)
-                || (component.len() >= 18
-                    && elongation >= (minimum_elongation * 0.8).max(1.75)
-                    && fill <= 0.30));
-        if line_like {
-            for index in component {
-                result[index] = true;
-            }
-        }
-    }
-    result
-}
-
-fn sample_scalar(values: &[Measurement], width: usize, height: usize, x: f32, y: f32) -> f32 {
-    let x = x.clamp(0.0, width.saturating_sub(1) as f32);
-    let y = y.clamp(0.0, height.saturating_sub(1) as f32);
-    let x0 = x.floor() as usize;
-    let y0 = y.floor() as usize;
-    let x1 = (x0 + 1).min(width.saturating_sub(1));
-    let y1 = (y0 + 1).min(height.saturating_sub(1));
-    let tx = x - x0 as f32;
-    let ty = y - y0 as f32;
-    let top = values[y0 * width + x0].gradient * (1.0 - tx) + values[y0 * width + x1].gradient * tx;
-    let bottom =
-        values[y1 * width + x0].gradient * (1.0 - tx) + values[y1 * width + x1].gradient * tx;
-    top * (1.0 - ty) + bottom * ty
-}
-
-fn classify_legacy(image: &Raster) -> EdgeRoles {
-    let width = image.width;
-    let height = image.height;
-    let lab = lab_pixels(image);
-    let measurements: Vec<Measurement> = (0..image.pixels.len())
-        .into_par_iter()
-        .map(|index| {
-            let x = (index % width) as isize;
-            let y = (index / width) as isize;
-            let gx = -at(&lab, width, height, x - 1, y - 1).l
-                + at(&lab, width, height, x + 1, y - 1).l
-                - 2.0 * at(&lab, width, height, x - 1, y).l
-                + 2.0 * at(&lab, width, height, x + 1, y).l
-                - at(&lab, width, height, x - 1, y + 1).l
-                + at(&lab, width, height, x + 1, y + 1).l;
-            let gy = -at(&lab, width, height, x - 1, y - 1).l
-                - 2.0 * at(&lab, width, height, x, y - 1).l
-                - at(&lab, width, height, x + 1, y - 1).l
-                + at(&lab, width, height, x - 1, y + 1).l
-                + 2.0 * at(&lab, width, height, x, y + 1).l
-                + at(&lab, width, height, x + 1, y + 1).l;
-            let gradient = (gx * gx + gy * gy).sqrt() / 8.0;
-            let centre = lab[index];
-            let mut ridge_response = 0.0_f32;
-            let mut valley_response = 0.0_f32;
-            let mut side_lightness = centre.l;
-            let mut side_agreement = false;
-            for (dx, dy) in [(1, 0), (0, 1), (1, 1), (1, -1)] {
-                let first = at(&lab, width, height, x + dx, y + dy);
-                let second = at(&lab, width, height, x - dx, y - dy);
-                let d1 = delta_e76(centre, first);
-                let d2 = delta_e76(centre, second);
-                let sides = delta_e76(first, second);
-                let response = (d1.min(d2) - 0.45 * sides).max(0.0);
-                if first.l >= centre.l + 3.0 && second.l >= centre.l + 3.0 {
-                    valley_response = valley_response.max(d1.min(d2));
-                }
-                if response > ridge_response {
-                    ridge_response = response;
-                    side_lightness = (first.l + second.l) * 0.5;
-                    side_agreement = sides <= 0.75 * d1.min(d2) + 2.5;
-                }
-            }
-            Measurement {
-                gradient,
-                ridge_response,
-                darkness: side_lightness - centre.l,
-                side_agreement,
-                valley_response,
-                gx,
-                gy,
-            }
-        })
-        .collect();
-    let nonzero_gradient: Vec<f32> = measurements
-        .iter()
-        .map(|value| value.gradient)
-        .filter(|v| *v > 0.2)
-        .collect();
-    let gradient_threshold = percentile(nonzero_gradient, 0.90).clamp(4.5, 12.0);
-    let nonzero_ridge: Vec<f32> = measurements
-        .iter()
-        .map(|value| value.ridge_response.max(value.valley_response))
-        .filter(|v| *v > 0.2)
-        .collect();
-    let ridge_threshold = percentile(nonzero_ridge, 0.985).clamp(6.0, 14.0);
-    let mut boundary = vec![false; image.pixels.len()];
-    let ordinary_candidates: Vec<bool> = measurements
-        .iter()
-        .map(|value| {
-            value.darkness >= 2.0 && value.ridge_response >= ridge_threshold && value.side_agreement
-        })
-        .collect();
-    let valley_candidates: Vec<bool> = measurements
-        .iter()
-        .map(|value| value.darkness >= 2.0 && value.valley_response >= ridge_threshold.max(7.0))
-        .collect();
-    let closed_ordinary = erode(
-        &dilate(&ordinary_candidates, width, height, 1),
-        width,
-        height,
-        1,
-    );
-    let ordinary: Vec<bool> = ordinary_candidates
-        .iter()
-        .zip(&closed_ordinary)
-        .map(|(&raw, &closed)| raw || closed)
-        .collect();
-    let closed_valley = erode(
-        &dilate(&valley_candidates, width, height, 2),
-        width,
-        height,
-        2,
-    );
-    let valley: Vec<bool> = valley_candidates
-        .iter()
-        .zip(&closed_valley)
-        .map(|(&raw, &closed)| raw || closed)
-        .collect();
-    let ordinary = filter_ridge_components(&ordinary, &measurements, width, height, 6, 2.35);
-    let valley = filter_ridge_components(&valley, &measurements, width, height, 16, 2.5);
-    let ridge: Vec<bool> = ordinary
-        .iter()
-        .zip(&valley)
-        .map(|(&first, &second)| first || second)
-        .collect();
-    let mut shading = vec![false; image.pixels.len()];
-    let mut dark_boundary = vec![false; image.pixels.len()];
-    let mut gradient = vec![0.0; image.pixels.len()];
-    for (index, measurement) in measurements.iter().enumerate() {
-        let edge = measurement.gradient;
-        let darkness = measurement.darkness;
-        gradient[index] = edge;
-        let authored_ridge = ridge[index];
-        let x = index % width;
-        let y = index / width;
-        let length = (measurement.gx * measurement.gx + measurement.gy * measurement.gy).sqrt();
-        let (nx, ny) = if length > 1e-6 {
-            (measurement.gx / length, measurement.gy / length)
-        } else {
-            (0.0, 0.0)
-        };
-        let before = sample_scalar(&measurements, width, height, x as f32 - nx, y as f32 - ny);
-        let after = sample_scalar(&measurements, width, height, x as f32 + nx, y as f32 + ny);
-        let local_maximum = edge >= before && edge >= after;
-        let material_boundary = edge >= gradient_threshold && local_maximum && !authored_ridge;
-        boundary[index] = material_boundary;
-        dark_boundary[index] = material_boundary && lab[index].l < 42.0 && darkness > -1.5;
-        shading[index] = !authored_ridge
-            && !material_boundary
-            && edge >= 0.35 * gradient_threshold
-            && edge < gradient_threshold;
-    }
-    let ridge_coverage = dilate(&ridge, width, height, 1);
-    let dark_boundary = dilate(&dark_boundary, width, height, 1);
-    let face_barrier = boundary.clone();
-    let summary = EdgeSummary {
-        boundary_pixels: boundary.iter().filter(|&&v| v).count(),
-        visible_ridge_pixels: ridge.iter().filter(|&&v| v).count(),
-        visible_ridge_coverage_pixels: ridge_coverage.iter().filter(|&&v| v).count(),
-        dark_boundary_pixels: dark_boundary.iter().filter(|&&v| v).count(),
-        shading_pixels: shading.iter().filter(|&&v| v).count(),
-        face_barrier_pixels: face_barrier.iter().filter(|&&v| v).count(),
-        visible_ridge_graph_edges: 0,
-        dark_boundary_graph_edges: 0,
-        gradient_threshold,
-        ridge_threshold,
-        ..EdgeSummary::default()
-    };
-    EdgeRoles {
-        width,
-        height,
-        boundary,
-        visible_ridge_centres: ridge,
-        visible_ridge_coverage: ridge_coverage,
-        dark_boundary,
-        shading,
-        face_barrier,
-        gradient,
-        visible_ridge_graph: Vec::new(),
-        dark_boundary_graph: Vec::new(),
-        summary,
-    }
-}
-
-#[derive(Clone, Debug)]
 struct EdgeField {
     tangent_u: Vec<f32>,
     tangent_v: Vec<f32>,
@@ -919,12 +648,28 @@ fn oriented_nonmaximum(field: &EdgeField, width: usize, height: usize) -> Vec<f3
 }
 
 fn edge_hysteresis(nms: &[f32], field: &EdgeField, width: usize, height: usize) -> Vec<bool> {
-    let low: Vec<bool> = nms.iter().map(|value| *value >= 0.045).collect();
+    // Select seeds in this classifier rather than running a second, unrelated
+    // classifier after discovering that the fixed high threshold has no
+    // seeds.  The absolute floors reject flat-field noise; the upper clamps
+    // preserve the established thresholds on ordinary artwork.
+    let has_fixed_seed = nms.iter().any(|value| *value >= 0.16);
+    let (adaptive_low, adaptive_high) = if has_fixed_seed {
+        (0.045, 0.16)
+    } else {
+        let supported = nms
+            .iter()
+            .copied()
+            .filter(|value| *value >= 0.045)
+            .collect::<Vec<_>>();
+        let high = percentile(supported, 0.90).clamp(0.065, 0.16);
+        ((0.5 * high).clamp(0.030, 0.045), high)
+    };
+    let low: Vec<bool> = nms.iter().map(|value| *value >= adaptive_low).collect();
     let mut selected = vec![false; nms.len()];
     let mut queue: VecDeque<usize> = nms
         .iter()
         .enumerate()
-        .filter_map(|(index, value)| (*value >= 0.16).then_some(index))
+        .filter_map(|(index, value)| (*value >= adaptive_high).then_some(index))
         .collect();
     for &index in &queue {
         selected[index] = true;
@@ -1432,7 +1177,7 @@ fn classify_profile(samples: &[[f32; 3]], offsets: &[f32], radius: f32) -> Profi
     }
     let tail_lightness = (left[0] - right[0]).abs();
     // The two-exit chromatic residual above uses full Lab gradients, but the
-    // fallback step/shading decision in the Python source is intentionally
+    // secondary step/shading decision in the Python source is intentionally
     // based only on dL*/dn.  Reusing the colour gradient here promoted weak
     // hue changes to hard Paint barriers.
     let derivative = lightness
@@ -2427,6 +2172,32 @@ fn profiles_for_points(
         .collect()
 }
 
+fn width_profile_requires_paint(
+    widths: &[f32],
+    first_endpoint_degree: usize,
+    last_endpoint_degree: usize,
+    scale: f32,
+) -> bool {
+    if widths.len() < 5 {
+        return false;
+    }
+    let lower = percentile(widths.to_vec(), 0.20).max(0.8);
+    let upper = percentile(widths.to_vec(), 0.80);
+    let variable = upper >= 1.75 * lower && upper - lower >= 1.5 * scale.max(1.0);
+    if !variable {
+        return false;
+    }
+    let endpoint_samples = widths.len().min(3);
+    let first_width = widths[..endpoint_samples].iter().sum::<f32>() / endpoint_samples as f32;
+    let last_width = widths[widths.len() - endpoint_samples..]
+        .iter()
+        .sum::<f32>()
+        / endpoint_samples as f32;
+    let narrow_limit = 1.25 * lower;
+    (first_endpoint_degree <= 1 && first_width <= narrow_limit)
+        || (last_endpoint_degree <= 1 && last_width <= narrow_limit)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn add_supported_medial_ridges(
     image: &Raster,
@@ -2489,9 +2260,9 @@ fn add_supported_medial_ridges(
             let mut measured_widths: Vec<f32> =
                 chain.iter().map(|&index| 2.0 * distance[index]).collect();
             measured_widths.sort_by(f32::total_cmp);
-            let fallback_width = median_sorted(&measured_widths).max(1.2) as f64;
-            if !(0.8..=maximum_width as f64).contains(&fallback_width)
-                || chain_length < (3.0 * fallback_width).max((2.0 * scale) as f64)
+            let chain_width = median_sorted(&measured_widths).max(1.2) as f64;
+            if !(0.8..=maximum_width as f64).contains(&chain_width)
+                || chain_length < (3.0 * chain_width).max((2.0 * scale) as f64)
             {
                 continue;
             }
@@ -2640,7 +2411,7 @@ fn add_supported_medial_ridges(
                     } else {
                         finite_widths[middle]
                     };
-                    median.min(fallback_width).clamp(0.8, (6.0 * scale) as f64)
+                    median.min(chain_width).clamp(0.8, (6.0 * scale) as f64)
                 };
                 let mut run_points = Vec::<[f64; 2]>::with_capacity(last + 1 - first);
                 let mut centre_offsets: Vec<f64> = profiles[first..=last]
@@ -2691,6 +2462,45 @@ fn add_supported_medial_ridges(
                     .filter(|profile| profile.role == ProfileRole::RidgeOnBoundary)
                     .count();
                 let graph_is_boundary = ridge_on_boundary_count > shifted_profiles.len() / 2;
+                let run_widths = chain[first..=last]
+                    .iter()
+                    .map(|&pixel| 2.0 * distance[pixel])
+                    .collect::<Vec<_>>();
+                let medial_degree = |pixel: usize| {
+                    let x = pixel % width;
+                    let y = pixel / width;
+                    let mut degree = 0_usize;
+                    for dy in -1_isize..=1 {
+                        for dx in -1_isize..=1 {
+                            if dx == 0 && dy == 0 {
+                                continue;
+                            }
+                            let px = x as isize + dx;
+                            let py = y as isize + dy;
+                            if px >= 0
+                                && py >= 0
+                                && px < width as isize
+                                && py < height as isize
+                                && medial[py as usize * width + px as usize]
+                            {
+                                degree += 1;
+                            }
+                        }
+                    }
+                    degree
+                };
+                // A true SVG stroke has one representative width. A tapered
+                // wedge or pressure-varying filled mark does not: transferring
+                // it to structural ink replaces its narrow endpoint and broad
+                // base with a round-ended constant-width bar. Keep such marks
+                // in Paint even when their middle profile is a symmetric
+                // medial ridge.
+                let paint_owned_taper = width_profile_requires_paint(
+                    &run_widths,
+                    medial_degree(chain[first]),
+                    medial_degree(chain[last]),
+                    scale,
+                );
                 for (local, profile) in (first..=last).zip(&shifted_profiles) {
                     if profile.role == ProfileRole::RidgeOnBoundary {
                         face_barrier[chain[local]] = true;
@@ -2701,6 +2511,8 @@ fn add_supported_medial_ridges(
                     width: ownership_width,
                     role: if graph_is_boundary {
                         "ridge-on-boundary"
+                    } else if paint_owned_taper {
+                        "paint-owned-ridge"
                     } else {
                         "ridge"
                     },
@@ -3324,16 +3136,7 @@ pub fn classify(image: &Raster) -> EdgeRoles {
             let _ = std::fs::write(format!("{prefix}-graphs.json"), graphs);
         }
     }
-    // Degenerate or nearly flat images can leave the normalized edge field
-    // without a useful high-threshold seed.  Preserve the previous local
-    // classifier only as a defensive fallback, never as a mixed owner map.
-    if profile.summary.face_barrier_pixels == 0
-        && profile.summary.visible_ridge_coverage_pixels == 0
-    {
-        classify_legacy(image)
-    } else {
-        profile
-    }
+    profile
 }
 
 fn adaptive_tolerance(lightness: f32, config: &Config) -> f32 {
@@ -3493,8 +3296,10 @@ pub fn perceptual_smooth(image: &Raster, config: &Config) -> Raster {
 #[cfg(test)]
 mod tests {
     use super::{
-        nonoverlapping_extensions, point_tangents, NumpyPcg64, SourceEdge, PROFILE_OVERLAP_DISTANCE,
+        classify, nonoverlapping_extensions, point_tangents, width_profile_requires_paint,
+        NumpyPcg64, SourceEdge, PROFILE_OVERLAP_DISTANCE,
     };
+    use crate::raster::Raster;
 
     fn edge(points: Vec<[f64; 2]>) -> SourceEdge {
         SourceEdge {
@@ -3623,5 +3428,52 @@ mod tests {
                 .map(|value| value.points.as_slice())
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn flat_image_stays_empty_without_a_secondary_classifier() {
+        let image = Raster::blank(32, 24, [0.5, 0.5, 0.5]);
+        let roles = classify(&image);
+        assert_eq!(roles.summary.face_barrier_pixels, 0);
+        assert_eq!(roles.summary.visible_ridge_coverage_pixels, 0);
+        assert_eq!(roles.summary.dark_boundary_pixels, 0);
+    }
+
+    #[test]
+    fn adaptive_profile_seeds_keep_low_contrast_step_evidence() {
+        let mut image = Raster::blank(32, 24, [0.45, 0.45, 0.45]);
+        for y in 0..24 {
+            for x in 16..32 {
+                image.pixels[y * 32 + x] = [0.55, 0.55, 0.55];
+            }
+        }
+        let roles = classify(&image);
+        assert!(roles.summary.skeleton_pixels > 0, "{:?}", roles.summary);
+        assert!(roles.summary.shading_pixels > 0, "{:?}", roles.summary);
+    }
+
+    #[test]
+    fn variable_width_medial_mark_stays_paint_owned() {
+        assert!(width_profile_requires_paint(
+            &[6.0, 5.66, 4.47, 4.0, 2.83, 2.0, 2.0, 2.0, 2.0],
+            2,
+            1,
+            1.0,
+        ));
+        assert!(!width_profile_requires_paint(
+            &[2.0, 2.0, 2.0, 2.83, 2.0, 2.0, 2.0],
+            1,
+            1,
+            1.0,
+        ));
+        assert!(!width_profile_requires_paint(
+            &[
+                6.32, 6.0, 6.0, 6.0, 5.66, 4.47, 4.0, 4.47, 4.0, 4.0, 4.0, 4.0, 2.83, 2.83, 2.83,
+                2.83, 2.83,
+            ],
+            3,
+            3,
+            1.0,
+        ));
     }
 }

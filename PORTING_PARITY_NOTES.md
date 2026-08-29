@@ -256,6 +256,20 @@ and unsupported dark regions.
     to 4.1 ms (124x); the car 768 SVG remained byte-identical at 845,706 bytes
     with unchanged DeltaE00 and SSIM. A native automatic run of viewport2
     (1600 x 1067, 78,618 regions) still takes 208 s and emits 22 MB.
+    Structural analysis no longer constructs, joins, and then discards a
+    provisional legacy-line skeleton before Paint has rendered. The
+    render-dependent residual graph is now the only legacy graph construction.
+    Native car and cliparts SVGs remain byte-identical to the checked-in
+    outputs; on the measured car run structural analysis changed from 0.545 s
+    to 0.479 s and total reported time from 35.645 s to 34.744 s. Thin-Paint
+    ownership likewise evaluates a component-local proposal and commits it
+    only after the endpoint invariant passes, rather than mutating the global
+    owner raster and copying the old labels back. The former 70 car and 14
+    cliparts rollbacks are now preflight rejections with byte-identical SVGs.
+    A full legacy edge-classifier retry was also removed: when the ordinary
+    high hysteresis threshold has no seed, the normal-profile classifier now
+    selects adaptive seeds with an absolute noise floor. Flat-field and
+    low-contrast-step tests cover both branches.
 
 7. **Illumination/ridge Paint ownership.**  Python computes broad
     shade/light masks, encodes `paint_key = parent * 3 + tone`, partitions dark

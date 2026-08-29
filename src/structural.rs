@@ -5,9 +5,7 @@ use serde::Serialize;
 
 use crate::color::{delta_e2000, delta_e76, rgb_to_lab, Lab};
 use crate::edge::{dilate, dilate_square, erode, lab_pixels, EdgeRoles};
-use crate::geometry::{
-    bounded_fairing_open, fitted_structural_open_path_data, simplify_open, Point,
-};
+use crate::geometry::{fitted_structural_open_path_data, Point};
 use crate::raster::{percentile, Raster};
 
 #[derive(Clone, Debug)]
@@ -30,7 +28,7 @@ pub struct StructuralSummary {
     pub underpainted_pixels: usize,
     pub antialias_unmixed_pixels: usize,
     pub silhouette_fill_count: usize,
-    pub fallback_strokes: usize,
+    pub residual_legacy_strokes: usize,
     pub visible_ridge_strokes: usize,
     pub boundary_profile_strokes: usize,
 }
@@ -43,9 +41,9 @@ pub struct StructuralInk {
     /// Role-filtered raster lines frozen during Paint regularization. This is
     /// narrower than the complete set of source graph candidates.
     pub source_line_mask: Vec<bool>,
-    /// Legacy analyser line ownership before edge-role suppression.  Python
-    /// intersects the residual line raster with this mask before tracing the
-    /// transitional fallback graph.
+    /// Legacy analyser line ownership before edge-role suppression.  The
+    /// residual selector intersects its result with this mask before tracing
+    /// the single authoritative residual source-line graph.
     legacy_line_mask: Vec<bool>,
     /// Edge-role-owned line raster (silhouette faces excluded).
     role_line_mask: Vec<bool>,
@@ -93,7 +91,7 @@ fn neighbour_indices(index: usize, width: usize, height: usize) -> Vec<usize> {
 /// Exact port of scikit-image 0.26 `_fast_skeletonize`.  Its 256-entry
 /// Zhang-Suen classification table is not equivalent at dense diagonal
 /// contacts to the commonly reproduced boolean conditions; using the latter
-/// leaves two-pixel junction blocks and turns one fallback line into many
+/// leaves two-pixel junction blocks and turns one residual line into many
 /// short graph branches.
 pub fn skeletonize(mask: &[bool], width: usize, height: usize) -> Vec<bool> {
     const LUT: [u8; 256] = [
@@ -798,139 +796,6 @@ fn trace_skeleton(mask: &[bool], width: usize, height: usize) -> Vec<Vec<usize>>
     paths
 }
 
-fn join_continuous_strokes(mut strokes: Vec<StructuralStroke>) -> Vec<StructuralStroke> {
-    const MAXIMUM_GAP: f32 = 2.6;
-    loop {
-        let mut best: Option<(usize, usize, bool, bool, f32)> = None;
-        let mut endpoint_buckets = HashMap::<(i32, i32), Vec<usize>>::new();
-        for (index, stroke) in strokes.iter().enumerate() {
-            if stroke.points.len() < 2 {
-                continue;
-            }
-            for point in [stroke.points[0], stroke.points[stroke.points.len() - 1]] {
-                endpoint_buckets
-                    .entry((
-                        (point.x / MAXIMUM_GAP).floor() as i32,
-                        (point.y / MAXIMUM_GAP).floor() as i32,
-                    ))
-                    .or_default()
-                    .push(index);
-            }
-        }
-        let mut candidate_pairs = HashSet::<(usize, usize)>::new();
-        for (index, stroke) in strokes.iter().enumerate() {
-            if stroke.points.len() < 2 {
-                continue;
-            }
-            for point in [stroke.points[0], stroke.points[stroke.points.len() - 1]] {
-                let cell_x = (point.x / MAXIMUM_GAP).floor() as i32;
-                let cell_y = (point.y / MAXIMUM_GAP).floor() as i32;
-                for dy in -1..=1 {
-                    for dx in -1..=1 {
-                        if let Some(nearby) = endpoint_buckets.get(&(cell_x + dx, cell_y + dy)) {
-                            for &other in nearby {
-                                if index != other {
-                                    candidate_pairs.insert(edge_key(index, other));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        let mut candidate_pairs: Vec<(usize, usize)> = candidate_pairs.into_iter().collect();
-        candidate_pairs.sort_unstable();
-        for (first, second) in candidate_pairs {
-            if strokes[first].points.len() < 2 {
-                continue;
-            }
-            if strokes[second].points.len() < 2
-                || strokes[first].role != strokes[second].role
-                || delta_e76(
-                    rgb_to_lab(strokes[first].color),
-                    rgb_to_lab(strokes[second].color),
-                ) > 6.0
-                || strokes[first].width.max(strokes[second].width)
-                    / strokes[first].width.min(strokes[second].width).max(0.25)
-                    > 1.8
-            {
-                continue;
-            }
-            for reverse_first in [false, true] {
-                for reverse_second in [false, true] {
-                    let a = &strokes[first].points;
-                    let b = &strokes[second].points;
-                    let a_end = if reverse_first { a[0] } else { a[a.len() - 1] };
-                    let a_before = if reverse_first { a[1] } else { a[a.len() - 2] };
-                    let b_start = if reverse_second { b[b.len() - 1] } else { b[0] };
-                    let b_after = if reverse_second { b[b.len() - 2] } else { b[1] };
-                    let gap = a_end.distance(b_start);
-                    if gap > MAXIMUM_GAP {
-                        continue;
-                    }
-                    let first_tangent = (a_end.x - a_before.x, a_end.y - a_before.y);
-                    let second_tangent = (b_after.x - b_start.x, b_after.y - b_start.y);
-                    let first_length = (first_tangent.0.powi(2) + first_tangent.1.powi(2)).sqrt();
-                    let second_length =
-                        (second_tangent.0.powi(2) + second_tangent.1.powi(2)).sqrt();
-                    let alignment = (first_tangent.0 * second_tangent.0
-                        + first_tangent.1 * second_tangent.1)
-                        / (first_length * second_length).max(1e-6);
-                    if alignment < 0.72 {
-                        continue;
-                    }
-                    let score = alignment - 0.08 * gap;
-                    if best.map(|value| score > value.4).unwrap_or(true) {
-                        best = Some((first, second, reverse_first, reverse_second, score));
-                    }
-                }
-            }
-        }
-        let Some((first, second, reverse_first, reverse_second, _)) = best else {
-            break;
-        };
-        let mut first_points = strokes[first].points.clone();
-        let mut second_points = strokes[second].points.clone();
-        if reverse_first {
-            first_points.reverse();
-        }
-        if reverse_second {
-            second_points.reverse();
-        }
-        if first_points.last() == second_points.first() {
-            second_points.remove(0);
-        }
-        first_points.extend(second_points);
-        let first_weight = strokes[first].points.len() as f32;
-        let second_weight = strokes[second].points.len() as f32;
-        let total = first_weight + second_weight;
-        let joined = StructuralStroke {
-            points: simplify_open(&first_points, 0.75),
-            path_data: None,
-            precise_points: None,
-            color: [
-                (strokes[first].color[0] * first_weight + strokes[second].color[0] * second_weight)
-                    / total,
-                (strokes[first].color[1] * first_weight + strokes[second].color[1] * second_weight)
-                    / total,
-                (strokes[first].color[2] * first_weight + strokes[second].color[2] * second_weight)
-                    / total,
-            ],
-            width: (strokes[first].width * first_weight + strokes[second].width * second_weight)
-                / total,
-            role: strokes[first].role,
-            width_samples: vec![(
-                (strokes[first].width * first_weight + strokes[second].width * second_weight)
-                    / total,
-                first_points.len(),
-            )],
-        };
-        strokes[first] = joined;
-        strokes.swap_remove(second);
-    }
-    strokes
-}
-
 fn median_color(source: &Raster, indices: &[usize]) -> [f32; 3] {
     let mut channels = [Vec::new(), Vec::new(), Vec::new()];
     for &index in indices {
@@ -944,42 +809,6 @@ fn median_color(source: &Raster, indices: &[usize]) -> [f32; 3] {
         result[channel] = channels[channel][channels[channel].len() / 2];
     }
     result
-}
-
-fn local_width(mask: &[bool], width: usize, height: usize, indices: &[usize]) -> f32 {
-    let mut widths = Vec::new();
-    for &index in indices.iter().step_by((indices.len() / 64).max(1)) {
-        let x = index % width;
-        let y = index / width;
-        let mut radius = 1_usize;
-        'search: for candidate in 1..=5 {
-            for dy in -(candidate as isize)..=candidate as isize {
-                for dx in -(candidate as isize)..=candidate as isize {
-                    if dx.abs().max(dy.abs()) != candidate as isize {
-                        continue;
-                    }
-                    let px = x as isize + dx;
-                    let py = y as isize + dy;
-                    if px < 0
-                        || py < 0
-                        || px >= width as isize
-                        || py >= height as isize
-                        || !mask[py as usize * width + px as usize]
-                    {
-                        radius = candidate;
-                        break 'search;
-                    }
-                }
-            }
-        }
-        widths.push((radius as f32 * 2.0 - 0.5).max(1.0));
-    }
-    widths.sort_by(|a, b| a.total_cmp(b));
-    widths
-        .get(widths.len() / 2)
-        .copied()
-        .unwrap_or(1.25)
-        .clamp(0.75, 8.0)
 }
 
 fn distance_transform_1d(values: &[f32]) -> (Vec<f32>, Vec<usize>) {
@@ -1446,46 +1275,17 @@ pub fn analyse(source: &Raster, roles: &mut EdgeRoles) -> (Raster, StructuralInk
             });
         let _ = raster.save(format!("{}-source-line-mask.png", prefix.to_string_lossy()));
     }
-    let fallback_coverage: Vec<bool> = classified_lines
+    let unclassified_source_coverage: Vec<bool> = classified_lines
         .iter()
         .zip(&shading_corridor)
         .zip(&source_graph_coverage)
         .map(|((&classified, &shading), &graph)| classified && !shading && !graph)
         .collect();
-    let mut skeleton = skeletonize(&fallback_coverage, source.width, source.height);
-    remove_small_components(&mut skeleton, source.width, source.height, 4);
-    let paths = trace_skeleton(&skeleton, source.width, source.height);
-    let strokes = paths
-        .into_iter()
-        .filter_map(|indices| {
-            let points: Vec<Point> = indices
-                .iter()
-                .map(|&index| Point {
-                    x: (index % source.width) as f32 + 0.5,
-                    y: (index / source.width) as f32 + 0.5,
-                })
-                .collect();
-            let simplified = bounded_fairing_open(&points, 0.75);
-            if simplified.len() < 2 {
-                return None;
-            }
-            let simplified_len = simplified.len();
-            Some(StructuralStroke {
-                points: simplified,
-                path_data: None,
-                precise_points: None,
-                color: median_color(source, &indices),
-                width: local_width(&fallback_coverage, source.width, source.height, &indices),
-                role: "fallback",
-                width_samples: vec![(
-                    local_width(&fallback_coverage, source.width, source.height, &indices),
-                    simplified_len,
-                )],
-            })
-        })
-        .collect::<Vec<_>>();
-    let mut strokes = join_continuous_strokes(strokes);
-    let graph_strokes = roles
+    // Do not speculate a provisional legacy graph here.  Whether Paint owns a
+    // legacy source line is known only after the exact Paint partition has
+    // rendered; constructing and then discarding an early skeleton duplicated
+    // work and could never be the authoritative topology.
+    let strokes = roles
         .visible_ridge_graph
         .iter()
         .chain(&roles.dark_boundary_graph)
@@ -1534,23 +1334,19 @@ pub fn analyse(source: &Raster, roles: &mut EdgeRoles) -> (Raster, StructuralInk
             })
         })
         .collect::<Vec<_>>();
-    strokes.extend(graph_strokes);
     let summary = StructuralSummary {
-        source_coverage_pixels: fallback_coverage
+        source_coverage_pixels: unclassified_source_coverage
             .iter()
             .zip(&source_graph_coverage)
-            .filter(|&(fallback, graph)| *fallback || *graph)
+            .filter(|&(unclassified, graph)| *unclassified || *graph)
             .count(),
         source_line_pixels: source_line_mask.iter().filter(|&&value| value).count(),
-        skeleton_pixels: skeleton.iter().filter(|&&value| value).count(),
+        skeleton_pixels: 0,
         stroke_count: strokes.len(),
         underpainted_pixels: underpaint_ownership.iter().filter(|&&value| value).count(),
         antialias_unmixed_pixels,
         silhouette_fill_count: 0,
-        fallback_strokes: strokes
-            .iter()
-            .filter(|stroke| stroke.role == "fallback")
-            .count(),
+        residual_legacy_strokes: 0,
         visible_ridge_strokes: strokes
             .iter()
             .filter(|stroke| stroke.role == "ridge")
@@ -1579,48 +1375,6 @@ pub fn analyse(source: &Raster, roles: &mut EdgeRoles) -> (Raster, StructuralInk
             summary,
         },
     )
-}
-
-fn sampled_stroke_points(points: &[Point]) -> Vec<Point> {
-    if points.len() < 2 {
-        return points.to_vec();
-    }
-    let mut result = vec![points[0]];
-    for pair in points.windows(2) {
-        let length = pair[0].distance(pair[1]);
-        let steps = (length * 2.0).ceil().max(1.0) as usize;
-        for step in 1..=steps {
-            let amount = step as f32 / steps as f32;
-            result.push(Point {
-                x: pair[0].x + amount * (pair[1].x - pair[0].x),
-                y: pair[0].y + amount * (pair[1].y - pair[0].y),
-            });
-        }
-    }
-    result
-}
-
-fn bilinear_lab(values: &[Lab], width: usize, height: usize, point: Point) -> Lab {
-    let x = (point.x - 0.5).clamp(0.0, width.saturating_sub(1) as f32);
-    let y = (point.y - 0.5).clamp(0.0, height.saturating_sub(1) as f32);
-    let x0 = x.floor() as usize;
-    let y0 = y.floor() as usize;
-    let x1 = (x0 + 1).min(width.saturating_sub(1));
-    let y1 = (y0 + 1).min(height.saturating_sub(1));
-    let tx = x - x0 as f32;
-    let ty = y - y0 as f32;
-    let interpolate = |channel: fn(Lab) -> f32| {
-        let top =
-            channel(values[y0 * width + x0]) * (1.0 - tx) + channel(values[y0 * width + x1]) * tx;
-        let bottom =
-            channel(values[y1 * width + x0]) * (1.0 - tx) + channel(values[y1 * width + x1]) * tx;
-        top * (1.0 - ty) + bottom * ty
-    };
-    Lab {
-        l: interpolate(|value| value.l),
-        a: interpolate(|value| value.a),
-        b: interpolate(|value| value.b),
-    }
 }
 
 fn bilinear_lab_precise(values: &[Lab], width: usize, height: usize, point: [f64; 2]) -> Lab {
@@ -1653,135 +1407,6 @@ fn precise_normal_at(points: &[[f64; 2]], index: usize) -> [f64; 2] {
     let dy = after[1] - before[1];
     let length = dx.hypot(dy).max(1e-6);
     [-dy / length, dx / length]
-}
-
-fn normal_at(points: &[Point], index: usize) -> (f32, f32) {
-    let before = points[index.saturating_sub(1)];
-    let after = points[(index + 1).min(points.len() - 1)];
-    let dx = after.x - before.x;
-    let dy = after.y - before.y;
-    let length = dx.hypot(dy).max(1e-6);
-    (-dy / length, dx / length)
-}
-
-/// Port of perceptual_pipeline._boundary_ridge_profile_measurements.  The
-/// decision is made at a fixed arclength position and searches only across
-/// the normal, so a tangential gap cannot borrow a matching neighbouring
-/// source pixel.
-fn boundary_profile_measurements(
-    stroke: &StructuralStroke,
-    source_lab: &[Lab],
-    rendered_lab: &[Lab],
-    width: usize,
-    height: usize,
-    primary_owner_corridor: &[bool],
-) -> (Vec<bool>, Vec<bool>, bool) {
-    let chroma_samples: Vec<f32> = stroke
-        .points
-        .iter()
-        .map(|&point| {
-            let value = bilinear_lab(source_lab, width, height, point);
-            value.a.hypot(value.b)
-        })
-        .collect();
-    let mut sorted_chroma = chroma_samples;
-    sorted_chroma.sort_by(f32::total_cmp);
-    let coloured = stroke.role == "ridge-on-boundary"
-        && sorted_chroma
-            .get(sorted_chroma.len() / 2)
-            .copied()
-            .unwrap_or(0.0)
-            >= 12.0;
-    let offsets = [-0.75_f32, -0.5, -0.25, 0.0, 0.25, 0.5, 0.75];
-    let mut missing = Vec::with_capacity(stroke.points.len());
-    let mut source_valley = Vec::with_capacity(stroke.points.len());
-    for (index, &point) in stroke.points.iter().enumerate() {
-        let (nx, ny) = normal_at(&stroke.points, index);
-        let sample = |values: &[Lab], offset: f32| {
-            bilinear_lab(
-                values,
-                width,
-                height,
-                Point {
-                    x: point.x + offset * nx,
-                    y: point.y + offset * ny,
-                },
-            )
-        };
-        let source_profile: Vec<Lab> = offsets
-            .iter()
-            .map(|&offset| sample(source_lab, offset))
-            .collect();
-        let rendered_profile: Vec<Lab> = offsets
-            .iter()
-            .map(|&offset| sample(rendered_lab, offset))
-            .collect();
-        let source_sides = [sample(source_lab, -1.5), sample(source_lab, 1.5)];
-        let rendered_sides = [sample(rendered_lab, -1.5), sample(rendered_lab, 1.5)];
-        let target = if coloured {
-            source_profile[3]
-        } else {
-            source_profile
-                .iter()
-                .copied()
-                .min_by(|first, second| first.l.total_cmp(&second.l))
-                .unwrap_or(source_profile[3])
-        };
-        let source_dark_contrast = source_sides[0].l.min(source_sides[1].l) - target.l;
-        let source_side_colour_contrast =
-            delta_e2000(source_sides[0], target).min(delta_e2000(source_sides[1], target));
-        let source_line_contrast = if coloured {
-            source_dark_contrast.max(source_side_colour_contrast)
-        } else {
-            source_dark_contrast
-        };
-        let rendered_minimum_lightness = rendered_profile
-            .iter()
-            .map(|value| value.l)
-            .fold(f32::INFINITY, f32::min);
-        let rendered_dark_contrast =
-            rendered_sides[0].l.min(rendered_sides[1].l) - rendered_minimum_lightness;
-        let minimum_error = rendered_profile
-            .iter()
-            .map(|&value| delta_e2000(value, target))
-            .fold(f32::INFINITY, f32::min);
-        let x = (point.x - 0.5)
-            .round()
-            .clamp(0.0, width.saturating_sub(1) as f32) as usize;
-        let y = (point.y - 0.5)
-            .round()
-            .clamp(0.0, height.saturating_sub(1) as f32) as usize;
-        let has_valley = source_line_contrast >= 4.0;
-        source_valley.push(has_valley);
-        missing.push(
-            !primary_owner_corridor[y * width + x]
-                && minimum_error > 4.0
-                && has_valley
-                && (rendered_dark_contrast < 0.65 * source_dark_contrast
-                    || rendered_minimum_lightness - target.l >= 5.0),
-        );
-    }
-    (missing, source_valley, coloured)
-}
-
-fn push_simplified_complete(
-    output: &mut Vec<StructuralStroke>,
-    stroke: &StructuralStroke,
-    role: &'static str,
-    width_scale: f32,
-) {
-    let points = bounded_fairing_open(&stroke.points, 0.55);
-    if points.len() >= 2 {
-        output.push(StructuralStroke {
-            points,
-            path_data: None,
-            precise_points: None,
-            color: stroke.color,
-            width: width_scale * stroke.width,
-            role,
-            width_samples: stroke.width_samples.clone(),
-        });
-    }
 }
 
 fn residual_line_masks(
@@ -3567,282 +3192,9 @@ fn snap_graph_to_paint_junctions(
     current
 }
 
-/// Keep only the structural ink that the native-resolution Paint render does
-/// not already represent.  This gives every authored line one visual owner
-/// and prevents a correctly traced Paint boundary from receiving a second,
-/// independently widened stroke.
-#[allow(dead_code)]
-fn select_missing_legacy(
-    source: &Raster,
-    rendered: &Raster,
-    structural: &StructuralInk,
-) -> StructuralInk {
-    if source.width != rendered.width || source.height != rendered.height {
-        return structural.clone();
-    }
-    let source_lab = lab_pixels(source);
-    let rendered_lab = lab_pixels(rendered);
-    let mut primary_owner_corridor = vec![false; source.width * source.height];
-    for stroke in structural
-        .strokes
-        .iter()
-        .filter(|stroke| stroke.role == "ridge")
-    {
-        for point in sampled_stroke_points(&stroke.points) {
-            let x = (point.x - 0.5)
-                .round()
-                .clamp(0.0, source.width.saturating_sub(1) as f32) as usize;
-            let y = (point.y - 0.5)
-                .round()
-                .clamp(0.0, source.height.saturating_sub(1) as f32) as usize;
-            for dy in -1_isize..=1 {
-                for dx in -1_isize..=1 {
-                    let px = x as isize + dx;
-                    let py = y as isize + dy;
-                    if px >= 0
-                        && py >= 0
-                        && px < source.width as isize
-                        && py < source.height as isize
-                    {
-                        primary_owner_corridor[py as usize * source.width + px as usize] = true;
-                    }
-                }
-            }
-        }
-    }
-    let mut strokes = Vec::<StructuralStroke>::new();
-    for stroke in &structural.strokes {
-        if stroke.role == "ridge" {
-            // Paint ownership was removed for these graph owners before
-            // quantization, so the complete trajectory is unconditional.
-            push_simplified_complete(&mut strokes, stroke, "ridge", 1.0);
-            continue;
-        }
-        if matches!(stroke.role, "ridge-on-boundary" | "dark-boundary") {
-            let (missing, mut valley, coloured) = boundary_profile_measurements(
-                stroke,
-                &source_lab,
-                &rendered_lab,
-                source.width,
-                source.height,
-                &primary_owner_corridor,
-            );
-            let resolved_role = if coloured {
-                "coloured-ridge-on-boundary"
-            } else {
-                stroke.role
-            };
-            let width_scale = if coloured { 0.8 } else { 1.0 };
-            let complete_threshold = if coloured {
-                0.30
-            } else if stroke.role == "dark-boundary" {
-                0.90
-            } else {
-                0.60
-            };
-            let missing_fraction =
-                missing.iter().filter(|&&value| value).count() as f32 / missing.len().max(1) as f32;
-            if missing_fraction >= complete_threshold {
-                push_simplified_complete(&mut strokes, stroke, resolved_role, width_scale);
-                continue;
-            }
-
-            let cumulative: Vec<f32> = std::iter::once(0.0)
-                .chain(stroke.points.windows(2).scan(0.0, |total, pair| {
-                    *total += pair[0].distance(pair[1]);
-                    Some(*total)
-                }))
-                .collect();
-            // split_edges_by_support_runs(maximum_internal_gap=3): keep a
-            // source valley continuous across only a short raster miss.
-            let mut index = 0_usize;
-            while index < valley.len() {
-                if valley[index] {
-                    index += 1;
-                    continue;
-                }
-                let first = index;
-                while index < valley.len() && !valley[index] {
-                    index += 1;
-                }
-                if first > 0
-                    && index < valley.len()
-                    && cumulative[index] - cumulative[first - 1] <= 3.0
-                {
-                    valley[first..index].fill(true);
-                }
-            }
-            let interval_threshold = if stroke.role == "dark-boundary" {
-                0.90
-            } else {
-                0.15
-            };
-            let mut index = 0_usize;
-            while index < valley.len() {
-                if !valley[index] {
-                    index += 1;
-                    continue;
-                }
-                let mut first = index;
-                while index + 1 < valley.len() && valley[index + 1] {
-                    index += 1;
-                }
-                let mut last = index;
-                index += 1;
-                if cumulative[last] - cumulative[first] < 2.0 {
-                    continue;
-                }
-                while first > 0 && cumulative[first] - cumulative[first - 1] <= 1.0 {
-                    first -= 1;
-                }
-                while last + 1 < stroke.points.len()
-                    && cumulative[last + 1] - cumulative[last] <= 1.0
-                {
-                    last += 1;
-                }
-                let fraction = missing[first..=last].iter().filter(|&&value| value).count() as f32
-                    / (last + 1 - first) as f32;
-                if fraction < interval_threshold {
-                    continue;
-                }
-                let interval = StructuralStroke {
-                    points: stroke.points[first..=last].to_vec(),
-                    path_data: None,
-                    precise_points: None,
-                    color: stroke.color,
-                    width: stroke.width,
-                    role: resolved_role,
-                    width_samples: stroke.width_samples.clone(),
-                };
-                push_simplified_complete(&mut strokes, &interval, resolved_role, width_scale);
-            }
-            continue;
-        }
-        let samples = sampled_stroke_points(&stroke.points);
-        if samples.len() < 2 {
-            continue;
-        }
-        let mut missing = Vec::<bool>::with_capacity(samples.len());
-        for point in &samples {
-            let x = (point.x - 0.5)
-                .round()
-                .clamp(0.0, source.width.saturating_sub(1) as f32) as usize;
-            let y = (point.y - 0.5)
-                .round()
-                .clamp(0.0, source.height.saturating_sub(1) as f32) as usize;
-            let reference = source_lab[y * source.width + x];
-            let chroma = (reference.a * reference.a + reference.b * reference.b).sqrt();
-            let mut minimum_delta = f32::INFINITY;
-            let mut minimum_lightness = f32::INFINITY;
-            for dy in -1_isize..=1 {
-                for dx in -1_isize..=1 {
-                    let px = (x as isize + dx).clamp(0, source.width as isize - 1) as usize;
-                    let py = (y as isize + dy).clamp(0, source.height as isize - 1) as usize;
-                    let candidate = rendered_lab[py * source.width + px];
-                    minimum_delta = minimum_delta.min(delta_e76(reference, candidate));
-                    minimum_lightness = minimum_lightness.min(candidate.l);
-                }
-            }
-            let represented = minimum_delta <= 4.0
-                || (chroma < 12.0 && reference.l <= 50.0 && minimum_lightness <= reference.l + 4.0);
-            missing.push(!represented);
-        }
-        let missing_count = missing.iter().filter(|&&value| value).count();
-        if missing_count < 3 {
-            continue;
-        }
-        if missing_count as f32 / missing.len() as f32 >= 0.75 {
-            strokes.push(stroke.clone());
-            continue;
-        }
-        let measured = missing.clone();
-        for index in 0..missing.len() {
-            if measured[index] {
-                if index > 0 {
-                    missing[index - 1] = true;
-                }
-                if index + 1 < missing.len() {
-                    missing[index + 1] = true;
-                }
-            }
-        }
-        let mut index = 0;
-        while index < missing.len() {
-            if !missing[index] {
-                index += 1;
-                continue;
-            }
-            let first = index;
-            while index + 1 < missing.len() && missing[index + 1] {
-                index += 1;
-            }
-            let last = index;
-            index += 1;
-            if last.saturating_sub(first) < 2 {
-                continue;
-            }
-            let points = bounded_fairing_open(&samples[first..=last], 0.75);
-            if points.len() >= 2 {
-                strokes.push(StructuralStroke {
-                    points,
-                    path_data: None,
-                    precise_points: None,
-                    color: stroke.color,
-                    width: stroke.width,
-                    role: stroke.role,
-                    width_samples: stroke.width_samples.clone(),
-                });
-            }
-        }
-    }
-    // write_structural_ink_svg(minimum_line_length=4.0) removes compact
-    // residual fragments after ownership has been resolved.  Keeping them in
-    // Rust produced round-cap specks and inflated the path count.
-    strokes.retain(|stroke| {
-        stroke
-            .points
-            .windows(2)
-            .map(|pair| pair[0].distance(pair[1]))
-            .sum::<f32>()
-            >= 4.0
-    });
-    let mut summary = structural.summary.clone();
-    summary.stroke_count = strokes.len();
-    summary.fallback_strokes = strokes
-        .iter()
-        .filter(|stroke| stroke.role == "fallback")
-        .count();
-    summary.visible_ridge_strokes = strokes
-        .iter()
-        .filter(|stroke| stroke.role == "ridge")
-        .count();
-    summary.boundary_profile_strokes = strokes
-        .iter()
-        .filter(|stroke| {
-            matches!(
-                stroke.role,
-                "ridge-on-boundary" | "coloured-ridge-on-boundary" | "dark-boundary"
-            )
-        })
-        .count();
-    StructuralInk {
-        strokes,
-        paint_ownership_mask: structural.paint_ownership_mask.clone(),
-        source_line_mask: structural.source_line_mask.clone(),
-        legacy_line_mask: structural.legacy_line_mask.clone(),
-        role_line_mask: structural.role_line_mask.clone(),
-        visible_ridge_coverage: structural.visible_ridge_coverage.clone(),
-        dark_boundary_coverage: structural.dark_boundary_coverage.clone(),
-        face_barrier: structural.face_barrier.clone(),
-        summary,
-    }
-}
-
-/// Faithful structural ownership order from perceptual_pipeline followed by
-/// write_structural_ink_svg.  Residual evidence first selects complete graph
-/// owners or source-valley arclength runs; only then is fallback raster ink
-/// skeletonised.  Keeping that order avoids creating geometry from expanded
-/// graph coverage and makes the Rust graph topology match the Python source.
+/// Resolve the single authoritative legacy source-line topology after Paint
+/// ownership is known.  No speculative legacy graph is built and discarded
+/// during structural analysis.
 pub fn select_missing(
     source: &Raster,
     rendered: &Raster,
@@ -3871,7 +3223,7 @@ pub fn select_missing_with_junctions(
         width,
         height,
     );
-    let fallback_line_mask: Vec<bool> = residual_lines
+    let residual_legacy_line_mask: Vec<bool> = residual_lines
         .iter()
         .zip(&structural.legacy_line_mask)
         .map(|(&residual, &legacy)| residual && legacy)
@@ -3891,7 +3243,7 @@ pub fn select_missing_with_junctions(
         for (name, mask) in [
             ("legacy-lines", &structural.legacy_line_mask),
             ("role-lines", &structural.role_line_mask),
-            ("fallback-lines", &fallback_line_mask),
+            ("residual-legacy-lines", &residual_legacy_line_mask),
             ("visible-ridge-coverage", &structural.visible_ridge_coverage),
         ] {
             let bytes = mask
@@ -3926,12 +3278,7 @@ pub fn select_missing_with_junctions(
         }
     }
 
-    let graph_candidates = structural
-        .strokes
-        .iter()
-        .filter(|stroke| stroke.role != "fallback")
-        .cloned()
-        .collect::<Vec<_>>();
+    let graph_candidates = structural.strokes.iter().cloned().collect::<Vec<_>>();
     let mut visible_graph = Vec::new();
     let mut boundary_graph = Vec::new();
     for mut stroke in graph_candidates {
@@ -3969,9 +3316,9 @@ pub fn select_missing_with_junctions(
             edge_wide_support[index] = false;
         }
     }
-    let scheduled_fallback_corridor = dilate_square(&fallback_line_mask, width, height, 1);
+    let scheduled_residual_corridor = dilate_square(&residual_legacy_line_mask, width, height, 1);
     for index in 0..edge_wide_support.len() {
-        if scheduled_fallback_corridor[index] {
+        if scheduled_residual_corridor[index] {
             edge_wide_support[index] = false;
         }
     }
@@ -4008,7 +3355,7 @@ pub fn select_missing_with_junctions(
             "role_lines": structural.role_line_mask.iter().filter(|&&value| value).count(),
             "selected_residual_lines": residual_lines.iter().filter(|&&value| value).count(),
             "measured_lines": measured_lines.iter().filter(|&&value| value).count(),
-            "fallback_lines": fallback_line_mask.iter().filter(|&&value| value).count(),
+            "residual_legacy_lines": residual_legacy_line_mask.iter().filter(|&&value| value).count(),
             "missing_profile": missing_support.iter().filter(|&&value| value).count(),
             "valley_profile": source_valley_support.iter().filter(|&&value| value).count(),
             "wide_profile": edge_wide_support.iter().filter(|&&value| value).count(),
@@ -4022,21 +3369,25 @@ pub fn select_missing_with_junctions(
         }
     }
 
-    let distance_sites: Vec<bool> = fallback_line_mask.iter().map(|value| !value).collect();
+    let distance_sites: Vec<bool> = residual_legacy_line_mask
+        .iter()
+        .map(|value| !value)
+        .collect();
     let nearest_background = nearest_site_indices(&distance_sites, width, height);
-    let mut skeleton = skeletonize(&fallback_line_mask, width, height);
+    let mut skeleton = skeletonize(&residual_legacy_line_mask, width, height);
     remove_small_components(&mut skeleton, width, height, 1);
+    let residual_skeleton_pixels = skeleton.iter().filter(|&&value| value).count();
     if let Some(prefix) = std::env::var_os("PICVEC_STRUCTURAL_DIAGNOSTICS") {
         let _ = std::fs::write(
-            format!("{}-fallback-skeleton.json", prefix.to_string_lossy()),
+            format!("{}-residual-source-skeleton.json", prefix.to_string_lossy()),
             format!(
                 "{{\"pixels\":{},\"paths\":{}}}",
-                skeleton.iter().filter(|&&value| value).count(),
+                residual_skeleton_pixels,
                 trace_skeleton(&skeleton, width, height).len(),
             ),
         );
     }
-    let mut fallback_graph = Vec::new();
+    let mut residual_legacy_graph = Vec::new();
     for indices in trace_skeleton(&skeleton, width, height) {
         if indices.len() < 2 {
             continue;
@@ -4057,7 +3408,7 @@ pub fn select_missing_with_junctions(
         } else {
             half_widths[half_widths.len() / 2]
         };
-        fallback_graph.push(StructuralStroke {
+        residual_legacy_graph.push(StructuralStroke {
             points: indices
                 .iter()
                 .map(|&index| Point {
@@ -4112,10 +3463,12 @@ pub fn select_missing_with_junctions(
         .zip(&structural.visible_ridge_coverage)
         .zip(&structural.dark_boundary_coverage)
         .zip(&structural.face_barrier)
-        .zip(&fallback_line_mask)
-        .map(|((((&selected, &ridge), &dark), &barrier), &fallback)| {
-            selected || ridge || dark || barrier || fallback
-        })
+        .zip(&residual_legacy_line_mask)
+        .map(
+            |((((&selected, &ridge), &dark), &barrier), &residual_legacy)| {
+                selected || ridge || dark || barrier || residual_legacy
+            },
+        )
         .collect();
     let boundary_indices = selected_graph
         .iter()
@@ -4162,17 +3515,22 @@ pub fn select_missing_with_junctions(
             selected || 0.2126 * pixel[0] + 0.7152 * pixel[1] + 0.0722 * pixel[2] <= 0.65
         })
         .collect();
-    let connected_fallback_graph = connect_graph_edges(
-        fallback_graph,
+    let connected_residual_legacy_graph = connect_graph_edges(
+        residual_legacy_graph,
         &source_ink_support,
         width,
         height,
         6.0,
         15.0,
     );
-    let fallback_graph =
-        remove_graph_aligned_overlap(connected_fallback_graph, &selected_graph, 1.5, 20.0, false);
-    selected_graph.extend(fallback_graph);
+    let residual_legacy_graph = remove_graph_aligned_overlap(
+        connected_residual_legacy_graph,
+        &selected_graph,
+        1.5,
+        20.0,
+        false,
+    );
+    selected_graph.extend(residual_legacy_graph);
     selected_graph = connect_graph_edges(
         selected_graph,
         &source_ink_support,
@@ -4322,8 +3680,9 @@ pub fn select_missing_with_junctions(
         });
     }
     let mut summary = structural.summary.clone();
+    summary.skeleton_pixels = residual_skeleton_pixels;
     summary.stroke_count = strokes.len();
-    summary.fallback_strokes = strokes
+    summary.residual_legacy_strokes = strokes
         .iter()
         .filter(|stroke| stroke.role == "legacy-structural")
         .count();
