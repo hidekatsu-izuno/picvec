@@ -1850,6 +1850,44 @@ fn graph_endpoint(stroke: &StructuralStroke, at_start: bool) -> (Point, (f32, f3
     (endpoint, (dx / length, dy / length))
 }
 
+/// Return the same lexicographically ordered pairs as a dense `first < second`
+/// scan, restricted to points within `maximum_distance`. A cell has exactly
+/// the query radius as its side, so every qualifying pair is in one of the
+/// surrounding 3x3 cells.
+fn nearby_point_pairs(points: &[Point], maximum_distance: f32) -> Vec<(usize, usize)> {
+    if points.len() < 2 || maximum_distance <= 0.0 {
+        return Vec::new();
+    }
+    let cell_key = |point: Point| {
+        (
+            (point.x / maximum_distance).floor() as i32,
+            (point.y / maximum_distance).floor() as i32,
+        )
+    };
+    let mut cells = HashMap::<(i32, i32), Vec<usize>>::new();
+    for (index, &point) in points.iter().enumerate() {
+        cells.entry(cell_key(point)).or_default().push(index);
+    }
+    let mut pairs = Vec::<(usize, usize)>::new();
+    for (first, &point) in points.iter().enumerate() {
+        let (cell_x, cell_y) = cell_key(point);
+        for y in cell_y - 1..=cell_y + 1 {
+            for x in cell_x - 1..=cell_x + 1 {
+                let Some(indices) = cells.get(&(x, y)) else {
+                    continue;
+                };
+                for &second in indices {
+                    if second > first && point.distance(points[second]) <= maximum_distance {
+                        pairs.push((first, second));
+                    }
+                }
+            }
+        }
+    }
+    pairs.sort_unstable();
+    pairs
+}
+
 fn raster_line_points(first: Point, second: Point) -> Vec<(usize, usize)> {
     let mut x0 = (first.x - 0.5).round() as isize;
     let mut y0 = (first.y - 0.5).round() as isize;
@@ -1984,56 +2022,51 @@ fn connect_graph_edges(
         if current.len() < 2 {
             break;
         }
+        let records = current
+            .iter()
+            .enumerate()
+            .flat_map(|(edge, stroke)| {
+                [true, false].into_iter().map(move |at_start| {
+                    let (point, tangent) = graph_endpoint(stroke, at_start);
+                    (edge, at_start, point, tangent)
+                })
+            })
+            .collect::<Vec<_>>();
+        let points = records.iter().map(|record| record.2).collect::<Vec<_>>();
         let mut candidates = Vec::<(f32, usize, bool, usize, bool)>::new();
-        for first in 0..current.len() {
-            for second in first + 1..current.len() {
-                for first_at_start in [true, false] {
-                    let (first_point, first_tangent) =
-                        graph_endpoint(&current[first], first_at_start);
-                    for second_at_start in [true, false] {
-                        let (second_point, second_tangent) =
-                            graph_endpoint(&current[second], second_at_start);
-                        let dx = second_point.x - first_point.x;
-                        let dy = second_point.y - first_point.y;
-                        let distance = dx.hypot(dy);
-                        if distance > maximum_gap {
-                            continue;
-                        }
-                        let opposing = -(first_tangent.0 * second_tangent.0
-                            + first_tangent.1 * second_tangent.1);
-                        let coincident_radius =
-                            (0.5 * (current[first].width + current[second].width) + 0.5).max(2.25);
-                        let (first_alignment, second_alignment) = if distance <= coincident_radius {
-                            if opposing < cosine {
-                                continue;
-                            }
-                            (1.0, 1.0)
-                        } else {
-                            let direction = (dx / distance, dy / distance);
-                            let first_alignment =
-                                first_tangent.0 * direction.0 + first_tangent.1 * direction.1;
-                            let second_alignment =
-                                -(second_tangent.0 * direction.0 + second_tangent.1 * direction.1);
-                            if first_alignment.min(second_alignment).min(opposing) < cosine {
-                                continue;
-                            }
-                            (first_alignment, second_alignment)
-                        };
-                        if !graph_bridge_supported(
-                            first_point,
-                            second_point,
-                            support,
-                            width,
-                            height,
-                        ) {
-                            continue;
-                        }
-                        let score =
-                            distance + 2.0 * (3.0 - first_alignment - second_alignment - opposing);
-                        candidates.push((score, first, first_at_start, second, second_at_start));
-                    }
-                }
+        for (first_record, second_record) in nearby_point_pairs(&points, maximum_gap) {
+            let (first, first_at_start, first_point, first_tangent) = records[first_record];
+            let (second, second_at_start, second_point, second_tangent) = records[second_record];
+            if first == second {
+                continue;
             }
+            let dx = second_point.x - first_point.x;
+            let dy = second_point.y - first_point.y;
+            let distance = dx.hypot(dy);
+            let opposing =
+                -(first_tangent.0 * second_tangent.0 + first_tangent.1 * second_tangent.1);
+            let coincident_radius =
+                (0.5 * (current[first].width + current[second].width) + 0.5).max(2.25);
+            let (first_alignment, second_alignment) = if distance <= coincident_radius {
+                if opposing < cosine {
+                    continue;
+                }
+                (1.0, 1.0)
+            } else {
+                let direction = (dx / distance, dy / distance);
+                let first_alignment = first_tangent.0 * direction.0 + first_tangent.1 * direction.1;
+                let second_alignment =
+                    -(second_tangent.0 * direction.0 + second_tangent.1 * direction.1);
+                if first_alignment.min(second_alignment).min(opposing) < cosine {
+                    continue;
+                }
+                (first_alignment, second_alignment)
+            };
+            if !graph_bridge_supported(first_point, second_point, support, width, height) {
+                continue;
+            }
+            let score = distance + 2.0 * (3.0 - first_alignment - second_alignment - opposing);
+            candidates.push((score, first, first_at_start, second, second_at_start));
         }
         if candidates.is_empty() {
             break;
@@ -2430,52 +2463,49 @@ fn snap_graph_intersections(
             })
         })
         .collect::<Vec<_>>();
+    let points = records.iter().map(|record| record.2).collect::<Vec<_>>();
     let mut candidates = Vec::<(f32, usize, usize, Point)>::new();
-    for first in 0..records.len() {
-        for second in first + 1..records.len() {
-            let (first_edge, _, first_point, first_tangent) = records[first];
-            let (second_edge, _, second_point, second_tangent) = records[second];
-            if first_edge == second_edge
-                || first_point.distance(second_point) > 2.0 * maximum_extension
-            {
-                continue;
-            }
-            let cross = first_tangent.0 * second_tangent.1 - first_tangent.1 * second_tangent.0;
-            if cross.abs() < minimum_sine {
-                continue;
-            }
-            let delta = (
-                second_point.x - first_point.x,
-                second_point.y - first_point.y,
-            );
-            let first_distance = (delta.0 * second_tangent.1 - delta.1 * second_tangent.0) / cross;
-            let second_distance = (first_tangent.1 * delta.0 - first_tangent.0 * delta.1) / cross;
-            if first_distance < -1e-6
-                || second_distance < -1e-6
-                || first_distance > maximum_extension
-                || second_distance > maximum_extension
-            {
-                continue;
-            }
-            let first_node = Point {
-                x: first_point.x + first_distance * first_tangent.0,
-                y: first_point.y + first_distance * first_tangent.1,
-            };
-            let second_node = Point {
-                x: second_point.x + second_distance * second_tangent.0,
-                y: second_point.y + second_distance * second_tangent.1,
-            };
-            let node = Point {
-                x: 0.5 * (first_node.x + second_node.x),
-                y: 0.5 * (first_node.y + second_node.y),
-            };
-            if !graph_bridge_supported(first_point, node, &junction_support, width, height)
-                || !graph_bridge_supported(second_point, node, &junction_support, width, height)
-            {
-                continue;
-            }
-            candidates.push((first_distance + second_distance, first, second, node));
+    for (first, second) in nearby_point_pairs(&points, 2.0 * maximum_extension) {
+        let (first_edge, _, first_point, first_tangent) = records[first];
+        let (second_edge, _, second_point, second_tangent) = records[second];
+        if first_edge == second_edge {
+            continue;
         }
+        let cross = first_tangent.0 * second_tangent.1 - first_tangent.1 * second_tangent.0;
+        if cross.abs() < minimum_sine {
+            continue;
+        }
+        let delta = (
+            second_point.x - first_point.x,
+            second_point.y - first_point.y,
+        );
+        let first_distance = (delta.0 * second_tangent.1 - delta.1 * second_tangent.0) / cross;
+        let second_distance = (first_tangent.1 * delta.0 - first_tangent.0 * delta.1) / cross;
+        if first_distance < -1e-6
+            || second_distance < -1e-6
+            || first_distance > maximum_extension
+            || second_distance > maximum_extension
+        {
+            continue;
+        }
+        let first_node = Point {
+            x: first_point.x + first_distance * first_tangent.0,
+            y: first_point.y + first_distance * first_tangent.1,
+        };
+        let second_node = Point {
+            x: second_point.x + second_distance * second_tangent.0,
+            y: second_point.y + second_distance * second_tangent.1,
+        };
+        let node = Point {
+            x: 0.5 * (first_node.x + second_node.x),
+            y: 0.5 * (first_node.y + second_node.y),
+        };
+        if !graph_bridge_supported(first_point, node, &junction_support, width, height)
+            || !graph_bridge_supported(second_point, node, &junction_support, width, height)
+        {
+            continue;
+        }
+        candidates.push((first_distance + second_distance, first, second, node));
     }
     let mut best = HashMap::<usize, (f32, usize)>::new();
     for (index, &(score, first, second, _)) in candidates.iter().enumerate() {
@@ -2544,46 +2574,41 @@ fn snap_graph_mutual_continuations(
             })
         })
         .collect::<Vec<_>>();
+    let points = records.iter().map(|record| record.2).collect::<Vec<_>>();
     let mut candidates = Vec::<(f32, usize, usize)>::new();
-    for first in 0..records.len() {
-        for second in first + 1..records.len() {
-            let (first_edge, _, first_point, first_tangent) = records[first];
-            let (second_edge, _, second_point, second_tangent) = records[second];
-            if first_edge == second_edge {
-                continue;
-            }
-            let dx = second_point.x - first_point.x;
-            let dy = second_point.y - first_point.y;
-            let distance = dx.hypot(dy);
-            if distance > maximum_gap {
-                continue;
-            }
-            let opposing =
-                -(first_tangent.0 * second_tangent.0 + first_tangent.1 * second_tangent.1);
-            let (first_alignment, second_alignment) = if distance <= 1e-8 {
-                if opposing < cosine {
-                    continue;
-                }
-                (1.0, 1.0)
-            } else {
-                let direction = (dx / distance, dy / distance);
-                let first_alignment = first_tangent.0 * direction.0 + first_tangent.1 * direction.1;
-                let second_alignment =
-                    -(second_tangent.0 * direction.0 + second_tangent.1 * direction.1);
-                if first_alignment.min(second_alignment).min(opposing) < cosine {
-                    continue;
-                }
-                (first_alignment, second_alignment)
-            };
-            if !graph_bridge_supported(first_point, second_point, support, width, height) {
-                continue;
-            }
-            candidates.push((
-                distance + 2.0 * (3.0 - first_alignment - second_alignment - opposing),
-                first,
-                second,
-            ));
+    for (first, second) in nearby_point_pairs(&points, maximum_gap) {
+        let (first_edge, _, first_point, first_tangent) = records[first];
+        let (second_edge, _, second_point, second_tangent) = records[second];
+        if first_edge == second_edge {
+            continue;
         }
+        let dx = second_point.x - first_point.x;
+        let dy = second_point.y - first_point.y;
+        let distance = dx.hypot(dy);
+        let opposing = -(first_tangent.0 * second_tangent.0 + first_tangent.1 * second_tangent.1);
+        let (first_alignment, second_alignment) = if distance <= 1e-8 {
+            if opposing < cosine {
+                continue;
+            }
+            (1.0, 1.0)
+        } else {
+            let direction = (dx / distance, dy / distance);
+            let first_alignment = first_tangent.0 * direction.0 + first_tangent.1 * direction.1;
+            let second_alignment =
+                -(second_tangent.0 * direction.0 + second_tangent.1 * direction.1);
+            if first_alignment.min(second_alignment).min(opposing) < cosine {
+                continue;
+            }
+            (first_alignment, second_alignment)
+        };
+        if !graph_bridge_supported(first_point, second_point, support, width, height) {
+            continue;
+        }
+        candidates.push((
+            distance + 2.0 * (3.0 - first_alignment - second_alignment - opposing),
+            first,
+            second,
+        ));
     }
     let mut parents = (0..current.len()).collect::<Vec<_>>();
     fn root(parents: &mut [usize], mut index: usize) -> usize {
@@ -2880,87 +2905,85 @@ fn extend_graph_mutual_supported_continuations(
     let stretch_limit = maximum_path_stretch.max(1.0);
     let cosine = maximum_angle_degrees.max(0.0).to_radians().cos();
     let mut candidates = Vec::<(f32, usize, usize, Vec<Point>)>::new();
-    for first in 0..records.len() {
-        for second in first + 1..records.len() {
-            if records[first].0 == records[second].0 {
-                continue;
-            }
-            let distance = records[first].2.distance(records[second].2);
-            if distance <= 1e-8 || distance > maximum_gap {
-                continue;
-            }
-            if existing_connections.contains(&connection_key(records[first].2, records[second].2)) {
-                continue;
-            }
-            let Some((first_projection, first_pixel)) = nearest_skeleton(records[first].2) else {
-                continue;
-            };
-            let Some((second_projection, second_pixel)) = nearest_skeleton(records[second].2)
-            else {
-                continue;
-            };
-            let maximum_route =
-                (stretch_limit * distance - first_projection - second_projection).max(0.0);
-            let Some((route_length, route_pixels)) = shortest_skeleton_route(
-                &source_skeleton,
-                width,
-                height,
-                first_pixel,
-                second_pixel,
-                maximum_route,
-            ) else {
-                continue;
-            };
-            let geodesic_length = first_projection + route_length + second_projection;
-            if geodesic_length > stretch_limit * distance + 1e-8
-                || route_pixels
-                    .iter()
-                    .skip(1)
-                    .take(route_pixels.len().saturating_sub(2))
-                    .any(|&index| skeleton_degree(index) >= 4)
-            {
-                continue;
-            }
-            let mut route_points = vec![records[first].2];
-            route_points.extend(route_pixels.iter().map(|&index| Point {
-                x: (index % width) as f32 + 0.5,
-                y: (index / width) as f32 + 0.5,
-            }));
-            route_points.push(records[second].2);
-            route_points.dedup_by(|first, second| first.distance(*second) <= 1e-8);
-            if route_points.len() < 2 {
-                continue;
-            }
-            let reach = 3.0_f32.min(0.35 * geodesic_length);
-            let first_direction_point = point_along_graph_polyline(&route_points, reach);
-            let reversed = route_points.iter().rev().copied().collect::<Vec<_>>();
-            let second_direction_point = point_along_graph_polyline(&reversed, reach);
-            let unit = |dx: f32, dy: f32| {
-                let length = dx.hypot(dy);
-                if length > 1e-10 {
-                    (dx / length, dy / length)
-                } else {
-                    (0.0, 0.0)
-                }
-            };
-            let first_direction = unit(
-                first_direction_point.x - records[first].2.x,
-                first_direction_point.y - records[first].2.y,
-            );
-            let second_direction = unit(
-                second_direction_point.x - records[second].2.x,
-                second_direction_point.y - records[second].2.y,
-            );
-            let first_alignment =
-                records[first].3 .0 * first_direction.0 + records[first].3 .1 * first_direction.1;
-            let second_alignment = records[second].3 .0 * second_direction.0
-                + records[second].3 .1 * second_direction.1;
-            if first_alignment.min(second_alignment) < cosine {
-                continue;
-            }
-            let score = geodesic_length + 2.0 * (2.0 - first_alignment - second_alignment);
-            candidates.push((score, first, second, route_points));
+    let record_points = records.iter().map(|record| record.2).collect::<Vec<_>>();
+    for (first, second) in nearby_point_pairs(&record_points, maximum_gap) {
+        if records[first].0 == records[second].0 {
+            continue;
         }
+        let distance = records[first].2.distance(records[second].2);
+        if distance <= 1e-8 {
+            continue;
+        }
+        if existing_connections.contains(&connection_key(records[first].2, records[second].2)) {
+            continue;
+        }
+        let Some((first_projection, first_pixel)) = nearest_skeleton(records[first].2) else {
+            continue;
+        };
+        let Some((second_projection, second_pixel)) = nearest_skeleton(records[second].2) else {
+            continue;
+        };
+        let maximum_route =
+            (stretch_limit * distance - first_projection - second_projection).max(0.0);
+        let Some((route_length, route_pixels)) = shortest_skeleton_route(
+            &source_skeleton,
+            width,
+            height,
+            first_pixel,
+            second_pixel,
+            maximum_route,
+        ) else {
+            continue;
+        };
+        let geodesic_length = first_projection + route_length + second_projection;
+        if geodesic_length > stretch_limit * distance + 1e-8
+            || route_pixels
+                .iter()
+                .skip(1)
+                .take(route_pixels.len().saturating_sub(2))
+                .any(|&index| skeleton_degree(index) >= 4)
+        {
+            continue;
+        }
+        let mut route_points = vec![records[first].2];
+        route_points.extend(route_pixels.iter().map(|&index| Point {
+            x: (index % width) as f32 + 0.5,
+            y: (index / width) as f32 + 0.5,
+        }));
+        route_points.push(records[second].2);
+        route_points.dedup_by(|first, second| first.distance(*second) <= 1e-8);
+        if route_points.len() < 2 {
+            continue;
+        }
+        let reach = 3.0_f32.min(0.35 * geodesic_length);
+        let first_direction_point = point_along_graph_polyline(&route_points, reach);
+        let reversed = route_points.iter().rev().copied().collect::<Vec<_>>();
+        let second_direction_point = point_along_graph_polyline(&reversed, reach);
+        let unit = |dx: f32, dy: f32| {
+            let length = dx.hypot(dy);
+            if length > 1e-10 {
+                (dx / length, dy / length)
+            } else {
+                (0.0, 0.0)
+            }
+        };
+        let first_direction = unit(
+            first_direction_point.x - records[first].2.x,
+            first_direction_point.y - records[first].2.y,
+        );
+        let second_direction = unit(
+            second_direction_point.x - records[second].2.x,
+            second_direction_point.y - records[second].2.y,
+        );
+        let first_alignment =
+            records[first].3 .0 * first_direction.0 + records[first].3 .1 * first_direction.1;
+        let second_alignment =
+            records[second].3 .0 * second_direction.0 + records[second].3 .1 * second_direction.1;
+        if first_alignment.min(second_alignment) < cosine {
+            continue;
+        }
+        let score = geodesic_length + 2.0 * (2.0 - first_alignment - second_alignment);
+        candidates.push((score, first, second, route_points));
     }
     if candidates.is_empty() {
         return current;
@@ -3066,14 +3089,10 @@ fn snap_graph_junction_endpoints(
         }
         index
     }
+    let record_points = records.iter().map(|record| record.2).collect::<Vec<_>>();
     let mut pairs = Vec::<(f32, usize, usize)>::new();
-    for first in 0..records.len() {
-        for second in first + 1..records.len() {
-            let distance = records[first].2.distance(records[second].2);
-            if distance <= maximum_gap {
-                pairs.push((distance, first, second));
-            }
-        }
+    for (first, second) in nearby_point_pairs(&record_points, maximum_gap) {
+        pairs.push((records[first].2.distance(records[second].2), first, second));
     }
     pairs.sort_by(|first, second| {
         first
@@ -3186,6 +3205,24 @@ fn snap_graph_to_paint_junctions(
     }
     let junction_support = dilate(support, width, height, 1);
     let cosine = maximum_angle_degrees.max(0.0).to_radians().cos();
+    // Only nodes within `maximum_distance` can be selected. Indexing them in
+    // cells of that size turns the former endpoints x all-nodes scan into an
+    // exact 3x3-neighbourhood lookup. Candidate indices are sorted back into
+    // source order so all existing tie-breaking remains unchanged.
+    let cell_size = maximum_distance;
+    let cell_key = |point: Point| {
+        (
+            (point.x / cell_size).floor() as i32,
+            (point.y / cell_size).floor() as i32,
+        )
+    };
+    let mut node_cells = HashMap::<(i32, i32), Vec<usize>>::new();
+    for (node_index, &node) in nodes.iter().enumerate() {
+        node_cells
+            .entry(cell_key(node))
+            .or_default()
+            .push(node_index);
+    }
     let mut endpoint_groups = HashMap::<(i64, i64), Vec<(usize, bool, Point, (f32, f32))>>::new();
     for (edge_index, edge) in current.iter().enumerate() {
         for at_start in [true, false] {
@@ -3205,8 +3242,20 @@ fn snap_graph_to_paint_junctions(
         .filter(|members| members.len() >= 2)
     {
         let endpoint = members[0].2;
+        let (cell_x, cell_y) = cell_key(endpoint);
+        let mut candidate_nodes = Vec::<usize>::new();
+        for y in cell_y - 1..=cell_y + 1 {
+            for x in cell_x - 1..=cell_x + 1 {
+                if let Some(indices) = node_cells.get(&(x, y)) {
+                    candidate_nodes.extend(indices);
+                }
+            }
+        }
+        candidate_nodes.sort_unstable();
         let mut ranked = Vec::<(f32, f32, f32, usize)>::new();
-        for (node_index, (&node, &cost)) in nodes.iter().zip(node_costs).enumerate() {
+        for node_index in candidate_nodes {
+            let node = nodes[node_index];
+            let cost = node_costs[node_index];
             let distance = endpoint.distance(node);
             if distance > maximum_distance || !cost.is_finite() || cost > maximum_node_cost {
                 continue;
@@ -3831,6 +3880,28 @@ mod tests {
             }
         }
         values
+    }
+
+    #[test]
+    fn spatial_point_pairs_match_dense_lexicographic_scan() {
+        let points = vec![
+            Point { x: -4.0, y: 0.0 },
+            Point { x: 0.0, y: 0.0 },
+            Point { x: 3.0, y: 4.0 },
+            Point { x: 4.99, y: 0.0 },
+            Point { x: 5.01, y: 0.0 },
+            Point { x: 12.0, y: 8.0 },
+        ];
+        let radius = 5.0;
+        let dense = (0..points.len())
+            .flat_map(|first| {
+                let points = &points;
+                (first + 1..points.len()).filter_map(move |second| {
+                    (points[first].distance(points[second]) <= radius).then_some((first, second))
+                })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(nearby_point_pairs(&points, radius), dense);
     }
 
     #[test]

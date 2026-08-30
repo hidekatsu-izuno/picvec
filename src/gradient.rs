@@ -1440,8 +1440,7 @@ fn office_gain_is_sufficient(
         // substantially more complex for little image-wide benefit.
         // One full DeltaE00 just-noticeable-difference over the minimum face
         // area is the fixed perceptual budget for adding an SVG definition.
-        (4.0 * minimum_improvement) * minimum_gradient_area.max(1) as f32
-            / region_area.max(1) as f32
+        small_region_office_required_gain(minimum_improvement, region_area, minimum_gradient_area)
     } else if selected_is_solid {
         0.05 * 2.3
     } else {
@@ -1451,6 +1450,14 @@ fn office_gain_is_sufficient(
     relative_gain
         && selected.mean - office.mean >= required_gain
         && office.percentile <= selected.percentile + 1e-4
+}
+
+fn small_region_office_required_gain(
+    minimum_improvement: f32,
+    region_area: usize,
+    minimum_gradient_area: usize,
+) -> f32 {
+    (4.0 * minimum_improvement) * minimum_gradient_area.max(1) as f32 / region_area.max(1) as f32
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1476,6 +1483,21 @@ fn fit_region_samples(
         .and_then(|value| value.parse::<usize>().ok())
         == Some(label);
     let small_region = area < config.minimum_gradient_area as usize;
+    let minimum_improvement = 0.25 * 2.3;
+    // Small faces start from Solid and can only be promoted by the Office
+    // candidate. Its error is non-negative, so when the fixed complexity
+    // charge exceeds the complete Solid error no gradient can possibly win.
+    // Return before the median/range calculation as well as candidate fitting.
+    if small_region
+        && solid_error.mean
+            < small_region_office_required_gain(
+                minimum_improvement,
+                area,
+                config.minimum_gradient_area as usize,
+            )
+    {
+        return (Paint::Solid { color: solid_color }, solid_error.mean);
+    }
     let sample_labs: Vec<Lab> = samples.iter().map(|&index| source_labs[index]).collect();
     let median_lab = Lab {
         l: median(&mut sample_labs.iter().map(|value| value.l).collect::<Vec<_>>()),
@@ -1489,7 +1511,6 @@ fn fit_region_samples(
     if perceptual_range <= 2.3 {
         return (Paint::Solid { color: solid_color }, solid_error.mean);
     }
-    let minimum_improvement = 0.25 * 2.3;
     // The area threshold is a model-complexity guard, not evidence that a
     // small face is perceptually flat.  Keep the reference legacy fit for
     // normal faces.  Small faces start from Solid and may only use the
