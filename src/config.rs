@@ -24,6 +24,16 @@ pub struct Config {
     pub minimum_gradient_area: u32,
     pub shared_boundary_overlap: f32,
     pub maximum_gradient_stops: usize,
+    /// Maximum source samples used by the inexpensive Paint coherence gate.
+    pub paint_primary_sample_budget: usize,
+    /// Minimum final-region density (regions per processing pixel) at which
+    /// the Paint coherence gate is enabled.
+    pub paint_primary_min_region_density: f32,
+    /// Minimum spatially explained RGB variance before a normal face runs the
+    /// complete linear/radial Paint search.
+    pub paint_primary_min_explained_variance: f32,
+    /// Stricter coherence threshold for faces below `minimum_gradient_area`.
+    pub paint_primary_small_min_explained_variance: f32,
     /// Rayon worker count. Zero selects physical cores when discoverable.
     pub rayon_threads: usize,
     pub retain_diagnostics: bool,
@@ -52,6 +62,10 @@ impl Default for Config {
             minimum_gradient_area: 64,
             shared_boundary_overlap: 0.2,
             maximum_gradient_stops: 5,
+            paint_primary_sample_budget: 64,
+            paint_primary_min_region_density: 0.015,
+            paint_primary_min_explained_variance: 0.06,
+            paint_primary_small_min_explained_variance: 0.16,
             rayon_threads: 0,
             retain_diagnostics: false,
         }

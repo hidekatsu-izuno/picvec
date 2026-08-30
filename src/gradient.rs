@@ -74,6 +74,9 @@ pub struct GradientSummary {
     pub source_supported_paint_merges: usize,
     pub source_supported_boundary_edges_removed: usize,
     pub maximum_stops: usize,
+    pub primary_gate_active: bool,
+    pub primary_solid_regions: usize,
+    pub full_fit_regions: usize,
 }
 
 pub(crate) fn refresh_summary(summary: &mut GradientSummary, paints: &[Paint]) {
@@ -145,6 +148,112 @@ fn sampled_indices(indices: &[usize], maximum: usize) -> Vec<usize> {
             indices[source]
         })
         .collect()
+}
+
+/// Cheap upper-bound estimate of how much RGB variation can be explained by
+/// the spatial models available to Paint. An affine x/y model covers every
+/// linear direction (and deliberately over-approximates a one-dimensional
+/// gradient); the five radial presets cover symmetric shading that has little
+/// linear correlation. Only faces below the configured coherence threshold
+/// are classified Solid here.
+fn primary_gradient_coherence(
+    source: &Raster,
+    samples: &[usize],
+    region_bounds: Bounds,
+    directional_only: bool,
+    sample_budget: usize,
+) -> f32 {
+    let samples = sampled_indices(samples, sample_budget.max(8));
+    if samples.len() < 4 {
+        return 1.0;
+    }
+    let divisor = samples.len() as f32;
+    let mean_rgb = [0, 1, 2].map(|channel| {
+        samples
+            .iter()
+            .map(|&index| source.pixels[index][channel])
+            .sum::<f32>()
+            / divisor
+    });
+    let mean_x = samples
+        .iter()
+        .map(|&index| (index % source.width) as f32)
+        .sum::<f32>()
+        / divisor;
+    let mean_y = samples
+        .iter()
+        .map(|&index| (index / source.width) as f32)
+        .sum::<f32>()
+        / divisor;
+    let mut total = 0.0_f32;
+    let mut xx = 0.0_f32;
+    let mut xy = 0.0_f32;
+    let mut yy = 0.0_f32;
+    let mut x_color = [0.0_f32; 3];
+    let mut y_color = [0.0_f32; 3];
+    for &index in &samples {
+        let x = (index % source.width) as f32 - mean_x;
+        let y = (index / source.width) as f32 - mean_y;
+        xx += x * x;
+        xy += x * y;
+        yy += y * y;
+        for channel in 0..3 {
+            let value = source.pixels[index][channel] - mean_rgb[channel];
+            total += value * value;
+            x_color[channel] += x * value;
+            y_color[channel] += y * value;
+        }
+    }
+    if total <= 1e-10 {
+        return 0.0;
+    }
+    let determinant = xx * yy - xy * xy;
+    let mut best_explained = if determinant > 1e-8 {
+        (0..3)
+            .map(|channel| {
+                (yy * x_color[channel] * x_color[channel]
+                    - 2.0 * xy * x_color[channel] * y_color[channel]
+                    + xx * y_color[channel] * y_color[channel])
+                    / determinant
+            })
+            .sum::<f32>()
+    } else {
+        0.0
+    };
+    if !directional_only {
+        for origin in [
+            RadialOrigin::Center,
+            RadialOrigin::TopLeft,
+            RadialOrigin::TopRight,
+            RadialOrigin::BottomLeft,
+            RadialOrigin::BottomRight,
+        ] {
+            let (center, radius) = radial_geometry(origin, region_bounds);
+            let parameters = samples
+                .iter()
+                .map(|&index| radial_parameter(index, source.width, center, radius))
+                .collect::<Vec<_>>();
+            let mean_parameter = parameters.iter().sum::<f32>() / divisor;
+            let mut variance = 0.0_f32;
+            let mut covariance = [0.0_f32; 3];
+            for (&index, &parameter) in samples.iter().zip(&parameters) {
+                let parameter = parameter - mean_parameter;
+                variance += parameter * parameter;
+                for channel in 0..3 {
+                    covariance[channel] +=
+                        parameter * (source.pixels[index][channel] - mean_rgb[channel]);
+                }
+            }
+            if variance > 1e-8 {
+                let explained = covariance
+                    .iter()
+                    .map(|value| value * value / variance)
+                    .sum::<f32>();
+                best_explained = best_explained.max(explained);
+            }
+        }
+    }
+    (best_explained / total).clamp(0.0, 1.0)
 }
 
 fn numpy_sum_f32(values: &[f32]) -> f32 {
@@ -1399,8 +1508,9 @@ fn fit_region(
     canonical_solid: [f32; 3],
     directional_only: bool,
     sample_budget: usize,
+    use_primary_gate: bool,
     config: &Config,
-) -> (Paint, f32) {
+) -> (Paint, f32, bool) {
     let sample_source = if paint_indices.is_empty() {
         indices
     } else {
@@ -1410,17 +1520,40 @@ fn fit_region(
     // budget. Larger flat interiors therefore do not dominate the fit, while
     // edge-rich and small regions still retain every available observation.
     let samples = sampled_indices(sample_source, sample_budget);
-    fit_region_samples(
+    let region_bounds = bounds(&samples, source.width);
+    let small_region = indices.len() < config.minimum_gradient_area as usize;
+    let threshold = if small_region {
+        config.paint_primary_small_min_explained_variance
+    } else {
+        config.paint_primary_min_explained_variance
+    }
+    .clamp(0.0, 1.0);
+    let traced = std::env::var("PICVEC_TRACE_PAINT_LABEL")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        == Some(label);
+    let run_full_fit = !use_primary_gate
+        || traced
+        || primary_gradient_coherence(
+            source,
+            &samples,
+            region_bounds,
+            directional_only,
+            config.paint_primary_sample_budget,
+        ) >= threshold;
+    let (paint, error) = fit_region_samples(
         label,
         source,
         source_labs,
         &samples,
         indices.len(),
-        bounds(&samples, source.width),
+        region_bounds,
         canonical_solid,
         directional_only,
+        run_full_fit,
         config,
-    )
+    );
+    (paint, error, run_full_fit)
 }
 
 fn office_gain_is_sufficient(
@@ -1470,6 +1603,7 @@ fn fit_region_samples(
     region_bounds: Bounds,
     canonical_solid: [f32; 3],
     directional_only: bool,
+    run_full_fit: bool,
     config: &Config,
 ) -> (Paint, f32) {
     // The reference fits Solid from the quantized canonical image while all
@@ -1478,6 +1612,9 @@ fn fit_region_samples(
     // gradient selection even starts.
     let solid_color = canonical_solid;
     let solid_error = paint_error_against_labs(source_labs, samples, |_| solid_color);
+    if !run_full_fit {
+        return (Paint::Solid { color: solid_color }, solid_error.mean);
+    }
     let trace = std::env::var("PICVEC_TRACE_PAINT_LABEL")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
@@ -4723,7 +4860,10 @@ pub fn fit_all(
         );
     }
     let initial_started = std::time::Instant::now();
-    let fitted: Vec<(Paint, f32)> = region_indices
+    let region_density = segmentation.regions.len() as f32
+        / (segmentation.width * segmentation.height).max(1) as f32;
+    let use_primary_gate = region_density >= config.paint_primary_min_region_density;
+    let fitted: Vec<(Paint, f32, bool)> = region_indices
         .par_iter()
         .zip(region_paint_indices.par_iter())
         .enumerate()
@@ -4774,14 +4914,18 @@ pub fn fit_all(
                 canonical_solid,
                 strong_dark,
                 topology.paint_sample_budget(label, 8192),
+                use_primary_gate,
                 config,
             )
         })
         .collect();
+    let full_fit_regions = fitted.iter().filter(|value| value.2).count();
     if config.retain_diagnostics {
         eprintln!(
-            "picvec paint substage initial: {:.3}s",
-            initial_started.elapsed().as_secs_f64()
+            "picvec paint substage initial: {:.3}s (primary solid {}, full fit {})",
+            initial_started.elapsed().as_secs_f64(),
+            fitted.len() - full_fit_regions,
+            full_fit_regions,
         );
     }
     let mut paints: Vec<Paint> = fitted.iter().map(|value| value.0.clone()).collect();
@@ -4865,6 +5009,9 @@ pub fn fit_all(
     }
     let mut summary = GradientSummary {
         coupled_linear_regions: coupled + locally_coupled,
+        primary_gate_active: use_primary_gate,
+        primary_solid_regions: fitted.len() - full_fit_regions,
+        full_fit_regions,
         maximum_stops: paints
             .iter()
             .map(|paint| match paint {
@@ -5004,6 +5151,44 @@ mod tests {
         ];
         assert_eq!(interpolate(&stops, 0.0), [0.0; 3]);
         assert_eq!(interpolate(&stops, 1.0), [1.0; 3]);
+    }
+
+    #[test]
+    fn primary_gate_separates_coherent_gradient_from_unstructured_texture() {
+        let width = 16;
+        let height = 16;
+        let coherent = Raster::new(
+            width,
+            height,
+            (0..height)
+                .flat_map(|_| {
+                    (0..width).map(|x| {
+                        let value = x as f32 / (width - 1) as f32;
+                        [value, 0.25 + 0.5 * value, 1.0 - value]
+                    })
+                })
+                .collect(),
+        );
+        let texture = Raster::new(
+            width,
+            height,
+            (0..height)
+                .flat_map(|y| {
+                    (0..width).map(move |x| {
+                        let value = if (x + y).is_multiple_of(2) { 0.2 } else { 0.8 };
+                        [value, 1.0 - value, value]
+                    })
+                })
+                .collect(),
+        );
+        let indices = (0..width * height).collect::<Vec<_>>();
+        let region_bounds = bounds(&indices, width);
+        let coherent_score =
+            primary_gradient_coherence(&coherent, &indices, region_bounds, false, 64);
+        let texture_score =
+            primary_gradient_coherence(&texture, &indices, region_bounds, false, 64);
+        assert!(coherent_score > 0.95, "{coherent_score}");
+        assert!(texture_score < 0.06, "{texture_score}");
     }
 
     #[test]

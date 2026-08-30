@@ -27,6 +27,18 @@ struct Arguments {
     quantization_light_delta_e: f32,
     #[arg(long, default_value_t = 2.3)]
     gradient_merge_error: f32,
+    /// Samples used by the inexpensive Paint coherence gate.
+    #[arg(long, default_value_t = 64)]
+    paint_primary_samples: usize,
+    /// Final-region density required to enable the Paint coherence gate.
+    #[arg(long, default_value_t = 0.015)]
+    paint_primary_min_region_density: f32,
+    /// Spatial coherence required before a normal face runs full Paint fit.
+    #[arg(long, default_value_t = 0.06)]
+    paint_primary_threshold: f32,
+    /// Spatial coherence required for a face below minimum gradient area.
+    #[arg(long, default_value_t = 0.16)]
+    paint_primary_small_threshold: f32,
     /// Rayon workers; zero selects the detected physical core count.
     #[arg(long, default_value_t = 0)]
     threads: usize,
@@ -49,6 +61,12 @@ fn run() -> picvec::Result<()> {
         quantization_dark_delta_e: arguments.quantization_dark_delta_e.max(0.1),
         quantization_light_delta_e: arguments.quantization_light_delta_e.max(0.1),
         gradient_merge_error: arguments.gradient_merge_error.max(0.0),
+        paint_primary_sample_budget: arguments.paint_primary_samples.max(8),
+        paint_primary_min_region_density: arguments.paint_primary_min_region_density.max(0.0),
+        paint_primary_min_explained_variance: arguments.paint_primary_threshold.clamp(0.0, 1.0),
+        paint_primary_small_min_explained_variance: arguments
+            .paint_primary_small_threshold
+            .clamp(0.0, 1.0),
         rayon_threads: arguments.threads,
         retain_diagnostics: arguments.verbose,
         ..defaults
