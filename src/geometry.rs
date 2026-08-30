@@ -3328,8 +3328,8 @@ fn bounded_fairing_shared_boundary(
         .iter()
         .map(|(_, corner)| nearest_point(&reference_samples, *corner).1)
         .fold(0.0_f32, f32::max);
-    let allowed_baseline = std::f32::consts::FRAC_1_SQRT_2 + 0.5;
-    let allowed_source = std::f32::consts::SQRT_2.max(allowed_baseline);
+    let allowed_baseline = (tolerance + 0.5).max(std::f32::consts::FRAC_1_SQRT_2 + 0.5);
+    let allowed_source = (tolerance + 0.75).max(std::f32::consts::SQRT_2);
     let mut best = baseline.to_vec();
     let mut best_error = f32::INFINITY;
     for sigma in [
@@ -3400,7 +3400,10 @@ fn bounded_fairing_direct_shared_boundary(
         return baseline.to_vec();
     }
     if continuity_master {
-        return bounded_fairing_shared_boundary(source, baseline, std::f32::consts::FRAC_1_SQRT_2);
+        // Same-material tone contours may move farther than a structural
+        // boundary: their purpose is to remove a raster staircase, while the
+        // high-resolution material/occlusion anchors remain unchanged.
+        return bounded_fairing_shared_boundary(source, baseline, 1.25);
     }
     let travelled: f32 = source
         .windows(2)

@@ -2,7 +2,7 @@ use rayon::prelude::*;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use crate::color::{delta_e2000, delta_e2000_pairs, lab_pixels_to_rgb, Lab};
+use crate::color::{delta_e2000, delta_e94_local, lab_pixels_to_rgb, Lab};
 use crate::config::Config;
 use crate::raster::{percentile, Raster};
 
@@ -3196,7 +3196,11 @@ pub fn perceptual_smooth(image: &Raster, config: &Config) -> Raster {
                 lab[py * image.width + px]
             })
             .collect();
-        let distances = delta_e2000_pairs(&lab, &samples);
+        let distances: Vec<f32> = lab
+            .par_iter()
+            .zip(samples.par_iter())
+            .map(|(&first, &second)| delta_e94_local(first, second))
+            .collect();
         let mut weights: Vec<f32> = distances
             .into_par_iter()
             .enumerate()

@@ -46,7 +46,7 @@ impl Default for Config {
             auto_dimension: true,
             auto_minimum_dimension: 768,
             auto_maximum_dimension: 1600,
-            smoothing_radius: 2,
+            smoothing_radius: 4,
             smoothing_spatial_sigma: 1.15,
             smoothing_dark_delta_e: 1.8,
             smoothing_light_delta_e: 4.5,

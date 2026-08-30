@@ -22,7 +22,7 @@ use crate::ownership::{resolve as resolve_boundary_ownership, BoundaryOwnershipS
 use crate::raster::Raster;
 use crate::segment::{
     refine_thin_paint_ownership, regularize_boundaries, replace_final_exact_paint_labels, segment,
-    split_adaptive_paint_patches, Segmentation, SegmentationSummary,
+    Segmentation, SegmentationSummary,
 };
 use crate::structural::{analyse as analyse_structural, StructuralInk, StructuralSummary};
 use crate::svg::{write as write_svg, SvgSummary};
@@ -585,14 +585,21 @@ fn vectorize_inner(
         processing.width,
         processing.height,
     );
-    split_adaptive_paint_patches(&paint_reference, &processing, &mut segmentation);
+    // Paint residuals are represented as transparent layers on their owning
+    // face.  Splitting those residuals into ordinary labels would turn a
+    // smooth tone correction back into a hard shared-boundary staircase.
     save_label_diagnostic(
         "final-labels",
         &segmentation.labels,
         processing.width,
         processing.height,
     );
-    report_progress(config, "adaptive-paint-patches", started, &mut checkpoint);
+    report_progress(
+        config,
+        "paint-topology-preservation",
+        started,
+        &mut checkpoint,
+    );
     let mut topology = HierarchicalTopology::build(&segmentation);
     let (mut paints, mut gradient_report) = fit_all(
         &paint_reference,

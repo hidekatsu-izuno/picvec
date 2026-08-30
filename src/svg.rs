@@ -7,7 +7,7 @@ use serde::Serialize;
 
 use crate::color::rgb_hex;
 use crate::geometry::{open_path_data, Primitive, RegionGeometry};
-use crate::gradient::{ColorStop, Paint};
+use crate::gradient::{ColorStop, OpacityStop, Paint, PaintOverlay};
 use crate::optimize::{format_number, optimize_path, separated_bboxes, OptimizedElement};
 use crate::structural::StructuralInk;
 use crate::Result;
@@ -36,6 +36,7 @@ pub struct SvgSummary {
 struct PaintElement {
     geometry: OptimizedElement,
     attributes: String,
+    batchable: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -94,7 +95,68 @@ fn paint_key(paint: &Paint) -> Option<String> {
             number(radius.y),
             stops_key(stops)
         )),
+        Paint::Layered { .. } => None,
     }
+}
+
+fn overlay_key(overlay: &PaintOverlay) -> String {
+    let opacity = overlay
+        .opacity_stops
+        .iter()
+        .map(|stop| {
+            format!(
+                "{}:{}",
+                number(stop.offset as f32),
+                number(stop.opacity as f32)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(";");
+    format!(
+        "O:{}:{}",
+        paint_key(&overlay.paint).unwrap_or_else(|| "nested".to_string()),
+        opacity
+    )
+}
+
+fn opacity_at(stops: &[OpacityStop], offset: f64) -> f64 {
+    if stops.is_empty() {
+        return 1.0;
+    }
+    if offset <= stops[0].offset {
+        return stops[0].opacity.clamp(0.0, 1.0);
+    }
+    for pair in stops.windows(2) {
+        if offset <= pair[1].offset {
+            let amount = ((offset - pair[0].offset) / (pair[1].offset - pair[0].offset).max(1e-12))
+                .clamp(0.0, 1.0);
+            return (pair[0].opacity * (1.0 - amount) + pair[1].opacity * amount).clamp(0.0, 1.0);
+        }
+    }
+    stops
+        .last()
+        .map(|stop| stop.opacity)
+        .unwrap_or(1.0)
+        .clamp(0.0, 1.0)
+}
+
+fn color_at(stops: &[ColorStop], offset: f64) -> [f64; 3] {
+    if stops.is_empty() {
+        return [0.0; 3];
+    }
+    if offset <= stops[0].offset {
+        return stops[0].color;
+    }
+    for pair in stops.windows(2) {
+        if offset <= pair[1].offset {
+            let amount = ((offset - pair[0].offset) / (pair[1].offset - pair[0].offset).max(1e-12))
+                .clamp(0.0, 1.0);
+            return [0, 1, 2].map(|channel| {
+                pair[0].color[channel] * (1.0 - amount) + pair[1].color[channel] * amount
+            });
+        }
+    }
+    stops.last().map(|stop| stop.color).unwrap_or([0.0; 3])
 }
 
 fn stop_elements(stops: &[ColorStop]) -> String {
@@ -110,10 +172,31 @@ fn stop_elements(stops: &[ColorStop]) -> String {
     output
 }
 
+fn overlay_stop_elements(stops: &[ColorStop], opacity_stops: &[OpacityStop]) -> String {
+    let mut offsets = stops.iter().map(|stop| stop.offset).collect::<Vec<_>>();
+    offsets.extend(opacity_stops.iter().map(|stop| stop.offset));
+    offsets.sort_by(f64::total_cmp);
+    offsets.dedup_by(|left, right| (*left - *right).abs() < 1e-9);
+    let mut output = String::new();
+    for offset in offsets {
+        let _ = write!(
+            output,
+            "<stop offset=\"{}\" stop-color=\"{}\" stop-opacity=\"{}\"/>",
+            number(offset as f32),
+            rgb_hex(color_at(stops, offset).map(|value| value as f32)),
+            number(opacity_at(opacity_stops, offset) as f32),
+        );
+    }
+    output
+}
+
 fn fill_value(paint: &Paint, gradient_ids: &HashMap<String, String>) -> String {
     match paint {
         Paint::Solid { color } => rgb_hex(*color),
-        _ => format!("url(#{})", gradient_ids[&paint_key(paint).unwrap()]),
+        Paint::Linear { .. } | Paint::Radial { .. } => {
+            format!("url(#{})", gradient_ids[&paint_key(paint).unwrap()])
+        }
+        Paint::Layered { .. } => unreachable!("layered Paint is emitted component-wise"),
     }
 }
 
@@ -163,6 +246,13 @@ fn batch_equal_paint_paths(elements: &mut [Option<PaintElement>], summary: &mut 
         let signature = element.attributes.clone();
         let next_signature = signature_ids.len();
         let signature_id = *signature_ids.entry(signature).or_insert(next_signature);
+        if !element.batchable {
+            // Layer components must stay adjacent and in order. Treat them as
+            // global ordering barriers rather than moving equal fills across
+            // another face during path batching.
+            global_blockers.push((current, usize::MAX - current));
+            continue;
+        }
         let Some(bbox) = paint_path_bbox(element) else {
             // A primitive or a path with overlapping subpaths may cover any
             // later candidate.  Keeping it as a global ordering barrier is
@@ -323,6 +413,104 @@ fn count_element(summary: &mut SvgSummary, kind: &str) {
     }
 }
 
+fn register_gradient(
+    paint: &Paint,
+    opacity_stops: Option<&[OpacityStop]>,
+    key: String,
+    gradient_ids: &mut HashMap<String, String>,
+    definitions: &mut String,
+    summary: &mut SvgSummary,
+) {
+    if gradient_ids.contains_key(&key) {
+        return;
+    }
+    let id = format!("paint-{}", gradient_ids.len());
+    match paint {
+        Paint::Linear {
+            start, end, stops, ..
+        } => {
+            let elements = opacity_stops
+                .map(|opacity| overlay_stop_elements(stops, opacity))
+                .unwrap_or_else(|| stop_elements(stops));
+            let _ = write!(definitions, "<linearGradient id=\"{}\" gradientUnits=\"userSpaceOnUse\" x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\">{}</linearGradient>", id, number(start.x), number(start.y), number(end.x), number(end.y), elements);
+            summary.linear_gradients += 1;
+            summary.gradient_stops += if let Some(opacity) = opacity_stops {
+                let mut offsets = stops.iter().map(|stop| stop.offset).collect::<Vec<_>>();
+                offsets.extend(opacity.iter().map(|stop| stop.offset));
+                offsets.sort_by(f64::total_cmp);
+                offsets.dedup_by(|left, right| (*left - *right).abs() < 1e-9);
+                offsets.len()
+            } else {
+                stops.len()
+            };
+        }
+        Paint::Radial {
+            center,
+            radius,
+            stops,
+            ..
+        } => {
+            let elements = opacity_stops
+                .map(|opacity| overlay_stop_elements(stops, opacity))
+                .unwrap_or_else(|| stop_elements(stops));
+            let _ = write!(definitions, "<radialGradient id=\"{}\" gradientUnits=\"userSpaceOnUse\" cx=\"0\" cy=\"0\" r=\"1\" gradientTransform=\"translate({} {}) scale({} {})\">{}</radialGradient>", id, number(center.x), number(center.y), number(radius.x.max(0.001)), number(radius.y.max(0.001)), elements);
+            summary.radial_gradients += 1;
+            summary.gradient_stops += if let Some(opacity) = opacity_stops {
+                let mut offsets = stops.iter().map(|stop| stop.offset).collect::<Vec<_>>();
+                offsets.extend(opacity.iter().map(|stop| stop.offset));
+                offsets.sort_by(f64::total_cmp);
+                offsets.dedup_by(|left, right| (*left - *right).abs() < 1e-9);
+                offsets.len()
+            } else {
+                stops.len()
+            };
+        }
+        Paint::Solid { .. } | Paint::Layered { .. } => return,
+    }
+    gradient_ids.insert(key, id);
+}
+
+fn append_paint_elements(
+    elements: &mut Vec<Option<PaintElement>>,
+    geometry: OptimizedElement,
+    paint: &Paint,
+    gradient_ids: &HashMap<String, String>,
+    paint_overlap: f32,
+) {
+    match paint {
+        Paint::Layered { base, overlays } => {
+            let base_fill = fill_value(base, gradient_ids);
+            elements.push(Some(PaintElement {
+                geometry: geometry.clone(),
+                attributes: paint_attributes(&base_fill, paint_overlap),
+                batchable: false,
+            }));
+            for overlay in overlays {
+                let fill = match overlay.paint.as_ref() {
+                    Paint::Solid { color } => rgb_hex(*color),
+                    Paint::Linear { .. } | Paint::Radial { .. } => {
+                        format!("url(#{})", gradient_ids[&overlay_key(overlay)])
+                    }
+                    Paint::Layered { .. } => continue,
+                };
+                elements.push(Some(PaintElement {
+                    geometry: geometry.clone(),
+                    attributes: format!("fill=\"{}\"", fill),
+                    batchable: false,
+                }));
+            }
+        }
+        _ => {
+            let fill = fill_value(paint, gradient_ids);
+            elements.push(Some(PaintElement {
+                geometry,
+                attributes: paint_attributes(&fill, paint_overlap),
+                batchable: true,
+            }));
+        }
+    }
+}
+
 /// Serialize the complete editable document.  Gradients are restricted to
 /// solid, axial linear, and elliptical radial forms with at most five stops,
 /// which stay within the Office object import subset.
@@ -341,40 +529,43 @@ pub fn write(
     let mut definitions = String::new();
     let mut summary = SvgSummary::default();
     for paint in paints {
-        let Some(key) = paint_key(paint) else {
-            continue;
-        };
-        if gradient_ids.contains_key(&key) {
-            continue;
-        }
-        let id = format!("paint-{}", gradient_ids.len());
         match paint {
-            Paint::Linear {
-                start, end, stops, ..
-            } => {
-                let _ = write!(definitions, "<linearGradient id=\"{}\" gradientUnits=\"userSpaceOnUse\" x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\">{}</linearGradient>", id, number(start.x), number(start.y), number(end.x), number(end.y), stop_elements(stops));
-                summary.linear_gradients += 1;
-                summary.gradient_stops += stops.len();
+            Paint::Layered { base, overlays } => {
+                if let Some(key) = paint_key(base) {
+                    register_gradient(
+                        base,
+                        None,
+                        key,
+                        &mut gradient_ids,
+                        &mut definitions,
+                        &mut summary,
+                    );
+                }
+                for overlay in overlays {
+                    register_gradient(
+                        &overlay.paint,
+                        Some(&overlay.opacity_stops),
+                        overlay_key(overlay),
+                        &mut gradient_ids,
+                        &mut definitions,
+                        &mut summary,
+                    );
+                }
             }
-            Paint::Radial {
-                center,
-                radius,
-                stops,
-                ..
-            } => {
-                let _ = write!(definitions, "<radialGradient id=\"{}\" gradientUnits=\"userSpaceOnUse\" cx=\"0\" cy=\"0\" r=\"1\" gradientTransform=\"translate({} {}) scale({} {})\">{}</radialGradient>", id, number(center.x), number(center.y), number(radius.x.max(0.001)), number(radius.y.max(0.001)), stop_elements(stops));
-                summary.radial_gradients += 1;
-                summary.gradient_stops += stops.len();
-            }
-            Paint::Solid { .. } => unreachable!(),
+            Paint::Linear { .. } | Paint::Radial { .. } => register_gradient(
+                paint,
+                None,
+                paint_key(paint).unwrap(),
+                &mut gradient_ids,
+                &mut definitions,
+                &mut summary,
+            ),
+            Paint::Solid { .. } => {}
         }
-        gradient_ids.insert(key, id);
     }
     let mut paint_elements = Vec::<Option<PaintElement>>::with_capacity(geometries.len());
     for geometry in geometries {
         let paint = &paints[geometry.region as usize];
-        let fill = fill_value(paint, &gradient_ids);
-        let attributes = paint_attributes(&fill, paint_overlap);
         let optimized = match &geometry.primitive {
             Some(Primitive::Rect {
                 x,
@@ -393,32 +584,28 @@ pub fn write(
                 radius: *radius as f64,
             },
             Some(Primitive::Ellipse { cx, cy, rx, ry }) => {
-                paint_elements.push(Some(PaintElement {
-                    geometry: OptimizedElement::Path {
-                        data: format!(
-                            "M {} {} A {} {} 0 1 0 {} {} A {} {} 0 1 0 {} {} Z",
-                            format_number((*cx + *rx) as f64),
-                            format_number(*cy as f64),
-                            format_number(*rx as f64),
-                            format_number(*ry as f64),
-                            format_number((*cx - *rx) as f64),
-                            format_number(*cy as f64),
-                            format_number(*rx as f64),
-                            format_number(*ry as f64),
-                            format_number((*cx + *rx) as f64),
-                            format_number(*cy as f64),
-                        ),
-                        bbox: Some((
-                            (*cx - *rx) as f64,
-                            (*cy - *ry) as f64,
-                            (*cx + *rx) as f64,
-                            (*cy + *ry) as f64,
-                        )),
-                    },
-                    attributes,
-                }));
                 summary.ellipse_elements += 1;
-                continue;
+                OptimizedElement::Path {
+                    data: format!(
+                        "M {} {} A {} {} 0 1 0 {} {} A {} {} 0 1 0 {} {} Z",
+                        format_number((*cx + *rx) as f64),
+                        format_number(*cy as f64),
+                        format_number(*rx as f64),
+                        format_number(*ry as f64),
+                        format_number((*cx - *rx) as f64),
+                        format_number(*cy as f64),
+                        format_number(*rx as f64),
+                        format_number(*ry as f64),
+                        format_number((*cx + *rx) as f64),
+                        format_number(*cy as f64),
+                    ),
+                    bbox: Some((
+                        (*cx - *rx) as f64,
+                        (*cy - *ry) as f64,
+                        (*cx + *rx) as f64,
+                        (*cy + *ry) as f64,
+                    )),
+                }
             }
             None => {
                 let path_data = if final_geometry {
@@ -432,27 +619,27 @@ pub fn write(
                 if path_data.is_empty() {
                     continue;
                 }
-                let Some((optimized, operations)) = optimize_path(path_data, true, false) else {
-                    paint_elements.push(Some(PaintElement {
-                        geometry: OptimizedElement::Path {
-                            data: path_data.to_string(),
-                            bbox: None,
-                        },
-                        attributes,
-                    }));
-                    continue;
-                };
-                summary.linear_cubics_to_lines += operations.linear_cubics;
-                summary.redundant_segments_removed += operations.redundant_segments;
-                summary.arc_segments += operations.arc_segments;
-                summary.merged_arc_segments += operations.merged_arcs;
-                optimized
+                if let Some((optimized, operations)) = optimize_path(path_data, true, false) {
+                    summary.linear_cubics_to_lines += operations.linear_cubics;
+                    summary.redundant_segments_removed += operations.redundant_segments;
+                    summary.arc_segments += operations.arc_segments;
+                    summary.merged_arc_segments += operations.merged_arcs;
+                    optimized
+                } else {
+                    OptimizedElement::Path {
+                        data: path_data.to_string(),
+                        bbox: None,
+                    }
+                }
             }
         };
-        paint_elements.push(Some(PaintElement {
-            geometry: optimized,
-            attributes,
-        }));
+        append_paint_elements(
+            &mut paint_elements,
+            optimized,
+            paint,
+            &gradient_ids,
+            paint_overlap,
+        );
     }
     batch_equal_paint_paths(&mut paint_elements, &mut summary);
     let mut body = String::new();
@@ -509,6 +696,7 @@ mod tests {
                 bbox: Some(bbox),
             },
             attributes: attributes.to_string(),
+            batchable: true,
         })
     }
 
@@ -533,5 +721,69 @@ mod tests {
         batch_equal_paint_paths(&mut blocked, &mut summary);
         assert!(blocked[2].is_some());
         assert_eq!(summary.paint_paths_merged, 0);
+    }
+
+    #[test]
+    fn layered_paint_emits_ordered_transparent_gradient_components() {
+        let overlay = PaintOverlay {
+            paint: Box::new(Paint::Radial {
+                origin: crate::gradient::RadialOrigin::Fitted,
+                center: crate::geometry::Point { x: 5.0, y: 5.0 },
+                radius: crate::geometry::Point { x: 4.0, y: 3.0 },
+                stops: vec![
+                    ColorStop {
+                        offset: 0.0,
+                        color: [1.0, 0.0, 0.0],
+                    },
+                    ColorStop {
+                        offset: 1.0,
+                        color: [1.0, 0.0, 0.0],
+                    },
+                ],
+            }),
+            opacity_stops: vec![
+                OpacityStop {
+                    offset: 0.0,
+                    opacity: 0.7,
+                },
+                OpacityStop {
+                    offset: 1.0,
+                    opacity: 0.0,
+                },
+            ],
+        };
+        let mut ids = HashMap::new();
+        let mut definitions = String::new();
+        let mut summary = SvgSummary::default();
+        register_gradient(
+            &overlay.paint,
+            Some(&overlay.opacity_stops),
+            overlay_key(&overlay),
+            &mut ids,
+            &mut definitions,
+            &mut summary,
+        );
+        assert!(definitions.contains("stop-opacity=\"0.7\""));
+        assert!(definitions.contains("stop-opacity=\"0\""));
+
+        let paint = Paint::Layered {
+            base: Box::new(Paint::Solid {
+                color: [0.2, 0.3, 0.4],
+            }),
+            overlays: vec![overlay],
+        };
+        let mut elements = Vec::new();
+        append_paint_elements(
+            &mut elements,
+            OptimizedElement::Path {
+                data: "M0 0L10 0L10 10Z".to_string(),
+                bbox: Some((0.0, 0.0, 10.0, 10.0)),
+            },
+            &paint,
+            &ids,
+            0.2,
+        );
+        assert_eq!(elements.len(), 2);
+        assert!(elements.iter().flatten().all(|element| !element.batchable));
     }
 }

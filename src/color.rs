@@ -220,6 +220,27 @@ pub fn delta_e76(first: Lab, second: Lab) -> f32 {
         .sqrt()
 }
 
+/// Symmetric CIE94-style local colour distance.
+///
+/// Bilateral smoothing compares only nearby pixels and needs a monotone range
+/// weight rather than a reporting-grade colour difference.  This form avoids
+/// the trigonometric CIEDE2000 path, stays entirely in float32, and is readily
+/// vectorized by LLVM while retaining lightness/chroma/hue scaling.
+#[inline]
+pub fn delta_e94_local(first: Lab, second: Lab) -> f32 {
+    let dl = first.l - second.l;
+    let c1 = first.a.hypot(first.b);
+    let c2 = second.a.hypot(second.b);
+    let dc = c1 - c2;
+    let da = first.a - second.a;
+    let db = first.b - second.b;
+    let dh_squared = (da * da + db * db - dc * dc).max(0.0);
+    let chroma = 0.5 * (c1 + c2);
+    let sc = 1.0 + 0.045 * chroma;
+    let sh = 1.0 + 0.015 * chroma;
+    (dl * dl + (dc / sc).powi(2) + dh_squared / (sh * sh)).sqrt()
+}
+
 /// CIEDE2000, used for the fidelity report and perceptual merge gates.
 pub fn delta_e2000(first: Lab, second: Lab) -> f32 {
     delta_e2000_pairs(&[first], &[second])[0]
@@ -366,6 +387,15 @@ mod tests {
         let b = rgb_to_lab([0.1, 0.4, 0.9]);
         assert!((delta_e2000(a, b) - delta_e2000(b, a)).abs() < 1e-4);
         assert!(delta_e2000(a, a) < 1e-5);
+    }
+
+    #[test]
+    fn local_cie94_distance_is_symmetric_and_zero_on_identity() {
+        let a = rgb_to_lab([0.82, 0.13, 0.41]);
+        let b = rgb_to_lab([0.76, 0.18, 0.38]);
+        assert!((delta_e94_local(a, b) - delta_e94_local(b, a)).abs() < 1e-6);
+        assert!(delta_e94_local(a, a) < 1e-6);
+        assert!(delta_e94_local(a, b).is_finite());
     }
 
     #[test]

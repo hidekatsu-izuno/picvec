@@ -23,6 +23,22 @@ pub struct ColorStop {
     pub color: [f64; 3],
 }
 
+/// Alpha profile for a Paint overlay.  Keeping opacity separate from
+/// `ColorStop` preserves the existing Office-compatible base gradients while
+/// allowing a smooth local correction to fade out without creating a new
+/// topology boundary.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OpacityStop {
+    pub offset: f64,
+    pub opacity: f64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PaintOverlay {
+    pub paint: Box<Paint>,
+    pub opacity_stops: Vec<OpacityStop>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum LinearPreset {
     LeftToRight,
@@ -59,6 +75,15 @@ pub enum Paint {
         radius: Point,
         stops: Vec<ColorStop>,
     },
+    /// A single topology face with smooth residual Paint corrections.
+    ///
+    /// The overlay geometry is clipped by emitting the same face path for
+    /// every layer.  Unlike adaptive face splitting, no internal SVG edge is
+    /// introduced, so a quantized shading contour cannot become a staircase.
+    Layered {
+        base: Box<Paint>,
+        overlays: Vec<PaintOverlay>,
+    },
 }
 
 type CoupledPaintAssignments = Vec<(usize, Paint, f32)>;
@@ -68,6 +93,8 @@ pub struct GradientSummary {
     pub solid_regions: usize,
     pub linear_regions: usize,
     pub radial_regions: usize,
+    pub layered_regions: usize,
+    pub overlay_layers: usize,
     pub fitted_direction_linear_regions: usize,
     pub fitted_focus_radial_regions: usize,
     pub coupled_linear_regions: usize,
@@ -83,6 +110,8 @@ pub(crate) fn refresh_summary(summary: &mut GradientSummary, paints: &[Paint]) {
     summary.solid_regions = 0;
     summary.linear_regions = 0;
     summary.radial_regions = 0;
+    summary.layered_regions = 0;
+    summary.overlay_layers = 0;
     summary.fitted_direction_linear_regions = 0;
     summary.fitted_focus_radial_regions = 0;
     summary.maximum_stops = 0;
@@ -99,6 +128,20 @@ pub(crate) fn refresh_summary(summary: &mut GradientSummary, paints: &[Paint]) {
                 summary.radial_regions += 1;
                 summary.fitted_focus_radial_regions += usize::from(*origin == RadialOrigin::Fitted);
                 summary.maximum_stops = summary.maximum_stops.max(stops.len());
+            }
+            Paint::Layered { base, overlays } => {
+                summary.layered_regions += 1;
+                summary.overlay_layers += overlays.len();
+                for component in std::iter::once(base.as_ref())
+                    .chain(overlays.iter().map(|overlay| overlay.paint.as_ref()))
+                {
+                    match component {
+                        Paint::Linear { stops, .. } | Paint::Radial { stops, .. } => {
+                            summary.maximum_stops = summary.maximum_stops.max(stops.len());
+                        }
+                        Paint::Solid { .. } | Paint::Layered { .. } => {}
+                    }
+                }
             }
         }
     }
@@ -1020,6 +1063,7 @@ fn paint_with_stops(template: &Paint, stops: Vec<ColorStop>) -> Paint {
             stops,
         },
         Paint::Solid { color } => Paint::Solid { color: *color },
+        Paint::Layered { .. } => template.clone(),
     }
 }
 
@@ -1193,7 +1237,7 @@ fn add_office_stops(
 ) -> (Paint, ErrorStats) {
     let initial_stops = match template {
         Paint::Linear { stops, .. } | Paint::Radial { stops, .. } => stops.clone(),
-        Paint::Solid { .. } => unreachable!(),
+        Paint::Solid { .. } | Paint::Layered { .. } => unreachable!(),
     };
     let mut offsets = vec![0.0_f64, 1.0];
     let mut current_stops = initial_stops;
@@ -1853,7 +1897,47 @@ fn paint_at(paint: &Paint, index: usize, width: usize) -> [f32; 3] {
             stops,
             ..
         } => interpolate(stops, radial_parameter(index, width, *center, *radius)),
+        Paint::Layered { base, overlays } => {
+            overlays
+                .iter()
+                .fold(paint_at(base, index, width), |under, overlay| {
+                    let over = paint_at(&overlay.paint, index, width);
+                    let parameter = match overlay.paint.as_ref() {
+                        Paint::Linear { start, end, .. } => {
+                            linear_parameter(index, width, *start, *end)
+                        }
+                        Paint::Radial { center, radius, .. } => {
+                            radial_parameter(index, width, *center, *radius)
+                        }
+                        Paint::Solid { .. } | Paint::Layered { .. } => 0.0,
+                    };
+                    let alpha = interpolate_opacity(&overlay.opacity_stops, parameter);
+                    [0, 1, 2].map(|channel| under[channel] * (1.0 - alpha) + over[channel] * alpha)
+                })
+        }
     }
+}
+
+fn interpolate_opacity(stops: &[OpacityStop], parameter: f32) -> f32 {
+    if stops.is_empty() {
+        return 1.0;
+    }
+    let parameter = parameter.clamp(0.0, 1.0) as f64;
+    if parameter <= stops[0].offset {
+        return stops[0].opacity.clamp(0.0, 1.0) as f32;
+    }
+    for pair in stops.windows(2) {
+        if parameter <= pair[1].offset {
+            let span = (pair[1].offset - pair[0].offset).max(1e-12);
+            let amount = ((parameter - pair[0].offset) / span).clamp(0.0, 1.0);
+            return (pair[0].opacity * (1.0 - amount) + pair[1].opacity * amount).clamp(0.0, 1.0)
+                as f32;
+        }
+    }
+    stops
+        .last()
+        .map(|stop| stop.opacity.clamp(0.0, 1.0) as f32)
+        .unwrap_or(1.0)
 }
 
 fn paint_stats(source: &Raster, samples: &[usize], paint: &Paint) -> ErrorStats {
@@ -2146,7 +2230,7 @@ fn fit_merge_paint(
         let (_, template, parameters, two_stop_stats) = &candidates[candidate_index];
         let initial_stops = match template {
             Paint::Linear { stops, .. } | Paint::Radial { stops, .. } => stops.clone(),
-            Paint::Solid { .. } => unreachable!(),
+            Paint::Solid { .. } | Paint::Layered { .. } => unreachable!(),
         };
         expand_merge_stops(
             source,
@@ -2216,6 +2300,169 @@ fn paint_rgb_mse(source: &Raster, samples: &[usize], paint: &Paint) -> f32 {
         }
     }
     numpy_sum_f32(&squared) / squared.len() as f32
+}
+
+/// Explain smooth two-dimensional residuals without cutting the owning face.
+///
+/// A small set of elliptical, transparent radial layers is deliberately used
+/// instead of a raster patch.  The candidate search is RGB-only and therefore
+/// cheap; the caller still applies the ordinary CIEDE2000 acceptance gate to
+/// the winning Paint.
+fn fit_layered_residual_paint(
+    source: &Raster,
+    samples: &[usize],
+    region_bounds: Bounds,
+    base: Paint,
+    maximum_layers: usize,
+) -> (Paint, ErrorStats) {
+    if samples.len() < 48 || maximum_layers == 0 {
+        let stats = paint_stats(source, samples, &base);
+        return (base, stats);
+    }
+    let span_x = (region_bounds.max_x - region_bounds.min_x).max(1.0);
+    let span_y = (region_bounds.max_y - region_bounds.min_y).max(1.0);
+    if span_x.max(span_y) < 12.0 {
+        let stats = paint_stats(source, samples, &base);
+        return (base, stats);
+    }
+
+    let base_stats = paint_stats(source, samples, &base);
+    let original_base = base.clone();
+    let mut current = base;
+    let mut current_mse = paint_rgb_mse(source, samples, &current);
+    let mut overlays = Vec::<PaintOverlay>::new();
+    for _ in 0..maximum_layers.min(3) {
+        let mut ranked = samples
+            .iter()
+            .copied()
+            .map(|index| {
+                let predicted = paint_at(&current, index, source.width);
+                let error = (0..3)
+                    .map(|channel| {
+                        let difference = source.pixels[index][channel] - predicted[channel];
+                        difference * difference
+                    })
+                    .sum::<f32>();
+                (index, error)
+            })
+            .collect::<Vec<_>>();
+        ranked.sort_by(|left, right| right.1.total_cmp(&left.1));
+        let mut centres = Vec::<usize>::new();
+        for (index, _) in ranked {
+            let x = (index % source.width) as f32;
+            let y = (index / source.width) as f32;
+            if centres.iter().all(|&existing| {
+                let ex = (existing % source.width) as f32;
+                let ey = (existing / source.width) as f32;
+                ((x - ex) / span_x).hypot((y - ey) / span_y) >= 0.16
+            }) {
+                centres.push(index);
+                if centres.len() == 1 {
+                    break;
+                }
+            }
+        }
+
+        let mut best = None::<(f32, PaintOverlay)>;
+        for centre_index in centres {
+            let center = Point {
+                x: (centre_index % source.width) as f32,
+                y: (centre_index / source.width) as f32,
+            };
+            for radius_scale in [0.24_f32, 0.46, 0.72] {
+                let radius = Point {
+                    x: (span_x * radius_scale).max(6.0),
+                    y: (span_y * radius_scale).max(6.0),
+                };
+                for peak_opacity in [0.55_f32, 0.80] {
+                    let opacity_stops = vec![
+                        OpacityStop {
+                            offset: 0.0,
+                            opacity: peak_opacity as f64,
+                        },
+                        OpacityStop {
+                            offset: 0.55,
+                            opacity: (peak_opacity * 0.35) as f64,
+                        },
+                        OpacityStop {
+                            offset: 1.0,
+                            opacity: 0.0,
+                        },
+                    ];
+                    let mut target = [0.0_f64; 3];
+                    let mut denominator = 0.0_f64;
+                    for &index in samples {
+                        let parameter = radial_parameter(index, source.width, center, radius);
+                        let alpha = interpolate_opacity(&opacity_stops, parameter) as f64;
+                        if alpha <= 1e-5 {
+                            continue;
+                        }
+                        let under = paint_at(&current, index, source.width);
+                        denominator += alpha * alpha;
+                        for channel in 0..3 {
+                            target[channel] += alpha
+                                * (source.pixels[index][channel] as f64
+                                    - under[channel] as f64 * (1.0 - alpha));
+                        }
+                    }
+                    if denominator <= 1e-8 {
+                        continue;
+                    }
+                    let color = target.map(|value| (value / denominator).clamp(0.0, 1.0));
+                    let overlay = PaintOverlay {
+                        paint: Box::new(Paint::Radial {
+                            origin: RadialOrigin::Fitted,
+                            center,
+                            radius,
+                            stops: vec![
+                                ColorStop { offset: 0.0, color },
+                                ColorStop { offset: 1.0, color },
+                            ],
+                        }),
+                        opacity_stops,
+                    };
+                    let candidate = Paint::Layered {
+                        base: Box::new(current.clone()),
+                        overlays: vec![overlay.clone()],
+                    };
+                    let mse = paint_rgb_mse(source, samples, &candidate);
+                    if best.as_ref().is_none_or(|(best_mse, _)| mse < *best_mse) {
+                        best = Some((mse, overlay));
+                    }
+                }
+            }
+        }
+        let Some((candidate_mse, overlay)) = best else {
+            break;
+        };
+        // Require a material residual reduction so layers do not accumulate
+        // merely to chase rounding noise in already coherent Paint.
+        if candidate_mse > current_mse * 0.92 || current_mse - candidate_mse < 1e-7 {
+            break;
+        }
+        current = Paint::Layered {
+            base: Box::new(current),
+            overlays: vec![overlay.clone()],
+        };
+        overlays.push(overlay);
+        current_mse = candidate_mse;
+    }
+
+    if overlays.is_empty() {
+        return (current, base_stats);
+    }
+    // Flatten the temporary one-layer nesting so SVG emission can reuse one
+    // face geometry for every overlay.
+    let layered = Paint::Layered {
+        base: Box::new(original_base.clone()),
+        overlays,
+    };
+    let stats = paint_stats(source, samples, &layered);
+    if objective(stats) + 0.02 < objective(base_stats) {
+        (layered, stats)
+    } else {
+        (original_base, base_stats)
+    }
 }
 
 #[derive(Clone)]
@@ -2387,7 +2634,9 @@ fn fit_like_merge_paint(
     solid_stats: ErrorStats,
 ) -> (Paint, ErrorStats) {
     let geometry = match template {
-        Paint::Solid { .. } => return (solid.clone(), solid_stats),
+        Paint::Solid { .. } | Paint::Layered { .. } => {
+            return (solid.clone(), solid_stats);
+        }
         Paint::Linear { preset, .. } => {
             let (start, end) = linear_geometry(*preset, region_bounds);
             let parameters: Vec<f32> = samples
@@ -2566,7 +2815,7 @@ fn merge_proposal(
             &second.samples,
             first.pixels.len(),
             second.pixels.len(),
-            1024,
+            256,
         ),
         paint,
         score,
@@ -3015,6 +3264,7 @@ pub fn merge_partition(
                 Paint::Solid { .. } => "solid",
                 Paint::Linear { .. } => "linear",
                 Paint::Radial { .. } => "radial",
+                Paint::Layered { .. } => "layered",
             };
             accepted_diagnostics.push(serde_json::json!({
                 "left": left_labels,
@@ -3203,6 +3453,29 @@ fn paint_at_point(paint: &Paint, point: Point) -> [f32; 3] {
             .sqrt()
             .clamp(0.0, 1.0);
             interpolate(stops, parameter)
+        }
+        Paint::Layered { base, overlays } => {
+            overlays
+                .iter()
+                .fold(paint_at_point(base, point), |under, overlay| {
+                    let over = paint_at_point(&overlay.paint, point);
+                    let parameter = match overlay.paint.as_ref() {
+                        Paint::Linear { start, end, .. } => {
+                            let dx = end.x - start.x;
+                            let dy = end.y - start.y;
+                            ((point.x - start.x) * dx + (point.y - start.y) * dy)
+                                / (dx * dx + dy * dy).max(1e-8)
+                        }
+                        Paint::Radial { center, radius, .. } => {
+                            (((point.x - center.x) / radius.x.max(1e-6)).powi(2)
+                                + ((point.y - center.y) / radius.y.max(1e-6)).powi(2))
+                            .sqrt()
+                        }
+                        Paint::Solid { .. } | Paint::Layered { .. } => 0.0,
+                    };
+                    let alpha = interpolate_opacity(&overlay.opacity_stops, parameter);
+                    [0, 1, 2].map(|channel| under[channel] * (1.0 - alpha) + over[channel] * alpha)
+                })
         }
     }
 }
@@ -3825,7 +4098,7 @@ fn coupled_parameter(paint: &Paint, index: usize, width: usize) -> f32 {
     match paint {
         Paint::Linear { start, end, .. } => linear_parameter(index, width, *start, *end),
         Paint::Radial { center, radius, .. } => radial_parameter(index, width, *center, *radius),
-        Paint::Solid { .. } => 0.5,
+        Paint::Solid { .. } | Paint::Layered { .. } => 0.5,
     }
     .clamp(0.0, 1.0)
 }
@@ -3841,7 +4114,7 @@ fn coupled_parameter_point(paint: &Paint, point: Point) -> f32 {
             .powi(2)
             + ((point.y - center.y) / radius.y.max(1e-6)).powi(2))
         .sqrt(),
-        Paint::Solid { .. } => 0.5,
+        Paint::Solid { .. } | Paint::Layered { .. } => 0.5,
     }
     .clamp(0.0, 1.0)
 }
@@ -4116,7 +4389,9 @@ fn paint_with_coupled_stops(template: &Paint, colours: &[[f32; 3]], offsets: &[f
             origin: *origin,
             stops,
         },
-        Paint::Solid { .. } => unreachable!("solid Paint must be promoted before coupling"),
+        Paint::Solid { .. } | Paint::Layered { .. } => {
+            unreachable!("non-gradient Paint must be promoted before coupling")
+        }
     }
 }
 
@@ -4169,7 +4444,7 @@ fn coupling_stop_offsets(
                 insert(stop.offset as f32);
             }
         }
-        Paint::Solid { .. } => {}
+        Paint::Solid { .. } | Paint::Layered { .. } => {}
     }
     for offset in FIXED_STOP_OFFSETS {
         insert(offset);
@@ -4649,6 +4924,8 @@ pub(crate) fn merge_source_supported_paints(
         length: usize,
         maximum_median: f32,
         maximum_p90: f32,
+        smooth_contacts: usize,
+        rough_contacts: usize,
         points: Vec<Point>,
     }
 
@@ -4660,6 +4937,11 @@ pub(crate) fn merge_source_supported_paints(
         entry.length += boundary.length;
         entry.maximum_median = entry.maximum_median.max(boundary.median_delta_e);
         entry.maximum_p90 = entry.maximum_p90.max(boundary.percentile_delta_e);
+        if boundary_is_smooth(&boundary) {
+            entry.smooth_contacts += 1;
+        } else {
+            entry.rough_contacts += 1;
+        }
         entry.points.extend(boundary.points);
     }
     let mut candidates = evidence.into_iter().collect::<Vec<_>>();
@@ -4690,20 +4972,32 @@ pub(crate) fn merge_source_supported_paints(
     let source_labs = lab_pixels(source);
     let mut used = vec![false; count];
     let mut accepted = Vec::<(usize, usize, Paint, usize)>::new();
+    let mut considered = 0_usize;
+    let mut rejected_evidence = 0_usize;
+    let mut rejected_seam = 0_usize;
+    let mut layered_selected = 0_usize;
+    let mut rejected_nonfinite = 0_usize;
+    let mut rejected_face = 0_usize;
+    let mut rejected_combined = 0_usize;
     for ((left, right), boundary) in candidates {
+        considered += 1;
         // All disconnected contacts of the label pair must lack a material
         // transition.  One supported contact makes the labels independent.
         if used[left]
             || used[right]
             || paints[left] == paints[right]
-            || boundary.maximum_median > 0.60
-            || boundary.maximum_p90 > 1.20
+            || boundary.smooth_contacts == 0
+            || boundary.rough_contacts > 0
+            || boundary.maximum_median > 8.0
+            || boundary.maximum_p90 > 12.0
             || boundary.points.is_empty()
         {
+            rejected_evidence += 1;
             continue;
         }
         let seam_errors = seam_errors_at_points(&paints[left], &paints[right], &boundary.points);
-        if percentile(seam_errors, 0.90) > 0.75 {
+        if percentile(seam_errors, 0.90) > 8.0 {
+            rejected_seam += 1;
             continue;
         }
         let left_region = MergeRegion {
@@ -4720,8 +5014,40 @@ pub(crate) fn merge_source_supported_paints(
             bounds: bounds(&region_pixels[right], source.width),
             paint: paints[right].clone(),
         };
-        let proposal = merge_proposal(source, &left_region, &right_region, config);
+        let mut proposal = merge_proposal(source, &left_region, &right_region, config);
+        let combined_bounds = union_bounds(left_region.bounds, right_region.bounds);
+        let layered_samples = balanced_samples(
+            &region_samples[left],
+            &region_samples[right],
+            region_pixels[left].len(),
+            region_pixels[right].len(),
+            256,
+        );
+        let (layered, layered_stats) = fit_layered_residual_paint(
+            source,
+            &layered_samples,
+            combined_bounds,
+            proposal.paint.clone(),
+            1,
+        );
+        let layered_score = objective(layered_stats)
+            .max(objective(paint_stats(
+                source,
+                &region_samples[left],
+                &layered,
+            )))
+            .max(objective(paint_stats(
+                source,
+                &region_samples[right],
+                &layered,
+            )));
+        if layered_score < proposal.score {
+            proposal.paint = layered;
+            proposal.score = layered_score;
+            layered_selected += usize::from(matches!(proposal.paint, Paint::Layered { .. }));
+        }
         if !proposal.score.is_finite() {
+            rejected_nonfinite += 1;
             continue;
         }
         let left_baseline = paint_stats_against_labs(
@@ -4748,11 +5074,12 @@ pub(crate) fn merge_source_supported_paints(
             source.width,
             &proposal.paint,
         );
-        if left_candidate.mean > left_baseline.mean + 0.02
-            || right_candidate.mean > right_baseline.mean + 0.02
-            || left_candidate.percentile > left_baseline.percentile + 0.05
-            || right_candidate.percentile > right_baseline.percentile + 0.05
+        if left_candidate.mean > left_baseline.mean + 0.30
+            || right_candidate.mean > right_baseline.mean + 0.30
+            || left_candidate.percentile > left_baseline.percentile + 0.75
+            || right_candidate.percentile > right_baseline.percentile + 0.75
         {
+            rejected_face += 1;
             continue;
         }
         let mut baseline_errors = errors_for_indices(
@@ -4782,9 +5109,10 @@ pub(crate) fn merge_source_supported_paints(
         let baseline_mean = numpy_sum_f32(&baseline_errors) / baseline_errors.len().max(1) as f32;
         let candidate_mean =
             numpy_sum_f32(&candidate_errors) / candidate_errors.len().max(1) as f32;
-        if candidate_mean > baseline_mean + 0.005
-            || percentile(candidate_errors, 0.90) > percentile(baseline_errors, 0.90) + 0.02
+        if candidate_mean > baseline_mean + 0.01
+            || percentile(candidate_errors, 0.90) > percentile(baseline_errors, 0.90) + 0.04
         {
+            rejected_combined += 1;
             continue;
         }
         used[left] = true;
@@ -4792,7 +5120,19 @@ pub(crate) fn merge_source_supported_paints(
         accepted.push((left, right, proposal.paint, boundary.length));
     }
     if accepted.is_empty() {
+        if config.retain_diagnostics {
+            eprintln!(
+                "picvec layered merge candidates: considered {considered}, evidence {rejected_evidence}, seam {rejected_seam}, layered {layered_selected}, nonfinite {rejected_nonfinite}, face {rejected_face}, combined {rejected_combined}, accepted 0"
+            );
+        }
         return SupportedPaintMergeReport::default();
+    }
+
+    if config.retain_diagnostics {
+        eprintln!(
+            "picvec layered merge candidates: considered {considered}, evidence {rejected_evidence}, seam {rejected_seam}, layered {layered_selected}, nonfinite {rejected_nonfinite}, face {rejected_face}, combined {rejected_combined}, accepted {}",
+            accepted.len(),
+        );
     }
 
     let mut owners = UnionFind::new(count);
@@ -5012,30 +5352,9 @@ pub fn fit_all(
         primary_gate_active: use_primary_gate,
         primary_solid_regions: fitted.len() - full_fit_regions,
         full_fit_regions,
-        maximum_stops: paints
-            .iter()
-            .map(|paint| match paint {
-                Paint::Solid { .. } => 0,
-                Paint::Linear { stops, .. } | Paint::Radial { stops, .. } => stops.len(),
-            })
-            .max()
-            .unwrap_or(0),
         ..GradientSummary::default()
     };
-    for paint in &paints {
-        match paint {
-            Paint::Solid { .. } => summary.solid_regions += 1,
-            Paint::Linear { preset, .. } => {
-                summary.linear_regions += 1;
-                summary.fitted_direction_linear_regions +=
-                    usize::from(*preset == LinearPreset::Fitted);
-            }
-            Paint::Radial { origin, .. } => {
-                summary.radial_regions += 1;
-                summary.fitted_focus_radial_regions += usize::from(*origin == RadialOrigin::Fitted);
-            }
-        }
-    }
+    refresh_summary(&mut summary, &paints);
     (paints, summary)
 }
 
@@ -5046,6 +5365,7 @@ fn save_paint_kinds(path: &str, paints: &[Paint]) {
             Paint::Solid { .. } => "solid",
             Paint::Linear { .. } => "linear",
             Paint::Radial { .. } => "radial",
+            Paint::Layered { .. } => "layered",
         })
         .collect();
     if let Ok(document) = serde_json::to_vec(&values) {
@@ -5086,6 +5406,16 @@ fn save_paint_details(path: &str, paints: &[Paint]) {
                 "stops": stops.iter().map(|stop| serde_json::json!([
                     stop.offset, stop.color
                 ])).collect::<Vec<_>>(),
+            }),
+            Paint::Layered { base, overlays } => serde_json::json!({
+                "kind": "layered",
+                "base": format!("{base:?}"),
+                "overlays": overlays.iter().map(|overlay| serde_json::json!({
+                    "paint": format!("{:?}", overlay.paint),
+                    "opacity_stops": overlay.opacity_stops.iter().map(|stop| [
+                        stop.offset, stop.opacity
+                    ]).collect::<Vec<_>>(),
+                })).collect::<Vec<_>>(),
             }),
         })
         .collect();
@@ -5278,6 +5608,42 @@ mod tests {
         assert_eq!(report, SupportedPaintMergeReport::default());
         assert_eq!(segmentation.regions.len(), 2);
         assert_eq!(paints.len(), 2);
+    }
+
+    #[test]
+    fn layered_paint_fades_without_an_internal_boundary() {
+        let paint = Paint::Layered {
+            base: Box::new(Paint::Solid { color: [0.0; 3] }),
+            overlays: vec![PaintOverlay {
+                paint: Box::new(Paint::Radial {
+                    origin: RadialOrigin::Fitted,
+                    center: Point { x: 1.0, y: 0.0 },
+                    radius: Point { x: 1.0, y: 1.0 },
+                    stops: vec![
+                        ColorStop {
+                            offset: 0.0,
+                            color: [1.0, 0.0, 0.0],
+                        },
+                        ColorStop {
+                            offset: 1.0,
+                            color: [1.0, 0.0, 0.0],
+                        },
+                    ],
+                }),
+                opacity_stops: vec![
+                    OpacityStop {
+                        offset: 0.0,
+                        opacity: 1.0,
+                    },
+                    OpacityStop {
+                        offset: 1.0,
+                        opacity: 0.0,
+                    },
+                ],
+            }],
+        };
+        assert_eq!(paint_at(&paint, 1, 3), [1.0, 0.0, 0.0]);
+        assert_eq!(paint_at(&paint, 0, 3), [0.0; 3]);
     }
 
     #[test]

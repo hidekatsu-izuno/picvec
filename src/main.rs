@@ -17,7 +17,7 @@ struct Arguments {
     /// Upper bound for automatic input sizing.
     #[arg(long, default_value_t = 1600)]
     max_dimension: u32,
-    #[arg(long, default_value_t = 2)]
+    #[arg(long, default_value_t = 4)]
     smoothing_radius: u32,
     #[arg(long, default_value_t = 24)]
     segmentation_min_size: u32,
