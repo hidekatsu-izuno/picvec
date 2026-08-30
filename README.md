@@ -86,36 +86,50 @@ separate SVG rasterization step currently uses `rsvg-convert`.
 
 ## Pipeline
 
-1. Select a processing dimension from a bounded source-complexity probe.
-2. Build a multiscale structure-tensor direction field and classify normal
-   profiles as material boundaries, medial ridges, ridge-on-boundary, or
-   shading in CIELAB.
-3. Give thin structural ink one nearest incident Paint owner, unmix only
-   source-supported antialias shoulders, and keep dark filled faces in Paint.
-4. Quantize global Lab histogram cells without transitive spatial chaining;
-   only four-connected equal-palette samples become one geometry region.
-5. Preserve locally visible/independent small materials and return unsupported
-   one-pixel antialias shoulders to an adjacent Paint owner.
-6. Resolve ambiguous two-parent antialias pixels with a locally regularized
-   graph cut, then regularize only quantization boundaries unsupported by a
-   dilated source barrier; structural pixels and topology-changing moves stay
-   locked.
-7. Compress the exact dense ownership partition into a non-uniform quadtree.
-   Uniform interiors retain one rectangular cell while mixed cells split down
-   to source pixels; expanding the leaves reproduces the raster labels exactly.
-8. Fit each physical raster interface from the same hierarchy as one master
-   Bezier chain, inserting
-   material transitions and high-degree intersections as exact nodes before
-   fitting, and reuse every resulting boundary in reverse for its neighbour.
-   Validate the complete partition together; if a curve collapses an incident
-   face, downgrade that canonical curve for all neighbours rather than fitting
-   either face independently. Closed faces must preserve orientation and
-   source-supported area before exact rectangles/circles/ellipses are
-   substituted.
-9. Validate each Paint owner against the same hierarchy, then fit solid,
-   arbitrarily oriented axial linear, or elliptical radial
-   Office-compatible Paint with at most five stops. Adjacent linear gradients
-   are coupled only when the combined fitted error remains acceptable.
-10. Render the Paint base at native resolution in memory, transfer only missing
-   structural intervals, and retain the lower-DeltaE ownership candidate.
-11. Overlap Paint boundaries by 0.2 source pixels to suppress renderer seams.
+1. Check the encoded dimensions and allocation limits before decoding, select
+   a bounded processing dimension from decoded region and edge-density probes,
+   then resize the raster.
+2. Build a multiscale structure-tensor direction field and classify CIELAB
+   normal profiles as material boundaries, medial ridges, ridge-on-boundary,
+   or shading.
+3. Separate thin structural ink from the Paint reference, assign its
+   underpaint to one nearest incident Paint owner, unmix only source-supported
+   antialias shoulders, and keep dark filled faces in Paint.
+4. Perceptually smooth the underpainted reference, quantize absolute Lab
+   histogram cells without transitive spatial chaining, and make only
+   four-connected equal-palette samples one owner. Preserve locally independent
+   small materials with locally adaptive area thresholds.
+5. Resolve compatible two-parent antialias sleeves with a seeded preflow graph
+   cut and exclude reassigned antialias pixels from Paint fitting.
+6. Regularize only quantization boundaries unsupported by measured source
+   edges, freezing structural pixels, face barriers, and topology-changing
+   moves. Merge adjacent quantizer bands only when one supported Paint explains
+   both faces, then return unsupported thin Paint shoulders to a neighbour.
+7. Adjust fitting samples from strong dark/bright ridge branches and compress
+   the exact dense ownership partition into a non-uniform quadtree. Uniform
+   interiors remain rectangular leaves, while mixed cells split to source
+   pixels; expanding the leaves reproduces the labels exactly.
+8. Fit each owner as solid, arbitrarily oriented axial linear, or elliptical
+   radial Paint. A spatial-coherence gate avoids needless gradient searches,
+   and adjacent gradients are harmonized or coupled only when the measured
+   face and seam errors remain acceptable.
+9. After fitting, remove an interface only when its geometry and colour are
+   unsupported by the source and one combined Paint, optionally with
+   transparent residual layers, preserves both faces. Also merge adjacent
+   owners with exactly equal Paint. Every emitted gradient component has at
+   most five stops. Compact the labels and rebuild the hierarchy before
+   geometry generation.
+10. Fit every physical raster interface from that final hierarchy as one master
+    Bezier chain, insert material transitions and high-degree intersections as
+    exact nodes, and reuse the boundary in reverse for its neighbour. Validate
+    the partition as a whole; downgrade a shared curve for all incident faces
+    if it collapses one, and require closed faces to preserve orientation and
+    source-supported area before substituting rectangles, circles, or ellipses.
+11. Serialize the unexpanded Paint layer and render it at the selected
+    processing resolution with embedded `resvg`. Combine that preview with
+    source role masks and DeltaE/lightness profile tests to select the residual
+    structural graph, then add source-supported cool silhouette paths.
+12. Add the 0.2-source-pixel Paint overlap by default, render the complete
+    Paint/structural preview with `resvg`, and report DeltaE00 and SSIM metrics.
+    Those final metrics are diagnostic only and do not select or modify the
+    SVG. Persist the final editable document atomically to the requested path.
