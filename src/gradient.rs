@@ -2925,6 +2925,96 @@ struct SmoothPaintBoundary {
     length: usize,
     median_delta_e: f32,
     percentile_delta_e: f32,
+    gradient_sample_fraction: f32,
+    median_gradient_discontinuity: f32,
+    percentile_gradient_discontinuity: f32,
+}
+
+/// Relative change of the colour slope across four consecutive samples.
+///
+/// A quantizer boundary in smooth shading can have a sizeable one-pixel
+/// DeltaE while the Lab slope on both sides still predicts that change.  A
+/// material edge has the opposite signature: most of the colour change is
+/// concentrated in the middle step, so the neighbouring slopes disagree.
+fn lab_gradient_discontinuity(previous: Lab, first: Lab, second: Lab, following: Lab) -> f32 {
+    let vector = |left: Lab, right: Lab| [right.l - left.l, right.a - left.a, right.b - left.b];
+    let norm =
+        |value: [f32; 3]| (value[0] * value[0] + value[1] * value[1] + value[2] * value[2]).sqrt();
+    let difference = |left: [f32; 3], right: [f32; 3]| {
+        norm([left[0] - right[0], left[1] - right[1], left[2] - right[2]])
+    };
+    let left = vector(previous, first);
+    let centre = vector(first, second);
+    let right = vector(second, following);
+    let scale = norm(centre).max(0.5 * (norm(left) + norm(right))).max(1e-4);
+    0.5 * (difference(left, centre) + difference(centre, right)) / scale
+}
+
+fn boundary_gradient_discontinuity(
+    labs: &[Lab],
+    segmentation: &Segmentation,
+    first: usize,
+    second: usize,
+) -> Option<f32> {
+    let width = segmentation.width;
+    let first_label = segmentation.labels[first];
+    let second_label = segmentation.labels[second];
+    let (previous, following) = if second == first + 1 && first / width == second / width {
+        let x = first % width;
+        if x == 0 || x + 2 >= width {
+            return None;
+        }
+        (first - 1, second + 1)
+    } else if second == first + width {
+        let y = first / width;
+        if y == 0 || y + 2 >= segmentation.height {
+            return None;
+        }
+        (first - width, second + width)
+    } else {
+        return None;
+    };
+    if segmentation.labels[previous] != first_label
+        || segmentation.labels[following] != second_label
+    {
+        return None;
+    }
+    Some(lab_gradient_discontinuity(
+        labs[previous],
+        labs[first],
+        labs[second],
+        labs[following],
+    ))
+}
+
+fn boundary_has_quantized_shading(boundary: &SmoothPaintBoundary) -> bool {
+    boundary.gradient_sample_fraction >= 1.0 / 3.0
+        && boundary.length >= 32
+        && boundary.median_delta_e <= 0.75
+        && boundary.percentile_delta_e <= 8.0
+        && boundary.median_gradient_discontinuity <= 1.0
+        && boundary.percentile_gradient_discontinuity <= 1.5
+}
+
+fn boundary_has_continuous_gradient(boundary: &SmoothPaintBoundary) -> bool {
+    let consistent_slope = boundary.gradient_sample_fraction >= 1.0 / 3.0
+        && boundary.median_delta_e <= 12.0
+        && boundary.percentile_delta_e <= 18.0
+        && boundary.median_gradient_discontinuity <= 0.80
+        && boundary.percentile_gradient_discontinuity <= 0.95;
+    // A long quantizer contour can cross a small ridge or junction.  Its p90
+    // slope statistic then looks discontinuous even though the typical source
+    // step is below one JND.  Retain the median evidence so broad highlights
+    // do not remain as nested flat-colour bands.
+    consistent_slope || boundary_has_quantized_shading(boundary)
+}
+
+fn boundary_has_low_source_delta(boundary: &SmoothPaintBoundary) -> bool {
+    boundary.median_delta_e <= 1.5 && boundary.percentile_delta_e <= 3.0
+}
+
+fn boundary_is_smooth(boundary: &SmoothPaintBoundary) -> bool {
+    boundary_has_low_source_delta(boundary) || boundary_has_continuous_gradient(boundary)
 }
 
 fn paint_at_point(paint: &Paint, point: Point) -> [f32; 3] {
@@ -2993,7 +3083,8 @@ fn smooth_paint_boundaries(
     include_non_smooth: bool,
 ) -> Vec<SmoothPaintBoundary> {
     let labs = lab_pixels(boundary_source);
-    let mut pairs = std::collections::BTreeMap::<(usize, usize), Vec<(usize, Point, f32)>>::new();
+    let mut pairs =
+        std::collections::BTreeMap::<(usize, usize), Vec<(usize, Point, f32, Option<f32>)>>::new();
     for y in 0..segmentation.height {
         for x in 0..segmentation.width.saturating_sub(1) {
             let first_index = y * segmentation.width + x;
@@ -3010,6 +3101,7 @@ fn smooth_paint_boundaries(
                     y: y as f32,
                 },
                 delta_e2000(labs[first_index], labs[second_index]),
+                boundary_gradient_discontinuity(&labs, segmentation, first_index, second_index),
             ));
         }
     }
@@ -3029,6 +3121,7 @@ fn smooth_paint_boundaries(
                     y: y as f32 + 0.5,
                 },
                 delta_e2000(labs[first_index], labs[second_index]),
+                boundary_gradient_discontinuity(&labs, segmentation, first_index, second_index),
             ));
         }
     }
@@ -3036,7 +3129,7 @@ fn smooth_paint_boundaries(
     let mut result = Vec::<SmoothPaintBoundary>::new();
     for ((left, right), edges) in pairs {
         let mut by_cell = std::collections::BTreeMap::<usize, Vec<usize>>::new();
-        for (edge, &(cell, _, _)) in edges.iter().enumerate() {
+        for (edge, &(cell, _, _, _)) in edges.iter().enumerate() {
             by_cell.entry(cell).or_default().push(edge);
         }
         let cells: HashSet<usize> = by_cell.keys().copied().collect();
@@ -3075,7 +3168,7 @@ fn smooth_paint_boundaries(
             let selected: Vec<usize> = edges
                 .iter()
                 .enumerate()
-                .filter_map(|(index, &(cell, _, _))| component.contains(&cell).then_some(index))
+                .filter_map(|(index, &(cell, _, _, _))| component.contains(&cell).then_some(index))
                 .collect();
             if selected.len() < minimum_length.max(1) {
                 continue;
@@ -3083,11 +3176,24 @@ fn smooth_paint_boundaries(
             let errors: Vec<f32> = selected.iter().map(|&index| edges[index].2).collect();
             let boundary_median = median(&mut errors.clone());
             let boundary_p90 = percentile(errors, 0.90);
-            if !include_non_smooth && (boundary_median > 1.5 || boundary_p90 > 3.0) {
-                continue;
-            }
+            let gradient_discontinuities: Vec<f32> = selected
+                .iter()
+                .filter_map(|&index| edges[index].3)
+                .collect();
+            let gradient_sample_fraction =
+                gradient_discontinuities.len() as f32 / selected.len().max(1) as f32;
+            let gradient_median = if gradient_discontinuities.len() >= 4 {
+                median(&mut gradient_discontinuities.clone())
+            } else {
+                f32::INFINITY
+            };
+            let gradient_p90 = if gradient_discontinuities.len() >= 4 {
+                percentile(gradient_discontinuities, 0.90)
+            } else {
+                f32::INFINITY
+            };
             let point_indices = sampled_indices(&selected, 96);
-            result.push(SmoothPaintBoundary {
+            let boundary = SmoothPaintBoundary {
                 left,
                 right,
                 points: point_indices
@@ -3097,7 +3203,13 @@ fn smooth_paint_boundaries(
                 length: selected.len(),
                 median_delta_e: boundary_median,
                 percentile_delta_e: boundary_p90,
-            });
+                gradient_sample_fraction,
+                median_gradient_discontinuity: gradient_median,
+                percentile_gradient_discontinuity: gradient_p90,
+            };
+            if include_non_smooth || boundary_is_smooth(&boundary) {
+                result.push(boundary);
+            }
         }
     }
     result
@@ -3135,25 +3247,27 @@ struct HarmonizeProposal {
 #[allow(clippy::too_many_arguments)]
 fn harmonize_adjacent_paints(
     source: &Raster,
-    boundary_source: &Raster,
+    source_labs: &[Lab],
     segmentation: &Segmentation,
     region_paint_indices: &[Vec<usize>],
+    paint_boundaries: &[SmoothPaintBoundary],
     paints: &mut [Paint],
     errors: &mut [f32],
     config: &Config,
 ) -> usize {
-    let source_labs = lab_pixels(source);
     let background = background_label(segmentation);
-    let boundaries: Vec<SmoothPaintBoundary> =
-        smooth_paint_boundaries(boundary_source, segmentation, 8, false)
-            .into_iter()
-            .filter(|boundary| {
-                boundary.left != background
-                    && boundary.right != background
-                    && !region_paint_indices[boundary.left].is_empty()
-                    && !region_paint_indices[boundary.right].is_empty()
-            })
-            .collect();
+    let boundaries: Vec<&SmoothPaintBoundary> = paint_boundaries
+        .iter()
+        .filter(|boundary| {
+            boundary.length >= 8
+                && (boundary_has_low_source_delta(boundary)
+                    || boundary_has_quantized_shading(boundary))
+                && boundary.left != background
+                && boundary.right != background
+                && !region_paint_indices[boundary.left].is_empty()
+                && !region_paint_indices[boundary.right].is_empty()
+        })
+        .collect();
     let count = paints.len();
     let label_samples: Vec<Vec<usize>> = region_paint_indices
         .iter()
@@ -3233,12 +3347,25 @@ fn harmonize_adjacent_paints(
                 }
                 let mean_regression = candidate_mean - baseline_mean;
                 let p90_regression = candidate_p90 - baseline_p90;
-                if mean_regression > (0.05 * 2.3_f32).min(0.10 * seam_mean)
-                    || p90_regression > 0.10 * 2.3
+                let quantized_shading = shared
+                    .iter()
+                    .any(|boundary| boundary_has_quantized_shading(boundary));
+                let maximum_mean_regression = if quantized_shading {
+                    0.42 * config.gradient_merge_error
+                } else {
+                    (0.05 * 2.3_f32).min(0.10 * seam_mean)
+                };
+                let maximum_p90_regression = if quantized_shading {
+                    0.95 * config.gradient_merge_error
+                } else {
+                    0.10 * 2.3
+                };
+                let score = mean_regression - 0.10 * seam_mean;
+                if mean_regression > maximum_mean_regression
+                    || p90_regression > maximum_p90_regression
                 {
                     return None;
                 }
-                let score = mean_regression - 0.10 * seam_mean;
                 if score > 0.0 {
                     return None;
                 }
@@ -3515,10 +3642,16 @@ struct CouplingBoundary {
     same_paint_key: bool,
 }
 
-fn five_stop_basis(parameter: f32) -> [f64; 5] {
-    let value = parameter.clamp(0.0, 1.0) * 4.0;
-    let left = (value.floor() as usize).min(3);
-    let alpha = (value - left as f32) as f64;
+const FIXED_STOP_OFFSETS: [f32; 5] = [0.0, 0.25, 0.50, 0.75, 1.0];
+
+fn five_stop_basis(parameter: f32, offsets: &[f32; 5]) -> [f64; 5] {
+    let parameter = parameter.clamp(0.0, 1.0);
+    let left = offsets
+        .partition_point(|&offset| offset <= parameter)
+        .saturating_sub(1)
+        .min(3);
+    let span = (offsets[left + 1] - offsets[left]).max(1e-6);
+    let alpha = ((parameter - offsets[left]) / span).clamp(0.0, 1.0) as f64;
     let mut basis = [0.0_f64; 5];
     basis[left] = 1.0 - alpha;
     basis[left + 1] = alpha;
@@ -3725,7 +3858,10 @@ fn fit_coupled_geometry(
     let mut normal = vec![vec![0.0_f64; 5]; 5];
     let mut rhs = vec![vec![0.0_f64; 5]; 3];
     for &sample in samples {
-        let basis = five_stop_basis(coupled_parameter(geometry, sample, source.width));
+        let basis = five_stop_basis(
+            coupled_parameter(geometry, sample, source.width),
+            &FIXED_STOP_OFFSETS,
+        );
         for first in 0..5 {
             for second in 0..5 {
                 normal[first][second] += basis[first] * basis[second];
@@ -3756,7 +3892,7 @@ fn fit_coupled_geometry(
             ]
         })
         .collect();
-    let paint = paint_with_five_stops(geometry, &colors);
+    let paint = paint_with_coupled_stops(geometry, &colors, &FIXED_STOP_OFFSETS);
     let stats = paint_stats_against_labs(source_labs, samples, source.width, &paint);
     (paint, stats)
 }
@@ -3788,12 +3924,12 @@ fn choose_coupled_geometry(
         .unwrap_or_else(|| current.clone())
 }
 
-fn paint_with_five_stops(template: &Paint, colours: &[[f32; 3]]) -> Paint {
+fn paint_with_coupled_stops(template: &Paint, colours: &[[f32; 3]], offsets: &[f32; 5]) -> Paint {
     let stops: Vec<ColorStop> = colours
         .iter()
-        .enumerate()
-        .map(|(index, &color)| ColorStop {
-            offset: index as f64 / 4.0,
+        .zip(offsets)
+        .map(|(&color, &offset)| ColorStop {
+            offset: offset as f64,
             color: color.map(f64::from),
         })
         .collect();
@@ -3821,6 +3957,74 @@ fn paint_with_five_stops(template: &Paint, colours: &[[f32; 3]]) -> Paint {
     }
 }
 
+/// Keep the five-stop Office limit while placing knots where an incident
+/// smooth interface needs a steep, continuous transition.  Uniform 25%
+/// knots unnecessarily spread a narrow highlight across a whole face and
+/// force the continuity solver to trade a visible seam for a broad blur.
+fn coupling_stop_offsets(
+    member: usize,
+    geometry: &Paint,
+    current: &Paint,
+    boundaries: &[&CouplingBoundary],
+) -> [f32; 5] {
+    let mut boundary_offsets = Vec::<(f32, f32)>::new();
+    for boundary in boundaries
+        .iter()
+        .filter(|boundary| boundary.boundary.left == member || boundary.boundary.right == member)
+    {
+        let mut parameters: Vec<f32> = boundary
+            .boundary
+            .points
+            .iter()
+            .map(|&point| coupled_parameter_point(geometry, point))
+            .collect();
+        if !parameters.is_empty() {
+            boundary_offsets.push((boundary.seam_p90, median(&mut parameters)));
+        }
+    }
+    boundary_offsets.sort_by(|left, right| right.0.total_cmp(&left.0));
+
+    let mut selected = vec![0.0_f32, 1.0];
+    let mut insert = |offset: f32| {
+        let offset = offset.clamp(0.0, 1.0);
+        if selected.len() < 5
+            && offset > 0.015
+            && offset < 0.985
+            && selected
+                .iter()
+                .all(|&existing| (existing - offset).abs() >= 0.015)
+        {
+            selected.push(offset);
+        }
+    };
+    for (_, offset) in boundary_offsets {
+        insert(offset);
+    }
+    match current {
+        Paint::Linear { stops, .. } | Paint::Radial { stops, .. } => {
+            for stop in stops {
+                insert(stop.offset as f32);
+            }
+        }
+        Paint::Solid { .. } => {}
+    }
+    for offset in FIXED_STOP_OFFSETS {
+        insert(offset);
+    }
+    drop(insert);
+    while selected.len() < 5 {
+        selected.sort_by(f32::total_cmp);
+        let (index, _) = selected
+            .windows(2)
+            .enumerate()
+            .max_by(|left, right| (left.1[1] - left.1[0]).total_cmp(&(right.1[1] - right.1[0])))
+            .unwrap();
+        selected.push(0.5 * (selected[index] + selected[index + 1]));
+    }
+    selected.sort_by(f32::total_cmp);
+    selected.try_into().unwrap()
+}
+
 fn weighted_percentile(mut values: Vec<(f32, f32)>, quantile: f32) -> f32 {
     if values.is_empty() {
         return 0.0;
@@ -3840,22 +4044,22 @@ fn weighted_percentile(mut values: Vec<(f32, f32)>, quantile: f32) -> f32 {
 #[allow(clippy::too_many_arguments)]
 fn couple_adjacent_paints(
     source: &Raster,
-    boundary_source: &Raster,
+    source_labs: &[Lab],
     segmentation: &Segmentation,
     region_indices: &[Vec<usize>],
     region_paint_indices: &[Vec<usize>],
+    paint_boundaries: &[SmoothPaintBoundary],
     paints: &mut [Paint],
     errors: &mut [f32],
     config: &Config,
 ) -> usize {
     let background = background_label(segmentation);
-    let source_labs = lab_pixels(source);
     let data_samples: Vec<Vec<usize>> = region_paint_indices
         .iter()
         .map(|indices| sampled_indices(indices, 768))
         .collect();
     let mut candidates = Vec::<CouplingBoundary>::new();
-    for boundary in smooth_paint_boundaries(boundary_source, segmentation, 2, true) {
+    for boundary in paint_boundaries.iter().cloned() {
         let left = boundary.left;
         let right = boundary.right;
         if left == background
@@ -3874,7 +4078,7 @@ fn couple_adjacent_paints(
         if boundary.length < 8 && !same_paint_key {
             continue;
         }
-        if !same_paint_key && (boundary.median_delta_e > 1.5 || boundary.percentile_delta_e > 3.0) {
+        if !same_paint_key && !boundary_is_smooth(&boundary) {
             continue;
         }
         let seam_deltas = seam_errors_at_points(&paints[left], &paints[right], &boundary.points);
@@ -3898,7 +4102,11 @@ fn couple_adjacent_paints(
     for boundary in &candidates {
         let left = union.find(boundary.boundary.left);
         let right = union.find(boundary.boundary.right);
-        if left == right || sizes[left] + sizes[right] > 64 {
+        // Artificial patches may share one large solve, but native shading
+        // interfaces stay pairwise so a local correction cannot spread
+        // through a whole connected material.
+        let maximum_group_size = if boundary.same_paint_key { 64 } else { 2 };
+        if left == right || sizes[left] + sizes[right] > maximum_group_size {
             continue;
         }
         let combined = sizes[left] + sizes[right];
@@ -3996,6 +4204,13 @@ fn couple_adjacent_paints(
                 })
             })
             .collect();
+        let stop_offsets: Vec<[f32; 5]> = members
+            .iter()
+            .zip(&geometries)
+            .map(|(&member, geometry)| {
+                coupling_stop_offsets(member, geometry, &paint_snapshot[member], &boundaries)
+            })
+            .collect();
         let variable_count = members.len() * 5;
         let mut normal = vec![vec![0.0_f64; variable_count]; variable_count];
         let mut rhs = vec![vec![0.0_f64; variable_count]; 3];
@@ -4004,11 +4219,10 @@ fn couple_adjacent_paints(
             let data_weight =
                 (region_indices[member].len() as f64 / samples.len().max(1) as f64).max(1.0);
             for &sample in samples {
-                let basis = five_stop_basis(coupled_parameter(
-                    &geometries[position],
-                    sample,
-                    source.width,
-                ));
+                let basis = five_stop_basis(
+                    coupled_parameter(&geometries[position], sample, source.width),
+                    &stop_offsets[position],
+                );
                 let block = position * 5;
                 for first in 0..5 {
                     for second in 0..5 {
@@ -4034,14 +4248,25 @@ fn couple_adjacent_paints(
                 continue;
             }
             let boundary_weight_scale = (16.0 / constraint_points.len().max(1) as f64).min(1.0);
-            let patch_scale = if boundary.same_paint_key { 16.0 } else { 1.0 };
-            let continuity_weight = 64.0 * patch_scale * boundary_weight_scale;
-            let target_weight = 3.0 * patch_scale * boundary_weight_scale;
+            let continuity_scale = if boundary.same_paint_key {
+                16.0
+            } else if boundary_has_continuous_gradient(&boundary.boundary) {
+                2.0
+            } else {
+                1.0
+            };
+            let target_scale = if boundary.same_paint_key { 16.0 } else { 1.0 };
+            let continuity_weight = 64.0 * continuity_scale * boundary_weight_scale;
+            let target_weight = 3.0 * target_scale * boundary_weight_scale;
             for point in constraint_points {
-                let left_basis =
-                    five_stop_basis(coupled_parameter_point(&geometries[left_position], point));
-                let right_basis =
-                    five_stop_basis(coupled_parameter_point(&geometries[right_position], point));
+                let left_basis = five_stop_basis(
+                    coupled_parameter_point(&geometries[left_position], point),
+                    &stop_offsets[left_position],
+                );
+                let right_basis = five_stop_basis(
+                    coupled_parameter_point(&geometries[right_position], point),
+                    &stop_offsets[right_position],
+                );
                 let left_block = left_position * 5;
                 let right_block = right_position * 5;
                 for first in 0..5 {
@@ -4098,7 +4323,7 @@ fn couple_adjacent_paints(
                         ]
                     })
                     .collect();
-                paint_with_five_stops(geometry, &colours)
+                paint_with_coupled_stops(geometry, &colours, &stop_offsets[position])
             })
             .collect();
         let mut baseline_errors = Vec::<(f32, f32)>::new();
@@ -4166,16 +4391,32 @@ fn couple_adjacent_paints(
         let after_p90 = percentile(after_seams, 0.90);
         let score = mean_regression + 0.35 * (after_mean - before_mean);
         let has_patch_boundary = boundaries.iter().any(|boundary| boundary.same_paint_key);
-        let maximum_mean_regression =
-            if has_patch_boundary { 0.25 } else { 0.15 } * config.gradient_merge_error;
-        let maximum_p90_regression =
-            if has_patch_boundary { 0.75 } else { 0.50 } * config.gradient_merge_error;
-        if mean_regression <= maximum_mean_regression
+        let has_continuous_gradient_boundary = boundaries
+            .iter()
+            .any(|boundary| boundary_has_continuous_gradient(&boundary.boundary));
+        // When the native four-sample profile proves slope continuity, allow
+        // a little more local fit error in exchange for removing a much
+        // larger artificial Paint seam.  The pairwise solve bounds its reach.
+        let maximum_mean_regression = if has_continuous_gradient_boundary {
+            0.35
+        } else if has_patch_boundary {
+            0.25
+        } else {
+            0.15
+        } * config.gradient_merge_error;
+        let maximum_p90_regression = if has_continuous_gradient_boundary {
+            0.95
+        } else if has_patch_boundary {
+            0.75
+        } else {
+            0.50
+        } * config.gradient_merge_error;
+        let accepted = mean_regression <= maximum_mean_regression
             && p90_regression <= maximum_p90_regression
             && before_p90 - after_p90 >= 0.50
             && after_p90 <= 2.3_f32.max(0.80 * before_p90)
-            && score <= 0.0
-        {
+            && score <= 0.0;
+        if accepted {
             let updates = members
                 .iter()
                 .enumerate()
@@ -4521,12 +4762,34 @@ pub fn fit_all(
         save_paint_kinds(&format!("{prefix}-initial.json"), &paints);
         save_paint_details(&format!("{prefix}-initial-details.json"), &paints);
     }
+    let paint_boundaries = smooth_paint_boundaries(boundary_source, segmentation, 2, true);
+    if let Ok(prefix) = std::env::var("PICVEC_PAINT_DIAGNOSTICS") {
+        let values: Vec<serde_json::Value> = paint_boundaries
+            .iter()
+            .map(|boundary| {
+                serde_json::json!({
+                    "labels": [boundary.left, boundary.right],
+                    "length": boundary.length,
+                    "median_delta_e": boundary.median_delta_e,
+                    "p90_delta_e": boundary.percentile_delta_e,
+                    "gradient_sample_fraction": boundary.gradient_sample_fraction,
+                    "median_gradient_discontinuity": boundary.median_gradient_discontinuity,
+                    "p90_gradient_discontinuity": boundary.percentile_gradient_discontinuity,
+                    "smooth": boundary_is_smooth(boundary),
+                })
+            })
+            .collect();
+        if let Ok(document) = serde_json::to_vec(&values) {
+            let _ = std::fs::write(format!("{prefix}-boundaries.json"), document);
+        }
+    }
     let harmonize_started = std::time::Instant::now();
     let coupled = harmonize_adjacent_paints(
         source,
-        boundary_source,
+        &source_labs,
         segmentation,
         &region_paint_indices,
+        &paint_boundaries,
         &mut paints,
         &mut errors,
         config,
@@ -4542,16 +4805,26 @@ pub fn fit_all(
         save_paint_details(&format!("{prefix}-harmonized-details.json"), &paints);
     }
     let coupling_started = std::time::Instant::now();
-    let locally_coupled = couple_adjacent_paints(
-        source,
-        boundary_source,
-        segmentation,
-        &region_indices,
-        &region_paint_indices,
-        &mut paints,
-        &mut errors,
-        config,
-    );
+    let mut locally_coupled = 0_usize;
+    // A second disjoint-pair pass lets continuity propagate to the next seam
+    // without ever turning a whole shading component into one global fit.
+    for _ in 0..2 {
+        let updated = couple_adjacent_paints(
+            source,
+            &source_labs,
+            segmentation,
+            &region_indices,
+            &region_paint_indices,
+            &paint_boundaries,
+            &mut paints,
+            &mut errors,
+            config,
+        );
+        locally_coupled += updated;
+        if updated == 0 {
+            break;
+        }
+    }
     if config.retain_diagnostics {
         eprintln!(
             "picvec paint substage couple: {:.3}s",
@@ -4703,6 +4976,48 @@ mod tests {
         ];
         assert_eq!(interpolate(&stops, 0.0), [0.0; 3]);
         assert_eq!(interpolate(&stops, 1.0), [1.0; 3]);
+    }
+
+    #[test]
+    fn gradient_discontinuity_separates_a_ramp_from_a_step() {
+        let lab = |lightness| Lab {
+            l: lightness,
+            a: 12.0,
+            b: -7.0,
+        };
+        assert!(lab_gradient_discontinuity(lab(20.0), lab(25.0), lab(30.0), lab(35.0)) < 1e-6);
+        assert!(lab_gradient_discontinuity(lab(20.0), lab(20.0), lab(40.0), lab(40.0)) > 0.99);
+    }
+
+    #[test]
+    fn smooth_boundary_detection_accepts_a_steep_continuous_ramp() {
+        let pixels = (0..8)
+            .flat_map(|_| {
+                (0..12).map(|x| {
+                    let value = 0.15 + 0.70 * x as f32 / 11.0;
+                    [value; 3]
+                })
+            })
+            .collect();
+        let source = Raster::new(12, 8, pixels);
+        let segmentation = two_face_segmentation(&source);
+        let boundaries = smooth_paint_boundaries(&source, &segmentation, 8, false);
+        assert_eq!(boundaries.len(), 1);
+        assert!(boundaries[0].median_delta_e > 3.0);
+        assert!(boundary_has_continuous_gradient(&boundaries[0]));
+    }
+
+    #[test]
+    fn smooth_boundary_detection_rejects_a_material_step() {
+        let mut pixels = vec![[0.2; 3]; 12 * 8];
+        for y in 0..8 {
+            for x in 6..12 {
+                pixels[y * 12 + x] = [0.8; 3];
+            }
+        }
+        let source = Raster::new(12, 8, pixels);
+        let segmentation = two_face_segmentation(&source);
+        assert!(smooth_paint_boundaries(&source, &segmentation, 8, false).is_empty());
     }
 
     #[test]
