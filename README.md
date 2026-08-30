@@ -106,6 +106,3 @@ separate SVG rasterization step currently uses `rsvg-convert`.
    that are still missing from that preview.
 6. Add a small overlap between Paint regions to hide renderer seams and write
    the final editable SVG atomically to the requested path.
-7. If `--quality-metrics` is specified, render the completed SVG one additional
-   time and report DeltaE00 and SSIM. This optional measurement never changes
-   the SVG.
