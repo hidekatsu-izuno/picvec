@@ -58,6 +58,22 @@ documentation; sample images and the evaluation-only Real-ESRGAN model are
 kept outside the crate. See `THIRD_PARTY_NOTICES.md` and `sample/README.md`
 before redistributing those repository assets.
 
+## Examples
+
+Each comparison shows the source raster on the left and the corresponding SVG
+rendered by librsvg on the right. The comparison assets can be regenerated with
+`scripts/generate_sample_comparisons.sh`.
+
+![Boy and turtle raster input and rendered SVG output](sample/comparison/boy_and_turtle.png)
+
+![Car raster input and rendered SVG output](sample/comparison/car.png)
+
+![Clip art raster input and rendered SVG output](sample/comparison/cliparts.png)
+
+![Mountain raster input and rendered SVG output](sample/comparison/viewport1.png)
+
+![Coast raster input and rendered SVG output](sample/comparison/viewport2.png)
+
 ## x4 evaluation
 
 `scripts/evaluate.py` evaluates a completed SVG against a Real-ESRGAN x4
