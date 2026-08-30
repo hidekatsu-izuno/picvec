@@ -42,6 +42,9 @@ pub struct Config {
     pub paint_primary_small_min_explained_variance: f32,
     /// Rayon worker count. Zero selects physical cores when discoverable.
     pub rayon_threads: usize,
+    /// Render the complete SVG in memory and calculate report-only quality
+    /// metrics. Disabled by default because it cannot affect the output.
+    pub compute_quality_metrics: bool,
     pub retain_diagnostics: bool,
 }
 
@@ -76,6 +79,7 @@ impl Default for Config {
             paint_primary_min_explained_variance: 0.06,
             paint_primary_small_min_explained_variance: 0.16,
             rayon_threads: 0,
+            compute_quality_metrics: false,
             retain_diagnostics: false,
         }
     }

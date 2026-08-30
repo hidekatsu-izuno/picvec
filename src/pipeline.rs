@@ -64,7 +64,9 @@ pub struct Summary {
     pub geometry: GeometrySummary,
     pub optimization: OptimizationSummary,
     pub svg: SvgSummary,
-    pub quality: QualityMetrics,
+    /// Report-only metrics, present only when explicitly requested.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quality: Option<QualityMetrics>,
 }
 
 fn report_progress(config: &Config, stage: &str, started: Instant, checkpoint: &mut Instant) {
@@ -690,20 +692,23 @@ fn vectorize_inner(
     }
     ownership.summary.structural_strokes = ownership.structural.strokes.len();
     report_progress(config, "structural-selection", started, &mut checkpoint);
-    let residual_render = render_svg_preview(
-        (processing.width, processing.height),
-        (&geometry, &paints),
-        &ownership.structural,
-        ownership.paint_overlap,
-        true,
-    )?;
-    report_progress(config, "residual-preview", started, &mut checkpoint);
-    let quality = crate::metrics::compare(&processing, &residual_render);
-    report_progress(config, "quality-selection", started, &mut checkpoint);
-    // Python's ownership model always emits the residual structural layer.
-    // A global mean-error contest against the complete candidate overlay can
-    // prefer hundreds of duplicate boundary strokes because they improve a
-    // few dark pixels while visibly thickening otherwise correct interfaces.
+    // The complete preview is report-only. Structural ownership is already
+    // authoritative, so the normal conversion path does not render it again.
+    let quality = if config.compute_quality_metrics {
+        let residual_render = render_svg_preview(
+            (processing.width, processing.height),
+            (&geometry, &paints),
+            &ownership.structural,
+            ownership.paint_overlap,
+            true,
+        )?;
+        report_progress(config, "quality-preview", started, &mut checkpoint);
+        let quality = crate::metrics::compare(&processing, &residual_render);
+        report_progress(config, "quality-metrics", started, &mut checkpoint);
+        Some(quality)
+    } else {
+        None
+    };
     let ownership_summary = ownership.summary.clone();
     let paint_overlap = ownership.paint_overlap;
     let structural = ownership.structural;
@@ -868,7 +873,7 @@ mod tests {
             }
         }
         raster.save(&input).unwrap();
-        vectorize(
+        let summary = vectorize(
             &input,
             &output,
             &Config {
@@ -878,6 +883,7 @@ mod tests {
             },
         )
         .unwrap();
+        assert!(summary.quality.is_none());
         let files: HashSet<_> = fs::read_dir(&directory)
             .unwrap()
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
@@ -890,6 +896,45 @@ mod tests {
         assert!(document.starts_with("<?xml"));
         assert!(document.contains("<svg"));
         assert!(!document.contains("silhouette\""));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn quality_metrics_require_explicit_opt_in() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "picvec-quality-contract-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let input = directory.join("input.png");
+        let output = directory.join("output.svg");
+        let mut raster = Raster::blank(32, 24, [0.9, 0.9, 0.9]);
+        for y in 6..18 {
+            for x in 8..24 {
+                raster.pixels[y * 32 + x] = [0.2, 0.4, 0.75];
+            }
+        }
+        raster.save(&input).unwrap();
+        let summary = vectorize(
+            &input,
+            &output,
+            &Config {
+                segmentation_min_size: 2,
+                minimum_gradient_area: 8,
+                compute_quality_metrics: true,
+                ..Config::default()
+            },
+        )
+        .unwrap();
+        let quality = summary.quality.unwrap();
+        assert!(quality.delta_e00_mean.is_finite());
+        assert!(quality.delta_e00_p90.is_finite());
+        assert!(quality.delta_e00_p99.is_finite());
+        assert!(quality.global_ssim.is_finite());
         fs::remove_dir_all(directory).unwrap();
     }
 

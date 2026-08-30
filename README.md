@@ -19,8 +19,7 @@ picvec input.png output.svg
 
 The input processing size is selected automatically from source complexity;
 `--max-dimension` sets its upper bound. The only output is the SVG file named
-by the second positional argument. No source copy, rendered PNG, or JSON
-sidecar is created.
+by the second positional argument.
 
 Useful controls:
 
@@ -35,6 +34,7 @@ Useful controls:
 --quantization-light-delta-e <DE>
 --gradient-merge-error <DE>
 --threads <N>                 # 0: detected physical cores
+--quality-metrics             # optional full-SVG DeltaE00/SSIM report
 --verbose
 ```
 
@@ -44,6 +44,12 @@ allocations have a 512 MiB best-effort limit.
 
 `--verbose` prints the in-memory timing and complexity report to stderr for
 development; it still writes no sidecar files.
+
+`--quality-metrics` explicitly enables a second, complete in-memory SVG render
+and reports DeltaE00 and SSIM. It is disabled by default because those metrics
+are observational and never change the generated SVG. With `--verbose` they
+are included in the complete report; otherwise only the metric object is
+printed to stderr.
 
 The published Rust crate contains only the converter source and its legal
 documentation; sample images and the evaluation-only Real-ESRGAN model are
@@ -86,50 +92,20 @@ separate SVG rasterization step currently uses `rsvg-convert`.
 
 ## Pipeline
 
-1. Check the encoded dimensions and allocation limits before decoding, select
-   a bounded processing dimension from decoded region and edge-density probes,
-   then resize the raster.
-2. Build a multiscale structure-tensor direction field and classify CIELAB
-   normal profiles as material boundaries, medial ridges, ridge-on-boundary,
-   or shading.
-3. Separate thin structural ink from the Paint reference, assign its
-   underpaint to one nearest incident Paint owner, unmix only source-supported
-   antialias shoulders, and keep dark filled faces in Paint.
-4. Perceptually smooth the underpainted reference, quantize absolute Lab
-   histogram cells without transitive spatial chaining, and make only
-   four-connected equal-palette samples one owner. Preserve locally independent
-   small materials with locally adaptive area thresholds.
-5. Resolve compatible two-parent antialias sleeves with a seeded preflow graph
-   cut and exclude reassigned antialias pixels from Paint fitting.
-6. Regularize only quantization boundaries unsupported by measured source
-   edges, freezing structural pixels, face barriers, and topology-changing
-   moves. Merge adjacent quantizer bands only when one supported Paint explains
-   both faces, then return unsupported thin Paint shoulders to a neighbour.
-7. Adjust fitting samples from strong dark/bright ridge branches and compress
-   the exact dense ownership partition into a non-uniform quadtree. Uniform
-   interiors remain rectangular leaves, while mixed cells split to source
-   pixels; expanding the leaves reproduces the labels exactly.
-8. Fit each owner as solid, arbitrarily oriented axial linear, or elliptical
-   radial Paint. A spatial-coherence gate avoids needless gradient searches,
-   and adjacent gradients are harmonized or coupled only when the measured
-   face and seam errors remain acceptable.
-9. After fitting, remove an interface only when its geometry and colour are
-   unsupported by the source and one combined Paint, optionally with
-   transparent residual layers, preserves both faces. Also merge adjacent
-   owners with exactly equal Paint. Every emitted gradient component has at
-   most five stops. Compact the labels and rebuild the hierarchy before
-   geometry generation.
-10. Fit every physical raster interface from that final hierarchy as one master
-    Bezier chain, insert material transitions and high-degree intersections as
-    exact nodes, and reuse the boundary in reverse for its neighbour. Validate
-    the partition as a whole; downgrade a shared curve for all incident faces
-    if it collapses one, and require closed faces to preserve orientation and
-    source-supported area before substituting rectangles, circles, or ellipses.
-11. Serialize the unexpanded Paint layer and render it at the selected
-    processing resolution with embedded `resvg`. Combine that preview with
-    source role masks and DeltaE/lightness profile tests to select the residual
-    structural graph, then add source-supported cool silhouette paths.
-12. Add the 0.2-source-pixel Paint overlap by default, render the complete
-    Paint/structural preview with `resvg`, and report DeltaE00 and SSIM metrics.
-    Those final metrics are diagnostic only and do not select or modify the
-    SVG. Persist the final editable document atomically to the requested path.
+1. Check the input size, choose a suitable working resolution, and resize the
+   raster when needed.
+2. Detect colour regions, boundaries, shading, and thin structural lines.
+   Correct antialias pixels and merge only neighbouring regions that can share
+   one fill without losing a visible boundary.
+3. Fit each region with a solid colour or a linear/radial gradient. Neighbouring
+   gradients are adjusted when doing so produces a smoother result.
+4. Convert region boundaries into shared vector curves. Adjacent regions reuse
+   the same curve, and simple regions become rectangles, circles, or ellipses
+   when it is safe to do so.
+5. Render the Paint layer once with embedded `resvg`, then add structural lines
+   that are still missing from that preview.
+6. Add a small overlap between Paint regions to hide renderer seams and write
+   the final editable SVG atomically to the requested path.
+7. If `--quality-metrics` is specified, render the completed SVG one additional
+   time and report DeltaE00 and SSIM. This optional measurement never changes
+   the SVG.

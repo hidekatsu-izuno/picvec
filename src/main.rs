@@ -51,6 +51,9 @@ struct Arguments {
     /// Rayon workers; zero selects the detected physical core count.
     #[arg(long, default_value_t = 0)]
     threads: usize,
+    /// Render the completed SVG and report DeltaE00/SSIM diagnostics.
+    #[arg(long)]
+    quality_metrics: bool,
     /// Print an in-memory diagnostic report to stderr; no sidecar is written.
     #[arg(long)]
     verbose: bool,
@@ -86,12 +89,15 @@ fn run() -> picvec::Result<()> {
         paint_primary_min_explained_variance: arguments.paint_primary_threshold,
         paint_primary_small_min_explained_variance: arguments.paint_primary_small_threshold,
         rayon_threads: arguments.threads,
+        compute_quality_metrics: arguments.quality_metrics,
         retain_diagnostics: arguments.verbose,
         ..defaults
     };
     let summary = vectorize(&arguments.input, &arguments.output_svg, &config)?;
     if arguments.verbose {
         eprintln!("{}", serde_json::to_string_pretty(&summary)?);
+    } else if let Some(quality) = &summary.quality {
+        eprintln!("{}", serde_json::to_string_pretty(quality)?);
     }
     eprintln!(
         "wrote {} ({}x{}, {} regions, {:.3}s)",
