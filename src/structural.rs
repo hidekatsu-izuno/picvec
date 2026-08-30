@@ -67,6 +67,20 @@ impl StructuralInk {
             summary: StructuralSummary::default(),
         }
     }
+
+    pub(crate) fn add_cool_silhouette_path(&mut self, path_data: String) {
+        self.strokes.push(StructuralStroke {
+            points: Vec::new(),
+            path_data: Some(path_data),
+            precise_points: None,
+            color: [0.094, 0.11, 0.122],
+            width: 1.6,
+            role: "cool-silhouette",
+            width_samples: Vec::new(),
+        });
+        self.summary.stroke_count += 1;
+        self.summary.boundary_profile_strokes += 1;
+    }
 }
 
 fn neighbour_indices(index: usize, width: usize, height: usize) -> Vec<usize> {

@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use rayon::prelude::*;
 use serde::Serialize;
 
+use crate::color::Lab;
 use crate::segment::Segmentation;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -86,6 +87,8 @@ pub struct GeometrySummary {
     /// two.  The structural graph reuses these exact topology coordinates.
     #[serde(skip)]
     pub paint_junctions: Vec<Point>,
+    #[serde(skip)]
+    pub cool_silhouette_paths: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -263,6 +266,7 @@ struct AdaptiveBoundaryGeometry {
     regularized_excursions: usize,
     optimal_polygons: usize,
     continuity_faired_master_ids: HashSet<usize>,
+    cool_silhouette_curves: Vec<Vec<CurveSegment>>,
 }
 
 type TaggedCurve = (f64, f64, usize, CurveSegment);
@@ -4007,6 +4011,189 @@ fn connected_adaptive_edge_geometry(
     }
 }
 
+fn base_continuity_class(lab: Lab) -> i32 {
+    let chroma = lab.a.hypot(lab.b);
+    if lab.l < 25.0 || chroma < 18.0 {
+        0
+    } else {
+        let hue = lab.b.atan2(lab.a).rem_euclid(2.0 * std::f32::consts::PI);
+        1 + (hue / (0.25 * std::f32::consts::PI)).floor() as i32
+    }
+}
+
+fn contextual_continuity_classes(labs: &[Lab], adjacency: &[HashMap<usize, usize>]) -> Vec<i32> {
+    let base: Vec<i32> = labs.iter().copied().map(base_continuity_class).collect();
+    let mut classes = base.clone();
+    let is_mid_neutral = |lab: Lab| (25.0..50.0).contains(&lab.l) && lab.a.hypot(lab.b) < 18.0;
+    let is_dark_family = |lab: Lab| lab.l < 25.0 || is_mid_neutral(lab);
+    let mut visited = vec![false; labs.len()];
+    for seed in 0..labs.len() {
+        if visited[seed] || !is_dark_family(labs[seed]) {
+            continue;
+        }
+        visited[seed] = true;
+        let mut component = Vec::new();
+        let mut queue = vec![seed];
+        while let Some(label) = queue.pop() {
+            component.push(label);
+            for &neighbour in adjacency[label].keys() {
+                if visited[neighbour] || !is_dark_family(labs[neighbour]) {
+                    continue;
+                }
+                visited[neighbour] = true;
+                queue.push(neighbour);
+            }
+        }
+        let has_dark = component.iter().any(|&label| labs[label].l < 25.0);
+        let cool_boundary_support: usize = component
+            .iter()
+            .flat_map(|&label| adjacency[label].iter())
+            .filter_map(|(&neighbour, &length)| {
+                (labs[neighbour].l >= 50.0 && labs[neighbour].b < -5.0).then_some(length)
+            })
+            .sum();
+        if has_dark && cool_boundary_support >= 24 {
+            for label in component {
+                if is_mid_neutral(labs[label]) {
+                    classes[label] = 9;
+                }
+            }
+        }
+    }
+    for (label, lab) in labs.iter().copied().enumerate() {
+        let chroma = lab.a.hypot(lab.b);
+        if lab.l < 50.0 || chroma >= 18.0 {
+            continue;
+        }
+        let mut best = None::<(f32, usize)>;
+        for &neighbour in adjacency[label].keys() {
+            let candidate = labs[neighbour];
+            if candidate.l < 25.0 || candidate.a.hypot(candidate.b) < 18.0 {
+                continue;
+            }
+            let lightness = (lab.l - candidate.l).abs();
+            let distance_squared = (lab.l - candidate.l).powi(2)
+                + (lab.a - candidate.a).powi(2)
+                + (lab.b - candidate.b).powi(2);
+            if lightness > 24.0 || distance_squared > 30.0_f32.powi(2) {
+                continue;
+            }
+            if best.is_none_or(|current| {
+                distance_squared < current.0
+                    || (distance_squared == current.0 && neighbour < current.1)
+            }) {
+                best = Some((distance_squared, neighbour));
+            }
+        }
+        if let Some((_, neighbour)) = best {
+            classes[label] = base[neighbour];
+        }
+    }
+    classes
+}
+
+fn split_closed_continuity_track(track: &[u64], stride: usize) -> Vec<Vec<u64>> {
+    let base = &track[..track.len().saturating_sub(1)];
+    let points: Vec<Point> = base
+        .iter()
+        .map(|&vertex| point_from_vertex(vertex, stride))
+        .collect();
+    let count = points.len();
+    if count < 12 {
+        return Vec::new();
+    }
+    let turn = |index: usize, support: usize| {
+        let previous = points[(index + count - support) % count];
+        let current = points[index];
+        let following = points[(index + support) % count];
+        let before = Point {
+            x: current.x - previous.x,
+            y: current.y - previous.y,
+        };
+        let after = Point {
+            x: following.x - current.x,
+            y: following.y - current.y,
+        };
+        (before.x * after.y - before.y * after.x).atan2(before.x * after.x + before.y * after.y)
+    };
+    let local: Vec<f32> = (0..count).map(|index| turn(index, 2)).collect();
+    let coarse_support = 9_usize.min((count / 4).max(2));
+    let coarse: Vec<f32> = (0..count)
+        .map(|index| turn(index, coarse_support))
+        .collect();
+    let mut corners: Vec<usize> = (0..count)
+        .filter(|&index| {
+            let magnitude = local[index].abs();
+            magnitude >= 65.0_f32.to_radians()
+                && coarse[index].abs() >= 45.0_f32.to_radians()
+                && local[index] * coarse[index] > 0.0
+                && (1..=2).all(|offset| {
+                    local[(index + count - offset) % count].abs() <= magnitude + 1e-6
+                        && local[(index + offset) % count].abs() <= magnitude + 1e-6
+                })
+        })
+        .collect();
+    if corners.len() < 2 {
+        let first = points
+            .iter()
+            .enumerate()
+            .min_by(|(_, first), (_, second)| {
+                first
+                    .x
+                    .total_cmp(&second.x)
+                    .then(first.y.total_cmp(&second.y))
+            })
+            .map(|value| value.0)
+            .unwrap_or(0);
+        let second = points
+            .iter()
+            .enumerate()
+            .max_by(|(_, first_point), (_, second_point)| {
+                first_point
+                    .distance(points[first])
+                    .total_cmp(&second_point.distance(points[first]))
+            })
+            .map(|value| value.0)
+            .unwrap_or(count / 2);
+        corners = vec![first, second];
+        corners.sort_unstable();
+        corners.dedup();
+    }
+    if corners.len() < 2 {
+        return Vec::new();
+    }
+    (0..corners.len())
+        .map(|position| {
+            let start = corners[position];
+            let end = corners[(position + 1) % corners.len()];
+            let mut result = vec![base[start]];
+            let mut index = start;
+            while index != end {
+                index = (index + 1) % count;
+                result.push(base[index]);
+            }
+            result
+        })
+        .collect()
+}
+
+fn is_shallow_continuity_arc(track: &[u64], stride: usize) -> bool {
+    let mut minimum_x = f32::INFINITY;
+    let mut maximum_x = f32::NEG_INFINITY;
+    let mut minimum_y = f32::INFINITY;
+    let mut maximum_y = f32::NEG_INFINITY;
+    for &vertex in track {
+        let point = point_from_vertex(vertex, stride);
+        minimum_x = minimum_x.min(point.x);
+        maximum_x = maximum_x.max(point.x);
+        minimum_y = minimum_y.min(point.y);
+        maximum_y = maximum_y.max(point.y);
+    }
+    let horizontal_span = maximum_x - minimum_x;
+    let vertical_span = maximum_y - minimum_y;
+    horizontal_span >= 40.0 && horizontal_span >= 1.5 * vertical_span
+}
+
 fn fit_adaptive_boundary_geometry(
     segmentation: &Segmentation,
     stride: usize,
@@ -4021,6 +4208,7 @@ fn fit_adaptive_boundary_geometry(
     let mut optimal_polygons = 0_usize;
     let mut regularized_excursions = 0_usize;
     let mut continuity_faired_master_ids = HashSet::<usize>::new();
+    let mut cool_silhouette_curves = Vec::<Vec<CurveSegment>>::new();
     let strand_diagnostics_enabled = std::env::var_os("PICVEC_STRAND_DIAGNOSTICS").is_some();
     let mut strand_diagnostics = Vec::<serde_json::Value>::new();
     let mut edge_pair = HashMap::<EdgeKey, RegionPair>::new();
@@ -4297,7 +4485,7 @@ fn fit_adaptive_boundary_geometry(
             values[middle]
         }
     };
-    let continuity_class_by_label: Vec<i32> = (0..segmentation.regions.len())
+    let continuity_lab_by_label: Vec<Lab> = (0..segmentation.regions.len())
         .map(|label| {
             let indices = if samples_by_label[label].is_empty() {
                 &all_by_label[label]
@@ -4307,24 +4495,43 @@ fn fit_adaptive_boundary_geometry(
             let l = channel_median(indices, 0);
             let a = channel_median(indices, 1);
             let b = channel_median(indices, 2);
-            let chroma = a.hypot(b);
-            if l < 25.0 || chroma < 18.0 {
-                0
-            } else {
-                let hue = b.atan2(a).rem_euclid(2.0 * std::f32::consts::PI);
-                1 + (hue / (0.25 * std::f32::consts::PI)).floor() as i32
-            }
+            Lab { l, a, b }
         })
         .collect();
+    let mut continuity_adjacency = vec![HashMap::<usize, usize>::new(); segmentation.regions.len()];
+    for pair in edge_pair.values() {
+        if pair.0 >= 0 && pair.1 >= 0 {
+            let first = pair.0 as usize;
+            let second = pair.1 as usize;
+            *continuity_adjacency[first].entry(second).or_default() += 1;
+            *continuity_adjacency[second].entry(first).or_default() += 1;
+        }
+    }
+    let continuity_class_by_label =
+        contextual_continuity_classes(&continuity_lab_by_label, &continuity_adjacency);
     let class_for_label = |label: i32| {
         if label < 0 {
             return -1;
         }
         continuity_class_by_label[label as usize]
     };
+    let cool_silhouette_class_for_label = |label: i32| {
+        if label < 0 {
+            return None;
+        }
+        let lab = continuity_lab_by_label[label as usize];
+        if lab.l < 50.0 {
+            Some(10)
+        } else if lab.b < -5.0 {
+            Some(11)
+        } else {
+            None
+        }
+    };
     let mut class_edges_by_pair = HashMap::<RegionPair, HashSet<EdgeKey>>::new();
     let mut class_pair_order = Vec::<RegionPair>::new();
     let mut class_adjacency = HashMap::<u64, HashSet<u64>>::new();
+    let mut cool_silhouette_edges = HashSet::<EdgeKey>::new();
     let mut add_class_edge = |first_class: i32, second_class: i32, edge: EdgeKey| {
         if first_class == second_class {
             return;
@@ -4381,11 +4588,14 @@ fn fit_adaptive_boundary_geometry(
             let above = segmentation.labels[(y - 1) * segmentation.width + x] as i32;
             let below = segmentation.labels[y * segmentation.width + x] as i32;
             if above != below {
-                add_class_edge(
-                    class_for_label(above),
-                    class_for_label(below),
-                    EdgeKey::new(vertex_id(x, y, stride), vertex_id(x + 1, y, stride)),
-                );
+                let edge = EdgeKey::new(vertex_id(x, y, stride), vertex_id(x + 1, y, stride));
+                add_class_edge(class_for_label(above), class_for_label(below), edge);
+                if cool_silhouette_class_for_label(above)
+                    .zip(cool_silhouette_class_for_label(below))
+                    .is_some_and(|(first, second)| first != second)
+                {
+                    cool_silhouette_edges.insert(edge);
+                }
             }
         }
     }
@@ -4394,13 +4604,27 @@ fn fit_adaptive_boundary_geometry(
             let left = segmentation.labels[y * segmentation.width + x - 1] as i32;
             let right = segmentation.labels[y * segmentation.width + x] as i32;
             if left != right {
-                add_class_edge(
-                    class_for_label(left),
-                    class_for_label(right),
-                    EdgeKey::new(vertex_id(x, y, stride), vertex_id(x, y + 1, stride)),
-                );
+                let edge = EdgeKey::new(vertex_id(x, y, stride), vertex_id(x, y + 1, stride));
+                add_class_edge(class_for_label(left), class_for_label(right), edge);
+                if cool_silhouette_class_for_label(left)
+                    .zip(cool_silhouette_class_for_label(right))
+                    .is_some_and(|(first, second)| first != second)
+                {
+                    cool_silhouette_edges.insert(edge);
+                }
             }
         }
+    }
+    if !cool_silhouette_edges.is_empty() {
+        let pair = RegionPair::new(10, 11);
+        for edge in &cool_silhouette_edges {
+            class_adjacency.entry(edge.0).or_default().insert(edge.1);
+            class_adjacency.entry(edge.1).or_default().insert(edge.0);
+        }
+        class_edges_by_pair.insert(pair, cool_silhouette_edges);
+        // This material-level silhouette deliberately runs after the
+        // paint-class masters so it owns their shared dark-to-glass edges.
+        class_pair_order.push(pair);
     }
     let class_junctions: HashSet<u64> = class_adjacency
         .iter()
@@ -4411,19 +4635,47 @@ fn fit_adaptive_boundary_geometry(
     let mut continuity_diagnostics = Vec::<serde_json::Value>::new();
     for class_pair in class_pair_order {
         let edges = &class_edges_by_pair[&class_pair];
-        for track in trace_edge_chains(edges, &class_junctions, stride) {
-            if track.len() < 40 || track.first() == track.last() {
+        let mut fitting_tracks = Vec::<(Vec<u64>, bool)>::new();
+        for traced_track in trace_edge_chains(edges, &class_junctions, stride) {
+            let closed_track = traced_track.first() == traced_track.last();
+            if closed_track {
+                let cool_silhouette_pair = class_pair == RegionPair::new(10, 11);
+                if !cool_silhouette_pair {
+                    continue;
+                }
+                fitting_tracks.extend(
+                    split_closed_continuity_track(&traced_track, stride)
+                        .into_iter()
+                        // The split points protect the upright frame corners;
+                        // long shallow arcs are also retained for the final
+                        // trim stroke below.
+                        .map(|track| (track, true)),
+                );
+            } else {
+                fitting_tracks.push((traced_track, false));
+            }
+        }
+        for (track, closed_track) in fitting_tracks {
+            if track.len() < 40 {
                 continue;
             }
             let coordinates: Vec<Point> = track
                 .iter()
                 .map(|&vertex| point_from_vertex(vertex, stride))
                 .collect();
-            let mut corners: Vec<usize> = persistent_open_corners(&coordinates)
-                .into_iter()
-                .map(|(index, _)| index)
-                .filter(|&index| index > 0 && index + 1 < track.len())
-                .collect();
+            let mut corners: Vec<usize> = if closed_track {
+                // The closed contour was already split at stable cyclic
+                // corners. Running the open corner detector again mistakes
+                // raster steps for semantic corners and prevents each full
+                // material arc from being fitted.
+                Vec::new()
+            } else {
+                persistent_open_corners(&coordinates)
+                    .into_iter()
+                    .map(|(index, _)| index)
+                    .filter(|&index| index > 0 && index + 1 < track.len())
+                    .collect()
+            };
             corners.extend([0, track.len() - 1]);
             corners.sort_unstable();
             corners.dedup();
@@ -4553,7 +4805,11 @@ fn fit_adaptive_boundary_geometry(
                 let baseline: Vec<CurveSegment> =
                     baseline_values.iter().map(|value| value.3).collect();
                 let strict_baseline = boundary_corridor_supported(&raw, &baseline, 0.5);
-                let mut fair = bounded_fairing_direct_shared_boundary(&raw, &baseline, false, true);
+                let mut fair = if closed_track && is_shallow_continuity_arc(&track, stride) {
+                    bounded_fairing_shared_boundary(&raw, &baseline, 1.25)
+                } else {
+                    bounded_fairing_direct_shared_boundary(&raw, &baseline, false, true)
+                };
                 let fair_candidate_len = fair.len();
                 let mut fair_raster_error = None;
                 if fair.len() < baseline.len() {
@@ -4640,6 +4896,9 @@ fn fit_adaptive_boundary_geometry(
                         Vec::new()
                     };
                     continuity_diagnostics.push(serde_json::json!({
+                        "kind": "fit",
+                        "class_pair": [class_pair.0, class_pair.1],
+                        "closed_track": closed_track,
                         "source_len": raw.len(),
                         "baseline_len": baseline.len(),
                         "candidate_len": fair_candidate_len,
@@ -4672,7 +4931,15 @@ fn fit_adaptive_boundary_geometry(
                     }
                     baseline_values
                 };
-                let correction_weight = 1_000_000 + raw.len();
+                if class_pair == RegionPair::new(10, 11)
+                    && closed_track
+                    && is_shallow_continuity_arc(&track, stride)
+                {
+                    cool_silhouette_curves
+                        .push(fitted.iter().map(|value| value.3).collect::<Vec<_>>());
+                }
+                let correction_weight =
+                    if closed_track { 2_000_000 } else { 1_000_000 } + raw.len();
                 let point_at = |parameter: f64| {
                     fitted
                         .iter()
@@ -4802,6 +5069,7 @@ fn fit_adaptive_boundary_geometry(
         regularized_excursions,
         optimal_polygons,
         continuity_faired_master_ids,
+        cool_silhouette_curves,
     }
 }
 
@@ -4851,9 +5119,17 @@ fn adaptive_chain_curves(
     };
     let mut raw: Vec<Point> = raw_edges.iter().map(|edge| positioned(edge.0)).collect();
     raw.push(positioned(raw_edges[raw_edges.len() - 1].1));
+    let mut continuity_curve = Vec::with_capacity(merged.len());
     let mut curves: Vec<CurveSegment> = merged
         .into_iter()
-        .map(|span| oriented_curve_interval(span.curve, span.start_parameter, span.end_parameter))
+        .map(|span| {
+            continuity_curve.push(
+                geometry
+                    .continuity_faired_master_ids
+                    .contains(&span.master_id),
+            );
+            oriented_curve_interval(span.curve, span.start_parameter, span.end_parameter)
+        })
         .collect();
     if curves.is_empty() {
         curves = raw
@@ -4863,6 +5139,7 @@ fn adaptive_chain_curves(
                 end: pair[1],
             })
             .collect();
+        continuity_curve.resize(curves.len(), false);
     }
     if let Some(first) = curves.first_mut() {
         let delta = Point {
@@ -4911,8 +5188,13 @@ fn adaptive_chain_curves(
             },
         };
     }
-    for curve in &mut curves {
-        *curve = enforce_convex_cubic_controls(*curve);
+    for (curve, continuity) in curves.iter_mut().zip(continuity_curve) {
+        // De Casteljau slicing already preserves the exact parent Bézier.
+        // Re-constraining each slice independently changes its tangent at
+        // every quantized RegionPair transition and recreates visible kinks.
+        if !continuity {
+            *curve = enforce_convex_cubic_controls(*curve);
+        }
     }
     (raw, curves)
 }
@@ -4979,6 +5261,7 @@ fn build_shared_chains(
     usize,
     usize,
     usize,
+    Vec<String>,
 ) {
     let (_, _, strands, junctions) = boundary_topology(segmentation, stride);
     let adaptive = fit_adaptive_boundary_geometry(segmentation, stride, &strands, &junctions);
@@ -5301,7 +5584,12 @@ fn build_shared_chains(
                 for index in 0..segments.len().saturating_sub(1) {
                     let left = segments[index];
                     let right = segments[index + 1];
-                    if left.end().distance(right.start()) <= 1e-3 {
+                    // Independently sliced continuity masters can differ by
+                    // a subpixel amount at an artificial closed-arc split.
+                    // Rejoin endpoints within the fitting corridor so an
+                    // otherwise valid face does not fall back to its raster
+                    // staircase solely because of that numerical seam.
+                    if left.end().distance(right.start()) <= 0.5 {
                         let joint = interpolate_point(left.end(), right.start(), 0.5);
                         let left_delta = Point {
                             x: joint.x - left.end().x,
@@ -5477,6 +5765,12 @@ fn build_shared_chains(
             let _ = std::fs::write(path, encoded);
         }
     }
+    let cool_silhouette_paths = adaptive
+        .cool_silhouette_curves
+        .iter()
+        .map(|curves| structural_curve_path_data(curves, false))
+        .filter(|path| !path.is_empty())
+        .collect();
     (
         chains,
         lookup,
@@ -5485,6 +5779,7 @@ fn build_shared_chains(
         adaptive.continuity_faired_master_ids.len(),
         adaptive.regularized_excursions,
         adaptive.regularized_observations.len(),
+        cool_silhouette_paths,
     )
 }
 
@@ -5833,6 +6128,7 @@ pub fn build(segmentation: &Segmentation) -> (Vec<RegionGeometry>, GeometrySumma
         continuity_faired_masters,
         regularized_corner_excursions,
         regularized_corner_vertices,
+        cool_silhouette_paths,
     ) = build_shared_chains(segmentation, stride);
     let mut endpoint_degree = HashMap::<(i64, i64), usize>::new();
     let mut endpoint_order = Vec::<(i64, i64)>::new();
@@ -5893,6 +6189,7 @@ pub fn build(segmentation: &Segmentation) -> (Vec<RegionGeometry>, GeometrySumma
         regularized_corner_excursions,
         regularized_corner_vertices,
         paint_junctions,
+        cool_silhouette_paths,
         ..GeometrySummary::default()
     };
     let mut geometries = Vec::with_capacity(count);
@@ -6030,6 +6327,115 @@ mod tests {
     use crate::color::rgb_to_lab;
     use crate::raster::Raster;
     use crate::segment::{RegionStats, Segmentation, SegmentationSummary};
+
+    #[test]
+    fn neutral_gradient_patch_inherits_adjacent_material_hue_class() {
+        let labs = vec![
+            Lab {
+                l: 20.0,
+                a: 0.0,
+                b: 0.0,
+            },
+            Lab {
+                l: 74.8,
+                a: -10.8,
+                b: -15.4,
+            },
+            Lab {
+                l: 89.3,
+                a: -8.4,
+                b: -9.5,
+            },
+            Lab {
+                l: 100.0,
+                a: 0.0,
+                b: 0.0,
+            },
+        ];
+        let adjacency = vec![
+            HashMap::from([(2, 8)]),
+            HashMap::from([(2, 20), (3, 8)]),
+            HashMap::from([(0, 8), (1, 20)]),
+            HashMap::from([(1, 8)]),
+        ];
+
+        let classes = contextual_continuity_classes(&labs, &adjacency);
+
+        assert_eq!(classes[2], classes[1]);
+        assert_eq!(classes[0], 0);
+        assert_eq!(classes[3], 0);
+    }
+
+    #[test]
+    fn neutral_frame_component_next_to_cool_glass_keeps_one_continuity_class() {
+        let labs = vec![
+            Lab {
+                l: 20.0,
+                a: 0.0,
+                b: 0.0,
+            },
+            Lab {
+                l: 35.0,
+                a: 1.0,
+                b: -1.0,
+            },
+            Lab {
+                l: 72.0,
+                a: -8.0,
+                b: -12.0,
+            },
+            Lab {
+                l: 36.0,
+                a: 0.0,
+                b: 0.0,
+            },
+        ];
+        let adjacency = vec![
+            HashMap::from([(1, 12)]),
+            HashMap::from([(0, 12), (2, 24)]),
+            HashMap::from([(1, 24)]),
+            HashMap::new(),
+        ];
+
+        let classes = contextual_continuity_classes(&labs, &adjacency);
+
+        assert_eq!(classes[0], 0);
+        assert_eq!(classes[1], 9);
+        assert_eq!(classes[3], 0);
+    }
+
+    #[test]
+    fn closed_continuity_split_preserves_every_boundary_edge() {
+        let stride = 64;
+        let mut track = Vec::new();
+        for x in 0..=48 {
+            track.push(vertex_id(x, 0, stride));
+        }
+        for y in 1..=20 {
+            track.push(vertex_id(48, y, stride));
+        }
+        for x in (0..48).rev() {
+            track.push(vertex_id(x, 20, stride));
+        }
+        for y in (1..20).rev() {
+            track.push(vertex_id(0, y, stride));
+        }
+        track.push(track[0]);
+
+        let arcs = split_closed_continuity_track(&track, stride);
+
+        assert!(arcs.len() >= 2);
+        assert!(arcs
+            .iter()
+            .all(|arc| arc.len() >= 2 && arc[0] != arc[arc.len() - 1]));
+        assert_eq!(
+            arcs.iter().map(|arc| arc.len() - 1).sum::<usize>(),
+            track.len() - 1
+        );
+        assert!(arcs
+            .iter()
+            .any(|arc| is_shallow_continuity_arc(arc, stride)));
+    }
 
     #[test]
     fn rectangular_region_remains_shared_path_before_final_optimization() {
@@ -6251,7 +6657,7 @@ mod tests {
             summary: SegmentationSummary::default(),
         };
         let stride = width + 1;
-        let (chains, lookup, _, _, _, _, _) = build_shared_chains(&segmentation, stride);
+        let (chains, lookup, _, _, _, _, _, _) = build_shared_chains(&segmentation, stride);
         let chain_ids: Vec<usize> = (0..height)
             .map(|y| lookup[&EdgeKey::new(vertex_id(3, y, stride), vertex_id(3, y + 1, stride))].0)
             .collect();
@@ -6316,7 +6722,7 @@ mod tests {
             summary: SegmentationSummary::default(),
         };
         let stride = width + 1;
-        let (chains, lookup, _, _, _, _, _) = build_shared_chains(&segmentation, stride);
+        let (chains, lookup, _, _, _, _, _, _) = build_shared_chains(&segmentation, stride);
         let upper = lookup[&EdgeKey::new(vertex_id(3, 2, stride), vertex_id(3, 3, stride))].0;
         let lower = lookup[&EdgeKey::new(vertex_id(3, 3, stride), vertex_id(3, 4, stride))].0;
         assert_ne!(upper, lower);

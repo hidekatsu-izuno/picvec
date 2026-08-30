@@ -588,13 +588,17 @@ pub fn vectorize(input: &Path, output: &Path, config: &Config) -> Result<Summary
     )?;
     report_progress(config, "paint-preview", started, &mut checkpoint);
     let optimization = optimization_summary(&geometry, &paints, &geometry_report);
-    let ownership = resolve_boundary_ownership(
+    let mut ownership = resolve_boundary_ownership(
         &processing,
         &paint_render,
         &structural_candidates,
         &geometry_report.paint_junctions,
         config.shared_boundary_overlap,
     );
+    for path in &geometry_report.cool_silhouette_paths {
+        ownership.structural.add_cool_silhouette_path(path.clone());
+    }
+    ownership.summary.structural_strokes = ownership.structural.strokes.len();
     report_progress(config, "structural-selection", started, &mut checkpoint);
     let residual_render = render_svg_preview(
         output,
