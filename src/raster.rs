@@ -1,8 +1,8 @@
 use std::path::Path;
 
-use image::{imageops::FilterType, DynamicImage, ImageBuffer, Rgb};
+use image::{imageops::FilterType, DynamicImage, ImageBuffer, ImageReader, Limits, Rgb};
 
-use crate::{Error, Result};
+use crate::Result;
 
 #[derive(Clone, Debug)]
 pub struct Raster {
@@ -42,8 +42,27 @@ impl Raster {
         self.get(px, py)
     }
 
-    pub fn load(path: &Path) -> Result<Self> {
-        let decoded = image::open(path)?;
+    pub fn load(
+        path: &Path,
+        maximum_dimension: u32,
+        maximum_pixels: u64,
+        maximum_decode_bytes: u64,
+    ) -> Result<Self> {
+        let (width, height) = ImageReader::open(path)?.into_dimensions()?;
+        let pixels = u64::from(width) * u64::from(height);
+        if pixels > maximum_pixels {
+            return Err(format!(
+                "input raster has {pixels} pixels ({width}x{height}); limit is {maximum_pixels}"
+            )
+            .into());
+        }
+        let mut reader = ImageReader::open(path)?;
+        let mut limits = Limits::default();
+        limits.max_image_width = Some(maximum_dimension);
+        limits.max_image_height = Some(maximum_dimension);
+        limits.max_alloc = Some(maximum_decode_bytes);
+        reader.limits(limits);
+        let decoded = reader.decode()?;
         Ok(Self::from_dynamic(&decoded))
     }
 
@@ -94,7 +113,7 @@ impl Raster {
     }
 
     pub fn from_rgb8(path: &Path) -> Result<Self> {
-        Self::load(path).map_err(|error| -> Error { error })
+        Self::load(path, 32_768, 32_000_000, 512 * 1024 * 1024)
     }
 }
 
@@ -111,5 +130,24 @@ pub fn percentile(mut values: Vec<f32>, quantile: f32) -> f32 {
     } else {
         let amount = position - low as f32;
         values[low] * (1.0 - amount) + values[high] * amount
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn input_dimensions_are_limited_before_full_decode() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("large.png");
+        ImageBuffer::from_pixel(16, 8, Rgb([0_u8, 0, 0]))
+            .save(&path)
+            .unwrap();
+
+        assert!(Raster::load(&path, 8, 1_000, 64 * 1024 * 1024).is_err());
+        assert!(Raster::load(&path, 16, 100, 64 * 1024 * 1024).is_err());
+        let loaded = Raster::load(&path, 16, 1_000, 64 * 1024 * 1024).unwrap();
+        assert_eq!((loaded.width, loaded.height), (16, 8));
     }
 }

@@ -17,6 +17,15 @@ struct Arguments {
     /// Upper bound for automatic input sizing.
     #[arg(long, default_value_t = 1600)]
     max_dimension: u32,
+    /// Reject source rasters exceeding this width or height before decoding.
+    #[arg(long, default_value_t = 32_768)]
+    max_input_dimension: u32,
+    /// Reject source rasters exceeding this total size before decoding.
+    #[arg(long, default_value_t = 32)]
+    max_input_megapixels: u64,
+    /// Best-effort image-decoder allocation limit in MiB.
+    #[arg(long, default_value_t = 512)]
+    max_decode_mib: u64,
     #[arg(long, default_value_t = 4)]
     smoothing_radius: u32,
     #[arg(long, default_value_t = 24)]
@@ -42,6 +51,9 @@ struct Arguments {
     /// Rayon workers; zero selects the detected physical core count.
     #[arg(long, default_value_t = 0)]
     threads: usize,
+    /// Path or command name for librsvg's renderer.
+    #[arg(long, default_value = "rsvg-convert")]
+    rsvg_convert: PathBuf,
     /// Print an in-memory diagnostic report to stderr; no sidecar is written.
     #[arg(long)]
     verbose: bool,
@@ -49,25 +61,35 @@ struct Arguments {
 
 fn run() -> picvec::Result<()> {
     let arguments = Arguments::parse();
-    let maximum = arguments.max_dimension.max(64);
+    let maximum = arguments.max_dimension;
+    let maximum_decode_bytes = arguments
+        .max_decode_mib
+        .checked_mul(1024 * 1024)
+        .ok_or("max_decode_mib is too large")?;
+    let maximum_input_pixels = arguments
+        .max_input_megapixels
+        .checked_mul(1_000_000)
+        .ok_or("max_input_megapixels is too large")?;
     let defaults = Config::default();
     let config = Config {
+        maximum_input_dimension: arguments.max_input_dimension,
+        maximum_input_pixels,
+        maximum_decode_bytes,
         maximum_dimension: maximum,
         auto_dimension: true,
         auto_minimum_dimension: defaults.auto_minimum_dimension.min(maximum),
         auto_maximum_dimension: maximum,
         smoothing_radius: arguments.smoothing_radius,
-        segmentation_min_size: arguments.segmentation_min_size.max(1),
-        quantization_dark_delta_e: arguments.quantization_dark_delta_e.max(0.1),
-        quantization_light_delta_e: arguments.quantization_light_delta_e.max(0.1),
-        gradient_merge_error: arguments.gradient_merge_error.max(0.0),
-        paint_primary_sample_budget: arguments.paint_primary_samples.max(8),
-        paint_primary_min_region_density: arguments.paint_primary_min_region_density.max(0.0),
-        paint_primary_min_explained_variance: arguments.paint_primary_threshold.clamp(0.0, 1.0),
-        paint_primary_small_min_explained_variance: arguments
-            .paint_primary_small_threshold
-            .clamp(0.0, 1.0),
+        segmentation_min_size: arguments.segmentation_min_size,
+        quantization_dark_delta_e: arguments.quantization_dark_delta_e,
+        quantization_light_delta_e: arguments.quantization_light_delta_e,
+        gradient_merge_error: arguments.gradient_merge_error,
+        paint_primary_sample_budget: arguments.paint_primary_samples,
+        paint_primary_min_region_density: arguments.paint_primary_min_region_density,
+        paint_primary_min_explained_variance: arguments.paint_primary_threshold,
+        paint_primary_small_min_explained_variance: arguments.paint_primary_small_threshold,
         rayon_threads: arguments.threads,
+        rsvg_convert: arguments.rsvg_convert,
         retain_diagnostics: arguments.verbose,
         ..defaults
     };

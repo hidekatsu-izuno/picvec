@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 import gc
 from pathlib import Path
+import tempfile
 from typing import Any, Mapping
 
 import numpy as np
@@ -129,7 +130,22 @@ def load_rgb(path: str | Path, *, background: str = "#ffffff") -> FloatImage:
 
 def save_rgb(image: NDArray[np.floating], path: str | Path) -> None:
     value = np.rint(np.clip(image, 0.0, 1.0) * 255.0).astype(np.uint8)
-    Image.fromarray(value, mode="RGB").save(path)
+    output_path = Path(path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            dir=output_path.parent,
+            prefix=f".{output_path.stem}-",
+            suffix=output_path.suffix,
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+        Image.fromarray(value, mode="RGB").save(temporary)
+        temporary.replace(output_path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def _parse_color(value: str) -> tuple[int, int, int]:

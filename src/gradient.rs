@@ -3747,7 +3747,7 @@ fn harmonize_adjacent_paints(
                 union_samples = sampled_indices(&union_samples, 8192);
                 let (candidate, _) = office_gradient_candidate(
                     source,
-                    &source_labs,
+                    source_labs,
                     &union_samples,
                     bounds(&union_samples, source.width),
                     config.maximum_gradient_stops,
@@ -3755,14 +3755,14 @@ fn harmonize_adjacent_paints(
                 let mut baseline_errors = Vec::<f32>::new();
                 for &label in &union_labels {
                     baseline_errors.extend(errors_for_indices(
-                        &source_labs,
+                        source_labs,
                         &label_samples[label],
                         source.width,
                         &paints[label],
                     ));
                 }
                 let candidate_errors =
-                    errors_for_indices(&source_labs, &union_samples, source.width, &candidate);
+                    errors_for_indices(source_labs, &union_samples, source.width, &candidate);
                 let baseline_mean = numpy_sum_f32(&baseline_errors) / baseline_errors.len() as f32;
                 let candidate_mean =
                     numpy_sum_f32(&candidate_errors) / candidate_errors.len() as f32;
@@ -4423,33 +4423,34 @@ fn coupling_stop_offsets(
     boundary_offsets.sort_by(|left, right| right.0.total_cmp(&left.0));
 
     let mut selected = vec![0.0_f32, 1.0];
-    let mut insert = |offset: f32| {
-        let offset = offset.clamp(0.0, 1.0);
-        if selected.len() < 5
-            && offset > 0.015
-            && offset < 0.985
-            && selected
-                .iter()
-                .all(|&existing| (existing - offset).abs() >= 0.015)
-        {
-            selected.push(offset);
-        }
-    };
-    for (_, offset) in boundary_offsets {
-        insert(offset);
-    }
-    match current {
-        Paint::Linear { stops, .. } | Paint::Radial { stops, .. } => {
-            for stop in stops {
-                insert(stop.offset as f32);
+    {
+        let mut insert = |offset: f32| {
+            let offset = offset.clamp(0.0, 1.0);
+            if selected.len() < 5
+                && offset > 0.015
+                && offset < 0.985
+                && selected
+                    .iter()
+                    .all(|&existing| (existing - offset).abs() >= 0.015)
+            {
+                selected.push(offset);
             }
+        };
+        for (_, offset) in boundary_offsets {
+            insert(offset);
         }
-        Paint::Solid { .. } | Paint::Layered { .. } => {}
+        match current {
+            Paint::Linear { stops, .. } | Paint::Radial { stops, .. } => {
+                for stop in stops {
+                    insert(stop.offset as f32);
+                }
+            }
+            Paint::Solid { .. } | Paint::Layered { .. } => {}
+        }
+        for offset in FIXED_STOP_OFFSETS {
+            insert(offset);
+        }
     }
-    for offset in FIXED_STOP_OFFSETS {
-        insert(offset);
-    }
-    drop(insert);
     while selected.len() < 5 {
         selected.sort_by(f32::total_cmp);
         let (index, _) = selected
@@ -4595,7 +4596,7 @@ fn couple_adjacent_paints(
             for &member in patch_group {
                 all_samples.extend_from_slice(&data_samples[member]);
             }
-            let directions = coupled_candidate_directions(source, &source_labs, &all_samples);
+            let directions = coupled_candidate_directions(source, source_labs, &all_samples);
             let mut best: Option<(f32, Vec<(usize, Paint)>)> = None;
             for direction in directions {
                 let mut fitted = Vec::<(usize, Paint)>::new();
@@ -4610,12 +4611,8 @@ fn couple_adjacent_paints(
                         end,
                         stops: Vec::new(),
                     };
-                    let (paint, stats) = fit_coupled_geometry(
-                        source,
-                        &source_labs,
-                        &data_samples[member],
-                        &geometry,
-                    );
+                    let (paint, stats) =
+                        fit_coupled_geometry(source, source_labs, &data_samples[member], &geometry);
                     weighted_score += data_samples[member].len() as f32 * objective(stats);
                     sample_count += data_samples[member].len();
                     fitted.push((member, paint));
@@ -4635,7 +4632,7 @@ fn couple_adjacent_paints(
                 shared_geometries.get(&member).cloned().unwrap_or_else(|| {
                     choose_coupled_geometry(
                         source,
-                        &source_labs,
+                        source_labs,
                         &data_samples[member],
                         &paint_snapshot[member],
                     )
@@ -4770,9 +4767,9 @@ fn couple_adjacent_paints(
             let samples = &data_samples[member];
             let weight = region_indices[member].len() as f32 / samples.len().max(1) as f32;
             let baseline =
-                errors_for_indices(&source_labs, samples, source.width, &paint_snapshot[member]);
+                errors_for_indices(source_labs, samples, source.width, &paint_snapshot[member]);
             let candidate =
-                errors_for_indices(&source_labs, samples, source.width, &proposed[position]);
+                errors_for_indices(source_labs, samples, source.width, &proposed[position]);
             for value in baseline {
                 baseline_errors.push((value, weight));
             }
@@ -4861,7 +4858,7 @@ fn couple_adjacent_paints(
                 .map(|(position, &member)| {
                     let paint = proposed[position].clone();
                     let error = paint_stats_against_labs(
-                        &source_labs,
+                        source_labs,
                         &data_samples[member],
                         source.width,
                         &paint,

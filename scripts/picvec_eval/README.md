@@ -30,7 +30,7 @@ runtime dependencies for `uv`; the model must still be supplied explicitly.
 First create the SVG normally, without any x4 input:
 
 ```bash
-mise exec -- cargo run --release -- input.png output.svg
+mise exec -- cargo run --release --locked -- input.png output.svg
 ```
 
 Then run the independent evaluator:
@@ -59,9 +59,10 @@ timeout 600s nice -n 10 mise x -- uv run --with spandrel==0.4.2 scripts/evaluate
 
 The generated reference is content-addressed under
 `.cache/picvec/realesrgan`. Its key includes the source pixels, model hash,
-device, precision, tile size, and padding. Existing SVGDeck cache files remain
-compatible and can be reused with
-`--realesrgan-cache-dir /path/to/svgdeck/.cache/raster2svg/realesrgan`.
+device, accelerator identity, Torch/CUDA/cuDNN/Spandrel versions, precision,
+tile size, and padding. Caches made by the earlier SVGDeck-compatible v1
+namespace are intentionally not reused because those keys did not capture the
+complete inference environment.
 
 The x4 PNG can also be generated without running the evaluator:
 
@@ -97,6 +98,7 @@ The output directory contains:
 - `reference-realesrgan-x4.png`: canonical Real-ESRGAN reference;
 - `source-processing.png`: input raster fitted to the SVG evaluation canvas;
 - `rendered-svg-x4.png`: SVG rasterized directly at `4W x 4H`;
+- `rendered-svg-native.png`: SVG rasterized at the original input dimensions;
 - `report.json`: hashes, commands, settings, and metrics;
 - `edges-reference.png` and `edges-svg.png`: fixed-scale L* edges;
 - `missing-edges.png` and `extra-edges.png`: primary-tolerance failures;
@@ -125,9 +127,9 @@ fill edge cannot substitute for a deleted black/dark outline.
 
 Local colour failures are not reduced to the mean alone: the report retains
 the worst tile's boundary-band DeltaE00 p90 and the tail values (p90/p99) of
-the whole-image DeltaE distribution. These tail values are also used by the
-source-resolution overlay-compaction gate, so deleting a narrow highlight or
-seam cannot be accepted solely because it reduces SVG complexity.
+the whole-image DeltaE distribution. These values are explicit terms in the
+post-hoc selection report, so a narrow highlight or seam is not hidden by a
+better global mean.
 
 Edges inside the outermost 4 x4 pixels (1 source pixel) are excluded from
 boundary metrics by default. This prevents a fill clipped exactly at the SVG
@@ -230,14 +232,6 @@ evaluation-only.
 The score is a ranking aid, not a vectorizer objective; use
 `--complexity-target-per-edge` only when comparing datasets with a deliberately
 different geometry budget.
-
-For source images whose panel/handle detail is visibly overfit, the vectorizer
-also exposes `--prune-overfit-details`. This is an opt-in, source-resolution
-render gate that removes only the named detail-overlay classes; it does not
-load Real-ESRGAN or any x4 raster. The candidate is kept only when its native
-colour, edge, SSIM, boundary, and thin-line recall regressions remain within
-the configured bounds. This prevents simplification from deleting a source
-stroke merely because the global colour mean improves.
 
 For an honest algorithm comparison, report both the raw diagnostics and this
 selection score. A higher F1 is not an improvement if it comes with a large

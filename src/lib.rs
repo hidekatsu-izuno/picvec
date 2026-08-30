@@ -23,7 +23,7 @@ mod svml;
 mod union_find;
 
 pub use config::Config;
-pub use pipeline::{vectorize, Summary};
+pub use pipeline::{vectorize, RendererSummary, Summary};
 
 pub type Error = Box<dyn std::error::Error + Send + Sync + 'static>;
 pub type Result<T> = std::result::Result<T, Error>;

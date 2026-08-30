@@ -1,9 +1,17 @@
+use std::path::PathBuf;
+
 use serde::{Deserialize, Serialize};
 
 /// Reproducible controls corresponding to the current raster2svg defaults.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
+    /// Strict per-axis limit applied before an input raster is decoded.
+    pub maximum_input_dimension: u32,
+    /// Strict total-pixel limit checked from the raster header before decode.
+    pub maximum_input_pixels: u64,
+    /// Best-effort allocation limit passed to the image decoder.
+    pub maximum_decode_bytes: u64,
     pub maximum_dimension: u32,
     pub auto_dimension: bool,
     pub auto_minimum_dimension: u32,
@@ -36,12 +44,17 @@ pub struct Config {
     pub paint_primary_small_min_explained_variance: f32,
     /// Rayon worker count. Zero selects physical cores when discoverable.
     pub rayon_threads: usize,
+    /// SVG renderer used for the two in-memory fidelity checks.
+    pub rsvg_convert: PathBuf,
     pub retain_diagnostics: bool,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
+            maximum_input_dimension: 32_768,
+            maximum_input_pixels: 32_000_000,
+            maximum_decode_bytes: 512 * 1024 * 1024,
             maximum_dimension: 1600,
             auto_dimension: true,
             auto_minimum_dimension: 768,
@@ -67,7 +80,174 @@ impl Default for Config {
             paint_primary_min_explained_variance: 0.06,
             paint_primary_small_min_explained_variance: 0.16,
             rayon_threads: 0,
+            rsvg_convert: PathBuf::from("rsvg-convert"),
             retain_diagnostics: false,
         }
+    }
+}
+
+impl Config {
+    /// Reject invalid programmatic or deserialized settings before conversion
+    /// allocates memory or creates output directories.
+    pub fn validate(&self) -> crate::Result<()> {
+        fn require(condition: bool, message: &'static str) -> crate::Result<()> {
+            if condition {
+                Ok(())
+            } else {
+                Err(message.into())
+            }
+        }
+
+        require(
+            self.maximum_input_dimension >= 64,
+            "maximum_input_dimension must be at least 64",
+        )?;
+        require(
+            self.maximum_input_pixels >= 64 * 64,
+            "maximum_input_pixels must be at least 4096",
+        )?;
+        require(
+            self.maximum_decode_bytes >= 1024 * 1024,
+            "maximum_decode_bytes must be at least 1 MiB",
+        )?;
+        require(
+            self.maximum_dimension >= 64,
+            "maximum_dimension must be at least 64",
+        )?;
+        require(
+            self.auto_minimum_dimension >= 64,
+            "auto_minimum_dimension must be at least 64",
+        )?;
+        require(
+            self.auto_maximum_dimension >= 64,
+            "auto_maximum_dimension must be at least 64",
+        )?;
+        require(
+            self.smoothing_spatial_sigma.is_finite() && self.smoothing_spatial_sigma > 0.0,
+            "smoothing_spatial_sigma must be finite and positive",
+        )?;
+        for (name, value) in [
+            ("smoothing_dark_delta_e", self.smoothing_dark_delta_e),
+            ("smoothing_light_delta_e", self.smoothing_light_delta_e),
+            ("quantization_dark_delta_e", self.quantization_dark_delta_e),
+            (
+                "quantization_light_delta_e",
+                self.quantization_light_delta_e,
+            ),
+        ] {
+            require(
+                value.is_finite() && value > 0.0,
+                match name {
+                    "smoothing_dark_delta_e" => {
+                        "smoothing_dark_delta_e must be finite and positive"
+                    }
+                    "smoothing_light_delta_e" => {
+                        "smoothing_light_delta_e must be finite and positive"
+                    }
+                    "quantization_dark_delta_e" => {
+                        "quantization_dark_delta_e must be finite and positive"
+                    }
+                    _ => "quantization_light_delta_e must be finite and positive",
+                },
+            )?;
+        }
+        require(
+            self.dark_knee_lstar.is_finite() && (0.0..=100.0).contains(&self.dark_knee_lstar),
+            "dark_knee_lstar must be finite and between 0 and 100",
+        )?;
+        require(
+            self.segmentation_min_size >= 1,
+            "segmentation_min_size must be at least 1",
+        )?;
+        require(
+            self.segmentation_reference_dimension >= 1,
+            "segmentation_reference_dimension must be at least 1",
+        )?;
+        require(
+            self.local_detail_window.is_finite() && self.local_detail_window >= 1.0,
+            "local_detail_window must be finite and at least 1",
+        )?;
+        require(
+            self.local_detail_density_pivot.is_finite() && self.local_detail_density_pivot > 0.0,
+            "local_detail_density_pivot must be finite and positive",
+        )?;
+        require(
+            self.gradient_merge_error.is_finite() && self.gradient_merge_error >= 0.0,
+            "gradient_merge_error must be finite and non-negative",
+        )?;
+        require(
+            self.minimum_gradient_area >= 1,
+            "minimum_gradient_area must be at least 1",
+        )?;
+        require(
+            self.shared_boundary_overlap.is_finite() && self.shared_boundary_overlap >= 0.0,
+            "shared_boundary_overlap must be finite and non-negative",
+        )?;
+        require(
+            (2..=5).contains(&self.maximum_gradient_stops),
+            "maximum_gradient_stops must be between 2 and 5",
+        )?;
+        require(
+            self.paint_primary_sample_budget >= 8,
+            "paint_primary_sample_budget must be at least 8",
+        )?;
+        require(
+            self.paint_primary_min_region_density.is_finite()
+                && self.paint_primary_min_region_density >= 0.0,
+            "paint_primary_min_region_density must be finite and non-negative",
+        )?;
+        require(
+            self.paint_primary_min_explained_variance.is_finite()
+                && (0.0..=1.0).contains(&self.paint_primary_min_explained_variance),
+            "paint_primary_min_explained_variance must be finite and between 0 and 1",
+        )?;
+        require(
+            self.paint_primary_small_min_explained_variance.is_finite()
+                && (0.0..=1.0).contains(&self.paint_primary_small_min_explained_variance),
+            "paint_primary_small_min_explained_variance must be finite and between 0 and 1",
+        )?;
+        require(
+            !self.rsvg_convert.as_os_str().is_empty(),
+            "rsvg_convert must not be empty",
+        )?;
+        Ok(())
+    }
+
+    /// Effective automatic bounds. `maximum_dimension` is always a hard
+    /// upper bound; the legacy automatic maximum can only lower it.
+    pub(crate) fn automatic_dimension_bounds(&self) -> (u32, u32) {
+        let maximum = self.maximum_dimension.min(self.auto_maximum_dimension);
+        let minimum = self.auto_minimum_dimension.min(maximum);
+        (minimum, maximum)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_configuration_is_valid() {
+        Config::default().validate().unwrap();
+    }
+
+    #[test]
+    fn maximum_dimension_remains_a_hard_automatic_bound() {
+        let config = Config {
+            maximum_dimension: 320,
+            auto_minimum_dimension: 768,
+            auto_maximum_dimension: 1600,
+            ..Config::default()
+        };
+        assert_eq!(config.automatic_dimension_bounds(), (320, 320));
+    }
+
+    #[test]
+    fn nonfinite_threshold_is_rejected() {
+        let config = Config {
+            paint_primary_min_explained_variance: f32::NAN,
+            ..Config::default()
+        };
+        assert!(config.validate().is_err());
     }
 }

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-import tempfile
+import json
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 import unittest
 from unittest import mock
 
@@ -11,7 +12,11 @@ import numpy as np
 from PIL import Image
 
 from generate_realesrgan_x4 import build_parser as build_generator_parser
-from picvec_eval.cli import build_parser as build_evaluator_parser
+from picvec_eval.cli import (
+    _write_text_atomic,
+    build_parser as build_evaluator_parser,
+    main as evaluate_main,
+)
 from picvec_eval.upscale import (
     CachedImageUpscaler,
     RealESRGANUpscaler,
@@ -124,6 +129,74 @@ class RealESRGANGenerationTests(unittest.TestCase):
         self.assertEqual(evaluator.realesrgan_model, Path("model.pth"))
         self.assertEqual(evaluator.tile_padding, 24)
         self.assertEqual(evaluator.device, "cpu")
+
+    def test_atomic_text_writer_replaces_complete_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "report.json"
+            output.write_text("old", encoding="utf-8")
+            _write_text_atomic(output, "new\n")
+
+            self.assertEqual(output.read_text(encoding="utf-8"), "new\n")
+            self.assertEqual(list(output.parent.glob(".report-*")), [])
+
+    def test_evaluator_uses_original_dimensions_for_native_comparison(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.png"
+            svg = root / "output.svg"
+            reference = root / "reference.png"
+            output = root / "evaluation"
+            Image.new("RGB", (8, 6), "white").save(source)
+            Image.new("RGB", (16, 12), "white").save(reference)
+            svg.write_text(
+                '<svg xmlns="http://www.w3.org/2000/svg" width="4" height="3" '
+                'viewBox="0 0 4 3"><rect width="4" height="3" fill="white"/></svg>',
+                encoding="utf-8",
+            )
+
+            def render(
+                _svg_path: Path,
+                output_path: Path,
+                width: int,
+                height: int,
+                **_kwargs: object,
+            ) -> list[str]:
+                Image.new("RGB", (width, height), "white").save(output_path)
+                return ["fake-rsvg-convert", str(width), str(height)]
+
+            def evaluate(
+                _reference: np.ndarray,
+                _rendered: np.ndarray,
+                _output_directory: Path,
+                **kwargs: object,
+            ) -> dict[str, bool]:
+                self.assertEqual(kwargs["pixel_reference"].shape[:2], (6, 8))
+                self.assertEqual(kwargs["native_rendered"].shape[:2], (6, 8))
+                return {"valid": True}
+
+            with (
+                mock.patch("picvec_eval.cli._render_svg", side_effect=render),
+                mock.patch("picvec_eval.cli.evaluate_x4_images", side_effect=evaluate),
+                mock.patch("picvec_eval.cli._command_version", return_value="test"),
+                mock.patch("builtins.print"),
+            ):
+                result = evaluate_main(
+                    [
+                        str(source),
+                        str(svg),
+                        str(output),
+                        "--reference-x4",
+                        str(reference),
+                        "--json",
+                    ]
+                )
+
+            self.assertEqual(result, 0)
+            report = json.loads((output / "report.json").read_text(encoding="utf-8"))
+            self.assertEqual(report["original_source_width"], 8)
+            self.assertEqual(report["original_source_height"], 6)
+            self.assertEqual(report["processing_source_width"], 4)
+            self.assertEqual(report["processing_source_height"], 3)
 
 
 if __name__ == "__main__":

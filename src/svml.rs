@@ -6,33 +6,49 @@
 //! Keep the same dispatch here and retain the ordinary scalar fallback on
 //! other CPUs.  The vendored routine is BSD-3-Clause, copyright Intel.
 
-#[cfg(target_arch = "x86_64")]
+// The vendored entry shims use the SysV x86-64 calling convention and ELF
+// assembler directives. Keep them Linux-only until another target has a
+// native ABI shim of its own.
+#[cfg(all(target_arch = "x86_64", target_os = "linux"))]
 core::arch::global_asm!(
     include_str!("svml/cbrt_f32_avx512.s"),
     options(raw, att_syntax)
 );
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", target_os = "linux"))]
 core::arch::global_asm!(
     include_str!("svml/pow_f32_avx512.s"),
     options(raw, att_syntax)
 );
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", target_os = "linux"))]
 core::arch::global_asm!(
     include_str!("svml/atan2_f32_avx512.s"),
     options(raw, att_syntax)
 );
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", target_os = "linux"))]
 core::arch::global_asm!(
     include_str!("svml/exp_f64_avx512.s"),
     options(raw, att_syntax)
 );
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", target_os = "linux"))]
 unsafe extern "C" {
     fn picvec_svml_cbrtf16(input: *const f32, output: *mut f32);
     fn picvec_svml_powf16(first: *const f32, second: *const f32, output: *mut f32);
     fn picvec_svml_atan2f16(first: *const f32, second: *const f32, output: *mut f32);
     fn picvec_svml_exp8(input: *const f64, output: *mut f64);
+}
+
+#[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+#[inline]
+fn avx512_svml_available() -> bool {
+    // Match NumPy's AVX512_SKX dispatch level. Checking the complete
+    // Skylake-X feature set also keeps future upstream routine replacements
+    // safe instead of relying on today's instruction mix.
+    std::arch::is_x86_feature_detected!("avx512f")
+        && std::arch::is_x86_feature_detected!("avx512dq")
+        && std::arch::is_x86_feature_detected!("avx512cd")
+        && std::arch::is_x86_feature_detected!("avx512bw")
+        && std::arch::is_x86_feature_detected!("avx512vl")
 }
 
 pub fn exp_f32_in_place(values: &mut [f32]) {
@@ -46,14 +62,14 @@ pub fn exp_f64(value: f64) -> f64 {
 }
 
 pub fn exp_f64_in_place(values: &mut [f64]) {
-    #[cfg(target_arch = "x86_64")]
-    if std::arch::is_x86_feature_detected!("avx512f") {
+    #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+    if avx512_svml_available() {
         for chunk in values.chunks_mut(8) {
             let mut input = [0.0_f64; 8];
             let mut output = [0.0_f64; 8];
             input[..chunk.len()].copy_from_slice(chunk);
-            // SAFETY: runtime detection guarantees AVX-512 and both arrays
-            // provide the eight lanes required by the vendored routine.
+            // SAFETY: runtime detection guarantees AVX512_SKX on the
+            // SysV target expected by the shim; both arrays provide all lanes.
             unsafe {
                 picvec_svml_exp8(input.as_ptr(), output.as_mut_ptr());
             }
@@ -99,14 +115,14 @@ fn numpy_exp_f32(mut value: f32) -> f32 {
 }
 
 pub fn cbrt_f32_in_place(values: &mut [f32]) {
-    #[cfg(target_arch = "x86_64")]
-    if std::arch::is_x86_feature_detected!("avx512f") {
+    #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+    if avx512_svml_available() {
         for chunk in values.chunks_mut(16) {
             let mut input = [0.0_f32; 16];
             let mut output = [0.0_f32; 16];
             input[..chunk.len()].copy_from_slice(chunk);
-            // SAFETY: runtime detection guarantees the instruction set and
-            // both arrays provide the routine's complete sixteen lanes.
+            // SAFETY: runtime detection guarantees AVX512_SKX on the
+            // SysV target expected by the shim; both arrays provide all lanes.
             unsafe {
                 picvec_svml_cbrtf16(input.as_ptr(), output.as_mut_ptr());
             }
@@ -119,8 +135,8 @@ pub fn cbrt_f32_in_place(values: &mut [f32]) {
 }
 
 pub fn pow_f32_in_place(values: &mut [f32], exponent: f32) {
-    #[cfg(target_arch = "x86_64")]
-    if std::arch::is_x86_feature_detected!("avx512f") {
+    #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+    if avx512_svml_available() {
         for chunk in values.chunks_mut(16) {
             let mut input = [1.0_f32; 16];
             let powers = [exponent; 16];
@@ -144,8 +160,8 @@ pub fn pow_f32_in_place(values: &mut [f32], exponent: f32) {
 pub fn atan2_f32(first: &[f32], second: &[f32]) -> Vec<f32> {
     assert_eq!(first.len(), second.len());
     let mut result = vec![0.0_f32; first.len()];
-    #[cfg(target_arch = "x86_64")]
-    if std::arch::is_x86_feature_detected!("avx512f") {
+    #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+    if avx512_svml_available() {
         for (chunk_index, (first_chunk, second_chunk)) in
             first.chunks(16).zip(second.chunks(16)).enumerate()
         {
@@ -154,8 +170,8 @@ pub fn atan2_f32(first: &[f32], second: &[f32]) -> Vec<f32> {
             let mut output = [0.0_f32; 16];
             first_input[..first_chunk.len()].copy_from_slice(first_chunk);
             second_input[..second_chunk.len()].copy_from_slice(second_chunk);
-            // SAFETY: runtime detection guarantees AVX-512 support; the
-            // fixed arrays provide every lane required by the SVML ABI.
+            // SAFETY: runtime detection guarantees AVX512_SKX on the
+            // SysV target expected by the shim; all arrays provide every lane.
             unsafe {
                 picvec_svml_atan2f16(
                     first_input.as_ptr(),
@@ -174,4 +190,74 @@ pub fn atan2_f32(first: &[f32], second: &[f32]) -> Vec<f32> {
         .zip(first.iter().zip(second))
         .for_each(|(output, (&y, &x))| *output = y.atan2(x));
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn close_f32(actual: f32, expected: f32, tolerance: f32) {
+        assert!(
+            (actual - expected).abs() <= tolerance * expected.abs().max(1.0),
+            "{actual} differs from {expected}"
+        );
+    }
+
+    #[test]
+    fn dispatched_elementary_functions_cover_partial_vectors() {
+        for length in [1_usize, 7, 8, 15, 16, 17, 31] {
+            let source = (0..length)
+                .map(|index| 0.01 + index as f32 * 0.17)
+                .collect::<Vec<_>>();
+
+            let mut roots = source.clone();
+            cbrt_f32_in_place(&mut roots);
+            for (&actual, &value) in roots.iter().zip(&source) {
+                close_f32(actual, value.cbrt(), 2e-5);
+            }
+
+            let mut powers = source.clone();
+            pow_f32_in_place(&mut powers, 2.4);
+            for (&actual, &value) in powers.iter().zip(&source) {
+                close_f32(actual, value.powf(2.4), 2e-5);
+            }
+
+            let second = source
+                .iter()
+                .enumerate()
+                .map(|(index, &value)| value + 0.3 + index as f32 * 0.01)
+                .collect::<Vec<_>>();
+            let angles = atan2_f32(&source, &second);
+            for ((&actual, &y), &x) in angles.iter().zip(&source).zip(&second) {
+                close_f32(actual, y.atan2(x), 2e-5);
+            }
+
+            let mut exponentials = (0..length)
+                .map(|index| index as f64 * 0.125 - 2.0)
+                .collect::<Vec<_>>();
+            let expected = exponentials
+                .iter()
+                .map(|value| value.exp())
+                .collect::<Vec<_>>();
+            exp_f64_in_place(&mut exponentials);
+            for (&actual, &expected) in exponentials.iter().zip(&expected) {
+                assert!(
+                    (actual - expected).abs() <= 2e-12 * expected.abs().max(1.0),
+                    "{actual} differs from {expected}"
+                );
+            }
+        }
+    }
+
+    #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+    #[test]
+    fn svml_gate_requires_every_instruction_subset() {
+        if avx512_svml_available() {
+            assert!(std::arch::is_x86_feature_detected!("avx512f"));
+            assert!(std::arch::is_x86_feature_detected!("avx512dq"));
+            assert!(std::arch::is_x86_feature_detected!("avx512cd"));
+            assert!(std::arch::is_x86_feature_detected!("avx512bw"));
+            assert!(std::arch::is_x86_feature_detected!("avx512vl"));
+        }
+    }
 }

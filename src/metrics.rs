@@ -11,7 +11,8 @@ pub struct QualityMetrics {
     pub delta_e00_mean: f32,
     pub delta_e00_p90: f32,
     pub delta_e00_p99: f32,
-    pub ssim: f32,
+    /// Single-window SSIM over the complete luminance image.
+    pub global_ssim: f32,
 }
 
 pub fn compare(reference: &Raster, candidate: &Raster) -> QualityMetrics {
@@ -54,12 +55,12 @@ pub fn compare(reference: &Raster, candidate: &Raster) -> QualityMetrics {
     covariance /= divisor;
     let c1 = 0.01_f32.powi(2);
     let c2 = 0.03_f32.powi(2);
-    let ssim = ((2.0 * mean_x * mean_y + c1) * (2.0 * covariance + c2))
+    let global_ssim = ((2.0 * mean_x * mean_y + c1) * (2.0 * covariance + c2))
         / ((mean_x * mean_x + mean_y * mean_y + c1) * (variance_x + variance_y + c2)).max(1e-12);
     QualityMetrics {
         delta_e00_mean: mean,
         delta_e00_p90: percentile(delta.clone(), 0.90),
         delta_e00_p99: percentile(delta, 0.99),
-        ssim,
+        global_ssim,
     }
 }

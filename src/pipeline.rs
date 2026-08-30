@@ -4,8 +4,11 @@ use std::process::Command;
 use std::time::Instant;
 
 use serde::Serialize;
+use tempfile::{Builder as TemporaryFileBuilder, NamedTempFile};
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+#[cfg(target_os = "linux")]
+use std::collections::HashSet;
 
 use crate::color::{rgb_to_lab, Lab};
 use crate::config::Config;
@@ -52,6 +55,7 @@ pub struct Summary {
     pub output: PathBuf,
     pub elapsed_seconds: f64,
     pub execution_threads: usize,
+    pub renderer: RendererSummary,
     pub complexity: ComplexityProbe,
     pub hierarchical_topology: HierarchicalTopologySummary,
     pub edge_roles: EdgeSummary,
@@ -63,6 +67,12 @@ pub struct Summary {
     pub optimization: OptimizationSummary,
     pub svg: SvgSummary,
     pub quality: QualityMetrics,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct RendererSummary {
+    pub command: PathBuf,
+    pub version: String,
 }
 
 fn report_progress(config: &Config, stage: &str, started: Instant, checkpoint: &mut Instant) {
@@ -212,10 +222,15 @@ fn estimate_dimension(image: &Raster, config: &Config) -> ComplexityProbe {
             magnitude.push(energy.sqrt());
         }
     }
-    let edge_cut = crate::raster::percentile(magnitude.clone(), 0.85);
+    // A percentile threshold followed by counting values above that same
+    // percentile is almost constant by construction. A fixed perceptual
+    // Sobel response instead measures how much of the probe contains a
+    // visible transition. A response of eight is approximately a two-DeltaE
+    // step after the Sobel kernel's fourfold gain.
+    const EDGE_MAGNITUDE_THRESHOLD: f32 = 8.0;
     let edge_density = magnitude
         .iter()
-        .filter(|&&value| value >= edge_cut.max(1e-4))
+        .filter(|&&value| value >= EDGE_MAGNITUDE_THRESHOLD)
         .count() as f32
         / magnitude.len().max(1) as f32;
 
@@ -272,14 +287,10 @@ fn estimate_dimension(image: &Raster, config: &Config) -> ComplexityProbe {
     let target_pixels = 1_200_000.0 + 800_000.0 * complexity;
     let source_pixels = (image.width * image.height).max(1) as f32;
     let estimated = image.width.max(image.height) as f32 * (target_pixels / source_pixels).sqrt();
+    let (automatic_minimum, automatic_maximum) = config.automatic_dimension_bounds();
     let selected = estimated
         .round()
-        .clamp(
-            config.auto_minimum_dimension.max(64) as f32,
-            config
-                .auto_maximum_dimension
-                .max(config.auto_minimum_dimension) as f32,
-        )
+        .clamp(automatic_minimum as f32, automatic_maximum as f32)
         .min(image.width.max(image.height) as f32) as u32;
     ComplexityProbe {
         probe_width: probe.width,
@@ -295,16 +306,31 @@ fn estimate_dimension(image: &Raster, config: &Config) -> ComplexityProbe {
     }
 }
 
-fn temporary_path(output: &Path) -> Result<PathBuf> {
-    let file_name = output
-        .file_name()
-        .and_then(|value| value.to_str())
-        .ok_or_else(|| -> Error { "output path must have a UTF-8 file name".into() })?;
-    Ok(output.with_file_name(format!(".{file_name}.picvec-tmp")))
+fn output_parent(output: &Path) -> &Path {
+    output
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+}
+
+fn temporary_svg(output: &Path, purpose: &str) -> Result<NamedTempFile> {
+    let parent = output_parent(output);
+    TemporaryFileBuilder::new()
+        .prefix(&format!(".picvec-{purpose}-"))
+        .suffix(".svg")
+        .tempfile_in(parent)
+        .map_err(|error| -> Error {
+            format!(
+                "could not create a temporary SVG next to {}: {error}",
+                output.display()
+            )
+            .into()
+        })
 }
 
 #[allow(clippy::too_many_arguments)]
 fn render_svg_preview(
+    renderer: &Path,
     output: &Path,
     dimensions: (usize, usize),
     paint_layer: (
@@ -318,13 +344,10 @@ fn render_svg_preview(
 ) -> Result<Raster> {
     let (width, height) = dimensions;
     let (geometry, paints) = paint_layer;
-    let file_name = output
-        .file_name()
-        .and_then(|value| value.to_str())
-        .ok_or_else(|| -> Error { "output path must have a UTF-8 file name".into() })?;
-    let base_path = output.with_file_name(format!(".{file_name}.picvec-{suffix}.svg"));
-    if let Err(error) = write_svg(
-        &base_path,
+    let preview = temporary_svg(output, suffix)?;
+    let base_path = preview.path();
+    write_svg(
+        base_path,
         width,
         height,
         geometry,
@@ -332,22 +355,19 @@ fn render_svg_preview(
         structural,
         paint_overlap,
         final_geometry,
-    ) {
-        let _ = fs::remove_file(&base_path);
-        return Err(error);
-    }
-    let rendered = Command::new("rsvg-convert")
+    )?;
+    let rendered = Command::new(renderer)
         .arg("--width")
         .arg(width.to_string())
         .arg("--height")
         .arg(height.to_string())
-        .arg(&base_path)
+        .arg(base_path)
         .output();
-    let _ = fs::remove_file(&base_path);
     let rendered = rendered?;
     if !rendered.status.success() {
         return Err(format!(
-            "rsvg-convert failed while validating the SVG preview: {}",
+            "{} failed while validating the SVG preview: {}",
+            renderer.display(),
             String::from_utf8_lossy(&rendered.stderr)
         )
         .into());
@@ -359,12 +379,58 @@ fn render_svg_preview(
 /// Convert one raster into exactly the SVG path requested by the caller.
 /// No source copy, rendered PNG, or JSON sidecar is produced.
 pub fn vectorize(input: &Path, output: &Path, config: &Config) -> Result<Summary> {
+    config.validate()?;
+    if output
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| !value.eq_ignore_ascii_case("svg"))
+        .unwrap_or(true)
+    {
+        return Err("output path must end in .svg".into());
+    }
+    if !input.is_file() {
+        return Err(format!(
+            "input raster does not exist or is not a file: {}",
+            input.display()
+        )
+        .into());
+    }
+    let renderer = inspect_renderer(&config.rsvg_convert)?;
     let threads = execution_thread_count(config);
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(threads)
         .build()
         .map_err(|error| -> Error { format!("could not create Rayon pool: {error}").into() })?;
-    pool.install(|| vectorize_inner(input, output, config, threads))
+    pool.install(|| vectorize_inner(input, output, config, threads, renderer))
+}
+
+fn inspect_renderer(command: &Path) -> Result<RendererSummary> {
+    let output = Command::new(command)
+        .arg("--version")
+        .output()
+        .map_err(|error| -> Error {
+            format!("could not run SVG renderer {}: {error}", command.display()).into()
+        })?;
+    if !output.status.success() {
+        return Err(format!(
+            "SVG renderer {} --version failed: {}",
+            command.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )
+        .into());
+    }
+    let version = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if version.is_empty() {
+        return Err(format!(
+            "SVG renderer {} returned an empty version",
+            command.display()
+        )
+        .into());
+    }
+    Ok(RendererSummary {
+        command: command.to_path_buf(),
+        version,
+    })
 }
 
 fn physical_core_count() -> Option<usize> {
@@ -406,21 +472,19 @@ fn vectorize_inner(
     output: &Path,
     config: &Config,
     execution_threads: usize,
+    renderer: RendererSummary,
 ) -> Result<Summary> {
-    if output
-        .extension()
-        .and_then(|value| value.to_str())
-        .map(|value| !value.eq_ignore_ascii_case("svg"))
-        .unwrap_or(true)
-    {
-        return Err("output path must end in .svg".into());
-    }
-    if let Some(parent) = output.parent() {
-        fs::create_dir_all(parent)?;
-    }
+    fs::create_dir_all(output_parent(output))?;
     let started = Instant::now();
     let mut checkpoint = started;
-    let input_image = Raster::load(input)?;
+    let input_image = Raster::load(
+        input,
+        config.maximum_input_dimension,
+        config.maximum_input_pixels,
+        config.maximum_decode_bytes,
+    )?;
+    let input_width = input_image.width;
+    let input_height = input_image.height;
     let complexity = if config.auto_dimension {
         estimate_dimension(&input_image, config)
     } else {
@@ -432,6 +496,7 @@ fn vectorize_inner(
         }
     };
     let processing = input_image.resize_max(complexity.selected_dimension.max(64));
+    drop(input_image);
     save_pipeline_diagnostic("source", &processing);
     report_progress(config, "load-resize", started, &mut checkpoint);
     let mut roles = classify(&processing);
@@ -639,6 +704,7 @@ fn vectorize_inner(
     // Overlap is deliberately absent here: it is a seam underpaint, not an
     // authored Paint or structural owner.
     let paint_render = render_svg_preview(
+        &config.rsvg_convert,
         output,
         (processing.width, processing.height),
         (&geometry, &paints),
@@ -662,6 +728,7 @@ fn vectorize_inner(
     ownership.summary.structural_strokes = ownership.structural.strokes.len();
     report_progress(config, "structural-selection", started, &mut checkpoint);
     let residual_render = render_svg_preview(
+        &config.rsvg_convert,
         output,
         (processing.width, processing.height),
         (&geometry, &paints),
@@ -680,9 +747,9 @@ fn vectorize_inner(
     let ownership_summary = ownership.summary.clone();
     let paint_overlap = ownership.paint_overlap;
     let structural = ownership.structural;
-    let temporary = temporary_path(output)?;
-    let svg_report = match write_svg(
-        &temporary,
+    let temporary = temporary_svg(output, "output")?;
+    let svg_report = write_svg(
+        temporary.path(),
         processing.width,
         processing.height,
         &geometry,
@@ -690,26 +757,20 @@ fn vectorize_inner(
         &structural,
         paint_overlap,
         true,
-    ) {
-        Ok(report) => report,
-        Err(error) => {
-            let _ = fs::remove_file(&temporary);
-            return Err(error);
-        }
-    };
+    )?;
     report_progress(config, "final-svg", started, &mut checkpoint);
-    if output.exists() {
-        fs::remove_file(output)?;
-    }
-    fs::rename(&temporary, output)?;
+    temporary
+        .persist(output)
+        .map_err(|error| -> Error { error.error.into() })?;
     Ok(Summary {
-        input_width: input_image.width,
-        input_height: input_image.height,
+        input_width,
+        input_height,
         processing_width: processing.width,
         processing_height: processing.height,
         output: output.to_path_buf(),
         elapsed_seconds: started.elapsed().as_secs_f64(),
         execution_threads,
+        renderer,
         complexity,
         hierarchical_topology: topology.summary,
         edge_roles: roles.summary,
@@ -728,6 +789,7 @@ fn vectorize_inner(
 mod tests {
     use super::*;
     use std::collections::HashSet;
+    use std::sync::{Arc, Barrier};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -782,6 +844,53 @@ mod tests {
     }
 
     #[test]
+    fn complexity_probe_distinguishes_sparse_and_dense_edges() {
+        let width = 128;
+        let height = 128;
+        let flat = Raster::blank(width, height, [0.5; 3]);
+        let mut split = flat.clone();
+        for y in 0..height {
+            for x in width / 2..width {
+                split.pixels[y * width + x] = [0.9; 3];
+            }
+        }
+        let mut tiled = flat.clone();
+        for y in 0..height {
+            for x in 0..width {
+                if (x / 4 + y / 4) % 2 == 0 {
+                    tiled.pixels[y * width + x] = [0.9; 3];
+                }
+            }
+        }
+        let config = Config {
+            maximum_dimension: 128,
+            auto_minimum_dimension: 64,
+            auto_maximum_dimension: 128,
+            ..Config::default()
+        };
+        let flat_probe = estimate_dimension(&flat, &config);
+        let split_probe = estimate_dimension(&split, &config);
+        let tiled_probe = estimate_dimension(&tiled, &config);
+        assert_eq!(flat_probe.edge_density, 0.0);
+        assert!(split_probe.edge_density > flat_probe.edge_density);
+        assert!(tiled_probe.edge_density > split_probe.edge_density);
+        assert!(tiled_probe.complexity > split_probe.complexity);
+        assert!(split_probe.complexity > flat_probe.complexity);
+    }
+
+    #[test]
+    fn complexity_probe_honours_the_general_maximum_dimension() {
+        let image = Raster::blank(640, 480, [0.5; 3]);
+        let config = Config {
+            maximum_dimension: 192,
+            auto_minimum_dimension: 768,
+            auto_maximum_dimension: 1600,
+            ..Config::default()
+        };
+        assert_eq!(estimate_dimension(&image, &config).selected_dimension, 192);
+    }
+
+    #[test]
     fn conversion_writes_only_the_named_svg() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -822,6 +931,71 @@ mod tests {
         assert!(document.starts_with("<?xml"));
         assert!(document.contains("<svg"));
         assert!(!document.contains("silhouette\""));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn concurrent_conversions_to_one_output_remain_atomic() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "picvec-concurrent-contract-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let input = directory.join("input.png");
+        let output = directory.join("shared.svg");
+        let mut raster = Raster::blank(32, 24, [0.88, 0.91, 0.95]);
+        for y in 4..20 {
+            for x in 5..27 {
+                raster.pixels[y * 32 + x] = if x < 16 {
+                    [0.16, 0.24, 0.72]
+                } else {
+                    [0.78, 0.18, 0.25]
+                };
+            }
+        }
+        raster.save(&input).unwrap();
+
+        let barrier = Arc::new(Barrier::new(3));
+        let handles = (0..2)
+            .map(|_| {
+                let input = input.clone();
+                let output = output.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    vectorize(
+                        &input,
+                        &output,
+                        &Config {
+                            segmentation_min_size: 2,
+                            minimum_gradient_area: 8,
+                            rayon_threads: 1,
+                            ..Config::default()
+                        },
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        barrier.wait();
+        for handle in handles {
+            handle.join().unwrap().unwrap();
+        }
+
+        let document = fs::read_to_string(&output).unwrap();
+        assert!(document.starts_with("<?xml"));
+        assert!(document.contains("<svg"));
+        let files: HashSet<_> = fs::read_dir(&directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            files,
+            HashSet::from(["input.png".to_string(), "shared.svg".to_string()])
+        );
         fs::remove_dir_all(directory).unwrap();
     }
 }

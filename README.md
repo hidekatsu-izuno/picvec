@@ -10,7 +10,7 @@ The converter does not invoke the former Python implementation.
 ## Build
 
 ```bash
-mise exec -- cargo build --release
+mise exec -- cargo build --release --locked
 ```
 
 `rsvg-convert` (librsvg) is required at runtime for the native-resolution,
@@ -32,17 +32,31 @@ Useful controls:
 
 ```text
 --max-dimension <PX>
+--max-input-dimension <PX>
+--max-input-megapixels <MP>
+--max-decode-mib <MIB>
 --smoothing-radius <PX>
 --segmentation-min-size <AREA>
 --quantization-dark-delta-e <DE>
 --quantization-light-delta-e <DE>
 --gradient-merge-error <DE>
 --threads <N>                 # 0: detected physical cores
+--rsvg-convert <PATH>
 --verbose
 ```
 
+Input dimensions and total area are checked from the image header before
+decoding (32,768 pixels per axis and 32 megapixels by default), and decoder
+allocations have a 512 MiB best-effort limit. The verbose report records the
+exact `rsvg-convert --version` output.
+
 `--verbose` prints the in-memory timing and complexity report to stderr for
 development; it still writes no sidecar files.
+
+The published Rust crate contains only the converter source and its legal
+documentation; sample images and the evaluation-only Real-ESRGAN model are
+kept outside the crate. See `THIRD_PARTY_NOTICES.md` and `sample/README.md`
+before redistributing those repository assets.
 
 ## x4 evaluation
 

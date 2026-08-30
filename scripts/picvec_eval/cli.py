@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.metadata
 import json
 from pathlib import Path
+import platform
 import shutil
 import subprocess
 import tempfile
@@ -30,6 +32,59 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _distribution_version(name: str) -> str:
+    try:
+        return importlib.metadata.version(name)
+    except importlib.metadata.PackageNotFoundError:
+        return "unavailable"
+
+
+def _runtime_versions() -> dict[str, Any]:
+    return {
+        "python": platform.python_version(),
+        "packages": {
+            name: _distribution_version(name)
+            for name in ("numpy", "Pillow", "scipy", "scikit-image")
+        },
+    }
+
+
+def _command_version(executable: str) -> str:
+    try:
+        completed = subprocess.run(
+            [executable, "--version"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return "unavailable"
+    value = completed.stdout.strip() or completed.stderr.strip()
+    return value if completed.returncode == 0 and value else "unavailable"
+
+
+def _write_text_atomic(path: Path, value: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            newline="\n",
+            dir=path.parent,
+            prefix=f".{path.stem}-",
+            suffix=path.suffix,
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            handle.write(value)
+        temporary.replace(path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def _executable(value: str, purpose: str) -> str:
@@ -418,8 +473,8 @@ def main(argv: list[str] | None = None) -> int:
     native_render_command = _render_svg(
         args.svg,
         native_rendered_path,
-        source.shape[1],
-        source.shape[0],
+        original_source.shape[1],
+        original_source.shape[0],
         executable=args.rsvg_convert,
         background=args.background,
         timeout=max(1.0, args.timeout),
@@ -471,7 +526,7 @@ def main(argv: list[str] | None = None) -> int:
         geometry_wobble=geometry_wobble,
         anchor_roughness=anchor_roughness,
         open_stroke_roughness=open_stroke_roughness,
-        pixel_reference=source,
+        pixel_reference=original_source,
         native_rendered=native_rendered,
     )
     report: dict[str, Any] = {
@@ -482,6 +537,10 @@ def main(argv: list[str] | None = None) -> int:
         "evaluation_source": str(processing_source_path),
         "evaluation_source_sha256": _sha256(processing_source_path),
         "source_was_resized_to_svg_canvas": source_was_resized,
+        "original_source_width": int(original_source.shape[1]),
+        "original_source_height": int(original_source.shape[0]),
+        "processing_source_width": int(source.shape[1]),
+        "processing_source_height": int(source.shape[0]),
         "svg_sha256": _sha256(args.svg),
         "reference_x4": str(reference_path),
         "reference_x4_sha256": _sha256(reference_path),
@@ -523,14 +582,17 @@ def main(argv: list[str] | None = None) -> int:
         },
         "renderer": {
             "background": args.background,
+            "executable": render_command[0],
+            "version": _command_version(render_command[0]),
             "command": render_command,
             "native_command": native_render_command,
         },
+        "runtime": _runtime_versions(),
         "metrics": metrics_report,
     }
     report_path = output_directory / "report.json"
     serialized = json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
-    report_path.write_text(serialized, encoding="utf-8")
+    _write_text_atomic(report_path, serialized)
     if args.json:
         print(serialized, end="")
     else:

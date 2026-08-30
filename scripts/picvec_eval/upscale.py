@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import hashlib
+import importlib.metadata
 import json
 from pathlib import Path
 import shutil
@@ -94,9 +95,7 @@ class CachedImageUpscaler:
     def cache_path(self, image: FloatImage) -> Path:
         source = normalize_image(image)
         digest = hashlib.sha256()
-        # Keep the SVGDeck namespace byte-for-byte compatible so an existing
-        # cache can be reused by passing its directory explicitly.
-        digest.update(b"raster2svg-upscaler-cache-v1\0")
+        digest.update(b"picvec-realesrgan-cache-v2\0")
         digest.update(self.namespace.encode("utf-8"))
         digest.update(np.asarray(source.shape, dtype=np.int64).tobytes())
         digest.update(np.ascontiguousarray(source, dtype=np.float32).tobytes())
@@ -158,6 +157,38 @@ class RealESRGANUpscaler:
         except ImportError:
             return self.device or "unavailable"
 
+    def runtime_fingerprint(self) -> dict[str, Any]:
+        """Describe libraries and accelerator state that can alter inference."""
+
+        try:
+            spandrel_version = importlib.metadata.version("spandrel")
+        except importlib.metadata.PackageNotFoundError:
+            spandrel_version = "unavailable"
+        result: dict[str, Any] = {
+            "spandrel": spandrel_version,
+            "device": self.runtime_device(),
+        }
+        try:
+            import torch
+        except ImportError:
+            result["torch"] = "unavailable"
+            return result
+        result.update(
+            {
+                "torch": str(torch.__version__),
+                "cuda_runtime": str(torch.version.cuda or "unavailable"),
+                "cudnn": (
+                    str(torch.backends.cudnn.version())
+                    if torch.backends.cudnn.is_available()
+                    else "unavailable"
+                ),
+            }
+        )
+        device = result["device"]
+        if isinstance(device, str) and device.startswith("cuda"):
+            result["accelerator"] = torch.cuda.get_device_name(torch.device(device))
+        return result
+
     def cache_namespace(self) -> str:
         """Fingerprint model bytes and every inference-affecting setting."""
 
@@ -170,7 +201,7 @@ class RealESRGANUpscaler:
                 "tile_size": int(self.tile_size),
                 "tile_padding": int(self.tile_padding),
                 "use_half": bool(self.use_half),
-                "device": self.runtime_device(),
+                "runtime": self.runtime_fingerprint(),
                 "scale": self.scale,
             },
             sort_keys=True,
@@ -287,6 +318,7 @@ def generate_realesrgan_x4(
         "model_path": str(model_path),
         "model_sha256": _file_sha256(model_path),
         "device": inner.runtime_device(),
+        "runtime": inner.runtime_fingerprint(),
         "tile_size": inner.tile_size,
         "tile_padding": inner.tile_padding,
         "half_requested": inner.use_half,
