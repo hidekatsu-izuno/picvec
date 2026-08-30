@@ -1,8 +1,8 @@
 //! Perceptual, structure-aware raster-to-SVG vectorisation.
 //!
-//! The implementation is native Rust.  It does not shell out to the former
-//! Python vectorizer; librsvg is used only for in-memory native-resolution
-//! ownership validation, and no rendered sidecar is written.
+//! The implementation is native Rust. It does not shell out to the former
+//! Python vectorizer or an external SVG renderer. Preview rendering for
+//! ownership validation is performed in memory by the embedded `resvg` crate.
 
 pub mod color;
 pub mod config;
@@ -23,7 +23,7 @@ mod svml;
 mod union_find;
 
 pub use config::Config;
-pub use pipeline::{vectorize, RendererSummary, Summary};
+pub use pipeline::{vectorize, Summary};
 
 pub type Error = Box<dyn std::error::Error + Send + Sync + 'static>;
 pub type Result<T> = std::result::Result<T, Error>;

@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use serde::{Deserialize, Serialize};
 
 /// Reproducible controls corresponding to the current raster2svg defaults.
@@ -44,8 +42,6 @@ pub struct Config {
     pub paint_primary_small_min_explained_variance: f32,
     /// Rayon worker count. Zero selects physical cores when discoverable.
     pub rayon_threads: usize,
-    /// SVG renderer used for the two in-memory fidelity checks.
-    pub rsvg_convert: PathBuf,
     pub retain_diagnostics: bool,
 }
 
@@ -80,7 +76,6 @@ impl Default for Config {
             paint_primary_min_explained_variance: 0.06,
             paint_primary_small_min_explained_variance: 0.16,
             rayon_threads: 0,
-            rsvg_convert: PathBuf::from("rsvg-convert"),
             retain_diagnostics: false,
         }
     }
@@ -205,10 +200,6 @@ impl Config {
             self.paint_primary_small_min_explained_variance.is_finite()
                 && (0.0..=1.0).contains(&self.paint_primary_small_min_explained_variance),
             "paint_primary_small_min_explained_variance must be finite and between 0 and 1",
-        )?;
-        require(
-            !self.rsvg_convert.as_os_str().is_empty(),
-            "rsvg_convert must not be empty",
         )?;
         Ok(())
     }

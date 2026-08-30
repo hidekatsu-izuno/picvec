@@ -515,8 +515,7 @@ fn append_paint_elements(
 /// solid, axial linear, and elliptical radial forms with at most five stops,
 /// which stay within the Office object import subset.
 #[allow(clippy::too_many_arguments)]
-pub fn write(
-    output: &Path,
+pub(crate) fn serialize(
     width: usize,
     height: usize,
     geometries: &[RegionGeometry],
@@ -524,7 +523,7 @@ pub fn write(
     structural: &StructuralInk,
     paint_overlap: f32,
     final_geometry: bool,
-) -> Result<SvgSummary> {
+) -> (String, SvgSummary) {
     let mut gradient_ids = HashMap::<String, String>::new();
     let mut definitions = String::new();
     let mut summary = SvgSummary::default();
@@ -680,8 +679,31 @@ pub fn write(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?><svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{}\" height=\"{}\" viewBox=\"0 0 {} {}\"><defs>{}</defs>{}</svg>\n",
         width, height, width, height, definitions, body
     );
-    fs::write(output, document.as_bytes())?;
     summary.bytes = document.len();
+    (document, summary)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn write(
+    output: &Path,
+    width: usize,
+    height: usize,
+    geometries: &[RegionGeometry],
+    paints: &[Paint],
+    structural: &StructuralInk,
+    paint_overlap: f32,
+    final_geometry: bool,
+) -> Result<SvgSummary> {
+    let (document, summary) = serialize(
+        width,
+        height,
+        geometries,
+        paints,
+        structural,
+        paint_overlap,
+        final_geometry,
+    );
+    fs::write(output, document.as_bytes())?;
     Ok(summary)
 }
 

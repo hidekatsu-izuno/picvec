@@ -51,9 +51,6 @@ struct Arguments {
     /// Rayon workers; zero selects the detected physical core count.
     #[arg(long, default_value_t = 0)]
     threads: usize,
-    /// Path or command name for librsvg's renderer.
-    #[arg(long, default_value = "rsvg-convert")]
-    rsvg_convert: PathBuf,
     /// Print an in-memory diagnostic report to stderr; no sidecar is written.
     #[arg(long)]
     verbose: bool,
@@ -89,7 +86,6 @@ fn run() -> picvec::Result<()> {
         paint_primary_min_explained_variance: arguments.paint_primary_threshold,
         paint_primary_small_min_explained_variance: arguments.paint_primary_small_threshold,
         rayon_threads: arguments.threads,
-        rsvg_convert: arguments.rsvg_convert,
         retain_diagnostics: arguments.verbose,
         ..defaults
     };

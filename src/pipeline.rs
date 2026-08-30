@@ -1,6 +1,5 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::Instant;
 
 use serde::Serialize;
@@ -28,7 +27,7 @@ use crate::segment::{
     Segmentation, SegmentationSummary,
 };
 use crate::structural::{analyse as analyse_structural, StructuralInk, StructuralSummary};
-use crate::svg::{write as write_svg, SvgSummary};
+use crate::svg::{serialize as serialize_svg, write as write_svg, SvgSummary};
 use crate::union_find::UnionFind;
 use crate::{Error, Result};
 
@@ -55,7 +54,6 @@ pub struct Summary {
     pub output: PathBuf,
     pub elapsed_seconds: f64,
     pub execution_threads: usize,
-    pub renderer: RendererSummary,
     pub complexity: ComplexityProbe,
     pub hierarchical_topology: HierarchicalTopologySummary,
     pub edge_roles: EdgeSummary,
@@ -67,12 +65,6 @@ pub struct Summary {
     pub optimization: OptimizationSummary,
     pub svg: SvgSummary,
     pub quality: QualityMetrics,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct RendererSummary {
-    pub command: PathBuf,
-    pub version: String,
 }
 
 fn report_progress(config: &Config, stage: &str, started: Instant, checkpoint: &mut Instant) {
@@ -330,24 +322,18 @@ fn temporary_svg(output: &Path, purpose: &str) -> Result<NamedTempFile> {
 
 #[allow(clippy::too_many_arguments)]
 fn render_svg_preview(
-    renderer: &Path,
-    output: &Path,
     dimensions: (usize, usize),
     paint_layer: (
         &[crate::geometry::RegionGeometry],
         &[crate::gradient::Paint],
     ),
     structural: &StructuralInk,
-    suffix: &str,
     paint_overlap: f32,
     final_geometry: bool,
 ) -> Result<Raster> {
     let (width, height) = dimensions;
     let (geometry, paints) = paint_layer;
-    let preview = temporary_svg(output, suffix)?;
-    let base_path = preview.path();
-    write_svg(
-        base_path,
+    let (document, _) = serialize_svg(
         width,
         height,
         geometry,
@@ -355,25 +341,36 @@ fn render_svg_preview(
         structural,
         paint_overlap,
         final_geometry,
-    )?;
-    let rendered = Command::new(renderer)
-        .arg("--width")
-        .arg(width.to_string())
-        .arg("--height")
-        .arg(height.to_string())
-        .arg(base_path)
-        .output();
-    let rendered = rendered?;
-    if !rendered.status.success() {
-        return Err(format!(
-            "{} failed while validating the SVG preview: {}",
-            renderer.display(),
-            String::from_utf8_lossy(&rendered.stderr)
-        )
-        .into());
-    }
-    let decoded = image::load_from_memory(&rendered.stdout)?;
-    Ok(Raster::from_dynamic(&decoded))
+    );
+    let tree = resvg::usvg::Tree::from_data(document.as_bytes(), &resvg::usvg::Options::default())
+        .map_err(|error| -> Error {
+            format!("could not parse the generated SVG preview: {error}").into()
+        })?;
+    let width = u32::try_from(width)
+        .map_err(|_| -> Error { "SVG preview width exceeds the renderer limit".into() })?;
+    let height = u32::try_from(height)
+        .map_err(|_| -> Error { "SVG preview height exceeds the renderer limit".into() })?;
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(width, height)
+        .ok_or_else(|| -> Error { "could not allocate the SVG preview raster".into() })?;
+    resvg::render(
+        &tree,
+        resvg::tiny_skia::Transform::identity(),
+        &mut pixmap.as_mut(),
+    );
+    let pixels = pixmap
+        .pixels()
+        .iter()
+        .copied()
+        .map(|pixel| {
+            let inverse_alpha = (255 - pixel.alpha()) as f32 / 255.0;
+            [
+                pixel.red() as f32 / 255.0 + inverse_alpha,
+                pixel.green() as f32 / 255.0 + inverse_alpha,
+                pixel.blue() as f32 / 255.0 + inverse_alpha,
+            ]
+        })
+        .collect();
+    Ok(Raster::new(width as usize, height as usize, pixels))
 }
 
 /// Convert one raster into exactly the SVG path requested by the caller.
@@ -395,42 +392,12 @@ pub fn vectorize(input: &Path, output: &Path, config: &Config) -> Result<Summary
         )
         .into());
     }
-    let renderer = inspect_renderer(&config.rsvg_convert)?;
     let threads = execution_thread_count(config);
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(threads)
         .build()
         .map_err(|error| -> Error { format!("could not create Rayon pool: {error}").into() })?;
-    pool.install(|| vectorize_inner(input, output, config, threads, renderer))
-}
-
-fn inspect_renderer(command: &Path) -> Result<RendererSummary> {
-    let output = Command::new(command)
-        .arg("--version")
-        .output()
-        .map_err(|error| -> Error {
-            format!("could not run SVG renderer {}: {error}", command.display()).into()
-        })?;
-    if !output.status.success() {
-        return Err(format!(
-            "SVG renderer {} --version failed: {}",
-            command.display(),
-            String::from_utf8_lossy(&output.stderr).trim()
-        )
-        .into());
-    }
-    let version = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    if version.is_empty() {
-        return Err(format!(
-            "SVG renderer {} returned an empty version",
-            command.display()
-        )
-        .into());
-    }
-    Ok(RendererSummary {
-        command: command.to_path_buf(),
-        version,
-    })
+    pool.install(|| vectorize_inner(input, output, config, threads))
 }
 
 fn physical_core_count() -> Option<usize> {
@@ -472,7 +439,6 @@ fn vectorize_inner(
     output: &Path,
     config: &Config,
     execution_threads: usize,
-    renderer: RendererSummary,
 ) -> Result<Summary> {
     fs::create_dir_all(output_parent(output))?;
     let started = Instant::now();
@@ -704,12 +670,9 @@ fn vectorize_inner(
     // Overlap is deliberately absent here: it is a seam underpaint, not an
     // authored Paint or structural owner.
     let paint_render = render_svg_preview(
-        &config.rsvg_convert,
-        output,
         (processing.width, processing.height),
         (&geometry, &paints),
         &StructuralInk::empty(),
-        "base",
         0.0,
         false,
     )?;
@@ -728,12 +691,9 @@ fn vectorize_inner(
     ownership.summary.structural_strokes = ownership.structural.strokes.len();
     report_progress(config, "structural-selection", started, &mut checkpoint);
     let residual_render = render_svg_preview(
-        &config.rsvg_convert,
-        output,
         (processing.width, processing.height),
         (&geometry, &paints),
         &ownership.structural,
-        "residual-ink",
         ownership.paint_overlap,
         true,
     )?;
@@ -770,7 +730,6 @@ fn vectorize_inner(
         output: output.to_path_buf(),
         elapsed_seconds: started.elapsed().as_secs_f64(),
         execution_threads,
-        renderer,
         complexity,
         hierarchical_topology: topology.summary,
         edge_roles: roles.summary,

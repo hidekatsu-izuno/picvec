@@ -13,7 +13,7 @@ else
     exit 1
 fi
 if ! command -v rsvg-convert >/dev/null 2>&1; then
-    echo "rsvg-convert is required" >&2
+    echo "rsvg-convert is required by this optional comparison generator (not by picvec)" >&2
     exit 1
 fi
 

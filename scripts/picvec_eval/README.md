@@ -15,7 +15,9 @@ The evaluator is deliberately separate from the Rust vectorizer:
 
 ## Requirements
 
-Install `rsvg-convert`. Real-ESRGAN can run through either of two independent
+Install `rsvg-convert` for this optional evaluator's SVG rasterization step.
+The Rust converter itself embeds `resvg` and does not require or invoke this
+executable. Real-ESRGAN can run through either of two independent
 evaluation-only backends:
 
 - `realesrgan-ncnn-vulkan` with its `realesrgan-x4plus-anime` model; or
