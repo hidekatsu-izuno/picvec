@@ -5,16 +5,17 @@ use std::time::Instant;
 
 use serde::Serialize;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::color::{rgb_to_lab, Lab};
 use crate::config::Config;
 use crate::edge::{classify, dilate_square, perceptual_smooth, EdgeSummary};
-use crate::geometry::{build as build_geometry, GeometrySummary};
+use crate::geometry::{build_with_topology as build_geometry, GeometrySummary};
 use crate::gradient::{
     fit_all, merge_partition, merge_source_supported_paints, refresh_summary, GradientSummary,
     Paint,
 };
+use crate::hierarchy::{HierarchicalTopology, HierarchicalTopologySummary};
 use crate::metrics::QualityMetrics;
 use crate::optimize::{summarize as optimization_summary, OptimizationSummary};
 use crate::ownership::{resolve as resolve_boundary_ownership, BoundaryOwnershipSummary};
@@ -50,7 +51,9 @@ pub struct Summary {
     pub processing_height: usize,
     pub output: PathBuf,
     pub elapsed_seconds: f64,
+    pub execution_threads: usize,
     pub complexity: ComplexityProbe,
+    pub hierarchical_topology: HierarchicalTopologySummary,
     pub edge_roles: EdgeSummary,
     pub segmentation: SegmentationSummary,
     pub structural: StructuralSummary,
@@ -356,6 +359,54 @@ fn render_svg_preview(
 /// Convert one raster into exactly the SVG path requested by the caller.
 /// No source copy, rendered PNG, or JSON sidecar is produced.
 pub fn vectorize(input: &Path, output: &Path, config: &Config) -> Result<Summary> {
+    let threads = execution_thread_count(config);
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build()
+        .map_err(|error| -> Error { format!("could not create Rayon pool: {error}").into() })?;
+    pool.install(|| vectorize_inner(input, output, config, threads))
+}
+
+fn physical_core_count() -> Option<usize> {
+    #[cfg(target_os = "linux")]
+    {
+        let mut cores = HashSet::<(String, String)>::new();
+        for entry in fs::read_dir("/sys/devices/system/cpu").ok()? {
+            let entry = entry.ok()?;
+            let name = entry.file_name();
+            let name = name.to_str()?;
+            if !name.strip_prefix("cpu").is_some_and(|suffix| {
+                !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
+            }) {
+                continue;
+            }
+            let topology = entry.path().join("topology");
+            let package = fs::read_to_string(topology.join("physical_package_id")).ok()?;
+            let core = fs::read_to_string(topology.join("core_id")).ok()?;
+            cores.insert((package.trim().to_owned(), core.trim().to_owned()));
+        }
+        (!cores.is_empty()).then_some(cores.len())
+    }
+    #[cfg(not(target_os = "linux"))]
+    None
+}
+
+fn execution_thread_count(config: &Config) -> usize {
+    let logical = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1);
+    if config.rayon_threads > 0 {
+        return config.rayon_threads.min(logical).max(1);
+    }
+    physical_core_count().unwrap_or(logical).min(logical).max(1)
+}
+
+fn vectorize_inner(
+    input: &Path,
+    output: &Path,
+    config: &Config,
+    execution_threads: usize,
+) -> Result<Summary> {
     if output
         .extension()
         .and_then(|value| value.to_str())
@@ -542,10 +593,12 @@ pub fn vectorize(input: &Path, output: &Path, config: &Config) -> Result<Summary
         processing.height,
     );
     report_progress(config, "adaptive-paint-patches", started, &mut checkpoint);
+    let mut topology = HierarchicalTopology::build(&segmentation);
     let (mut paints, mut gradient_report) = fit_all(
         &paint_reference,
         &processing,
         &segmentation,
+        &topology,
         &strong_branches,
         config,
     );
@@ -571,8 +624,9 @@ pub fn vectorize(input: &Path, output: &Path, config: &Config) -> Result<Summary
     gradient_report.source_supported_paint_merges = supported_paint_merges.merges;
     gradient_report.source_supported_boundary_edges_removed =
         supported_paint_merges.boundary_edges_removed;
+    topology = HierarchicalTopology::build(&segmentation);
     report_progress(config, "exact-paint-merge", started, &mut checkpoint);
-    let (geometry, geometry_report) = build_geometry(&segmentation);
+    let (geometry, geometry_report) = build_geometry(&segmentation, &topology);
     report_progress(config, "shared-geometry", started, &mut checkpoint);
     // Resolve source ownership against the exact shared Paint partition.
     // Overlap is deliberately absent here: it is a seam underpaint, not an
@@ -648,7 +702,9 @@ pub fn vectorize(input: &Path, output: &Path, config: &Config) -> Result<Summary
         processing_height: processing.height,
         output: output.to_path_buf(),
         elapsed_seconds: started.elapsed().as_secs_f64(),
+        execution_threads,
         complexity,
+        hierarchical_topology: topology.summary,
         edge_roles: roles.summary,
         segmentation: segmentation.summary,
         structural: structural.summary,

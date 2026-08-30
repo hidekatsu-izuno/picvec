@@ -12,6 +12,7 @@ use crate::edge::{
     dilate_square, lab_pixels, preprocess_lab_pixels, preprocess_lab_values, EdgeRoles,
 };
 use crate::geometry::Point;
+use crate::hierarchy::HierarchicalTopology;
 use crate::raster::{percentile, Raster};
 use crate::segment::{replace_merged_labels, replace_source_supported_paint_labels, Segmentation};
 use crate::union_find::UnionFind;
@@ -1397,6 +1398,7 @@ fn fit_region(
     paint_indices: &[usize],
     canonical_solid: [f32; 3],
     directional_only: bool,
+    sample_budget: usize,
     config: &Config,
 ) -> (Paint, f32) {
     let sample_source = if paint_indices.is_empty() {
@@ -1404,7 +1406,10 @@ fn fit_region(
     } else {
         paint_indices
     };
-    let samples = sampled_indices(sample_source, 8192);
+    // A bounded, row-major stratified sample acts as the finest Paint leaf
+    // budget. Larger flat interiors therefore do not dominate the fit, while
+    // edge-rich and small regions still retain every available observation.
+    let samples = sampled_indices(sample_source, sample_budget);
     fit_region_samples(
         label,
         source,
@@ -4676,6 +4681,7 @@ pub fn fit_all(
     source: &Raster,
     boundary_source: &Raster,
     segmentation: &Segmentation,
+    topology: &HierarchicalTopology,
     strong_branches: &crate::ridge::StrongRidgeBranches,
     config: &Config,
 ) -> (Vec<Paint>, GradientSummary) {
@@ -4746,6 +4752,7 @@ pub fn fit_all(
                 selected_paint_indices,
                 canonical_solid,
                 strong_dark,
+                topology.paint_sample_budget(label, 8192),
                 config,
             )
         })

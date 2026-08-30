@@ -24,6 +24,8 @@ pub struct Config {
     pub minimum_gradient_area: u32,
     pub shared_boundary_overlap: f32,
     pub maximum_gradient_stops: usize,
+    /// Rayon worker count. Zero selects physical cores when discoverable.
+    pub rayon_threads: usize,
     pub retain_diagnostics: bool,
 }
 
@@ -50,6 +52,7 @@ impl Default for Config {
             minimum_gradient_area: 64,
             shared_boundary_overlap: 0.2,
             maximum_gradient_stops: 5,
+            rayon_threads: 0,
             retain_diagnostics: false,
         }
     }

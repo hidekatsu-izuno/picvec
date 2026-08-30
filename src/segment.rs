@@ -7,6 +7,7 @@ use crate::color::{
 };
 use crate::config::Config;
 use crate::edge::{lab_pixels, EdgeRoles};
+use crate::hierarchy::uniform_cells;
 use crate::raster::{percentile, Raster};
 use crate::union_find::UnionFind;
 
@@ -337,7 +338,8 @@ fn build_palette(lab: &[Lab], config: &Config) -> (Vec<u32>, Vec<Lab>, usize) {
     )
 }
 
-fn compact_connected(values: &[u32], width: usize, height: usize) -> (Vec<u32>, usize) {
+#[cfg(test)]
+fn compact_connected_dense(values: &[u32], width: usize, height: usize) -> (Vec<u32>, usize) {
     let mut union = UnionFind::new(values.len());
     for y in 0..height {
         for x in 0..width {
@@ -378,6 +380,66 @@ fn compact_connected(values: &[u32], width: usize, height: usize) -> (Vec<u32>, 
         .into_iter()
         .map(|root| root_labels[&root])
         .collect();
+    (labels, ordered.len())
+}
+
+fn compact_connected(values: &[u32], width: usize, height: usize) -> (Vec<u32>, usize) {
+    let (cells, _) = uniform_cells(values, width, height);
+    let mut cell_at = vec![usize::MAX; values.len()];
+    for (cell_id, cell) in cells.iter().enumerate() {
+        for y in cell.y..cell.y + cell.height {
+            cell_at[y * width + cell.x..y * width + cell.x + cell.width].fill(cell_id);
+        }
+    }
+    let mut union = UnionFind::new(cells.len());
+    for (cell_id, cell) in cells.iter().enumerate() {
+        let right = cell.x + cell.width;
+        if right < width {
+            for y in cell.y..cell.y + cell.height {
+                let neighbour = cell_at[y * width + right];
+                if neighbour != cell_id && cells[neighbour].label == cell.label {
+                    union.union(cell_id, neighbour);
+                }
+            }
+        }
+        let bottom = cell.y + cell.height;
+        if bottom < height {
+            for x in cell.x..cell.x + cell.width {
+                let neighbour = cell_at[bottom * width + x];
+                if neighbour != cell_id && cells[neighbour].label == cell.label {
+                    union.union(cell_id, neighbour);
+                }
+            }
+        }
+    }
+    let mut cell_roots = Vec::with_capacity(cells.len());
+    let mut components = HashMap::<usize, (u32, usize)>::new();
+    for (cell_id, cell) in cells.iter().enumerate() {
+        let root = union.find(cell_id);
+        cell_roots.push(root);
+        let first = cell.y * width + cell.x;
+        components
+            .entry(root)
+            .and_modify(|component| component.1 = component.1.min(first))
+            .or_insert((cell.label, first));
+    }
+    let mut ordered: Vec<(usize, u32, usize)> = components
+        .into_iter()
+        .map(|(root, (palette, first))| (root, palette, first))
+        .collect();
+    ordered.sort_by_key(|&(_, palette, first)| (palette, first));
+    let root_labels: HashMap<usize, u32> = ordered
+        .iter()
+        .enumerate()
+        .map(|(label, &(root, _, _))| (root, label as u32))
+        .collect();
+    let mut labels = vec![0_u32; values.len()];
+    for (cell, root) in cells.iter().zip(cell_roots) {
+        let label = root_labels[&root];
+        for y in cell.y..cell.y + cell.height {
+            labels[y * width + cell.x..y * width + cell.x + cell.width].fill(label);
+        }
+    }
     (labels, ordered.len())
 }
 
@@ -3336,6 +3398,24 @@ pub fn region_mean_raster(image: &Raster, segmentation: &Segmentation) -> Raster
 mod tests {
     use super::*;
     use crate::edge::classify;
+
+    #[test]
+    fn hierarchical_connected_components_match_dense_label_order() {
+        for mut code in 0_u32..3_u32.pow(9) {
+            let values: Vec<u32> = (0..9)
+                .map(|_| {
+                    let value = code % 3;
+                    code /= 3;
+                    value
+                })
+                .collect();
+            assert_eq!(
+                compact_connected(&values, 3, 3),
+                compact_connected_dense(&values, 3, 3),
+                "values={values:?}",
+            );
+        }
+    }
 
     #[test]
     fn boundary_keeps_two_faces_separate() {

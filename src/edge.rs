@@ -3168,44 +3168,82 @@ pub fn perceptual_smooth(image: &Raster, config: &Config) -> Raster {
     let sigma = config.smoothing_spatial_sigma.max(0.1);
     let mut numerator = vec![[0.0_f32; 3]; image.pixels.len()];
     let mut denominator = vec![0.0_f32; image.pixels.len()];
+    // The bilateral range term is symmetric. Cache only one orientation of
+    // every offset and reuse it for the opposite orientation. This preserves
+    // the original dy/dx-major accumulation order while halving the costly
+    // CIEDE2000 and exponential batches.
+    let canonical_offsets: Vec<(isize, isize)> = (0..=radius)
+        .flat_map(|dy| {
+            (-radius..=radius)
+                .filter(move |&dx| dy > 0 || dx > 0)
+                .map(move |dx| (dx, dy))
+        })
+        .collect();
+    let offset_span = (2 * radius + 1) as usize;
+    let mut offset_slots = vec![usize::MAX; offset_span * offset_span];
+    for (slot, &(dx, dy)) in canonical_offsets.iter().enumerate() {
+        offset_slots[(dy + radius) as usize * offset_span + (dx + radius) as usize] = slot;
+    }
+    let mut cached_range_weights = Vec::<Vec<f32>>::with_capacity(canonical_offsets.len());
+    for &(dx, dy) in &canonical_offsets {
+        let samples: Vec<Lab> = (0..image.pixels.len())
+            .into_par_iter()
+            .map(|index| {
+                let x = (index % image.width) as isize;
+                let y = (index / image.width) as isize;
+                let px = (x + dx).clamp(0, image.width as isize - 1) as usize;
+                let py = (y + dy).clamp(0, image.height as isize - 1) as usize;
+                lab[py * image.width + px]
+            })
+            .collect();
+        let distances = delta_e2000_pairs(&lab, &samples);
+        let mut weights: Vec<f32> = distances
+            .into_par_iter()
+            .enumerate()
+            .map(|(index, distance)| {
+                let centre = lab[index];
+                let sample = samples[index];
+                let threshold = adaptive_tolerance(0.5 * (centre.l + sample.l), config).max(1e-3);
+                let ratio = distance / threshold;
+                -0.5_f32 * (ratio * ratio)
+            })
+            .collect();
+        crate::svml::exp_f32_in_place(&mut weights);
+        cached_range_weights.push(weights);
+    }
     // Python advances one complete shifted image at a time. Besides enabling
     // NumPy's dispatched contiguous `exp`, this fixes the accumulation order
     // for every output pixel. Keep that same dy/dx-major traversal here.
     for dy in -radius..=radius {
         for dx in -radius..=radius {
-            let samples: Vec<Lab> = (0..image.pixels.len())
-                .into_par_iter()
-                .map(|index| {
-                    let x = (index % image.width) as isize;
-                    let y = (index / image.width) as isize;
-                    let px = (x + dx).clamp(0, image.width as isize - 1) as usize;
-                    let py = (y + dy).clamp(0, image.height as isize - 1) as usize;
-                    lab[py * image.width + px]
-                })
-                .collect();
-            let distances = delta_e2000_pairs(&lab, &samples);
-            let mut weights: Vec<f32> = distances
-                .into_par_iter()
-                .enumerate()
-                .map(|(index, distance)| {
-                    let centre = lab[index];
-                    let sample = samples[index];
-                    let threshold =
-                        adaptive_tolerance(0.5 * (centre.l + sample.l), config).max(1e-3);
-                    let ratio = distance / threshold;
-                    -0.5_f32 * (ratio * ratio)
-                })
-                .collect();
-            crate::svml::exp_f32_in_place(&mut weights);
             let spatial =
                 crate::svml::exp_f64(-0.5_f64 * (dx * dx + dy * dy) as f64 / (sigma * sigma));
             numerator
                 .par_iter_mut()
                 .zip(denominator.par_iter_mut())
-                .zip(weights.into_par_iter())
                 .enumerate()
-                .for_each(|(index, ((sum, weight_sum), range))| {
-                    let sample = samples[index];
+                .for_each(|(index, (sum, weight_sum))| {
+                    let x = (index % image.width) as isize;
+                    let y = (index / image.width) as isize;
+                    let px = (x + dx).clamp(0, image.width as isize - 1);
+                    let py = (y + dy).clamp(0, image.height as isize - 1);
+                    let sample_index = py as usize * image.width + px as usize;
+                    let sample = lab[sample_index];
+                    let actual_dx = px - x;
+                    let actual_dy = py - y;
+                    let range = if actual_dx == 0 && actual_dy == 0 {
+                        1.0
+                    } else if actual_dy > 0 || (actual_dy == 0 && actual_dx > 0) {
+                        let slot = offset_slots[(actual_dy + radius) as usize * offset_span
+                            + (actual_dx + radius) as usize];
+                        cached_range_weights[slot][index]
+                    } else {
+                        let canonical_dx = -actual_dx;
+                        let canonical_dy = -actual_dy;
+                        let slot = offset_slots[(canonical_dy + radius) as usize * offset_span
+                            + (canonical_dx + radius) as usize];
+                        cached_range_weights[slot][sample_index]
+                    };
                     let weight = (spatial * range as f64) as f32;
                     sum[0] += sample.l * weight;
                     sum[1] += sample.a * weight;

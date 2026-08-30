@@ -4,6 +4,7 @@ use rayon::prelude::*;
 use serde::Serialize;
 
 use crate::color::Lab;
+use crate::hierarchy::HierarchicalTopology;
 use crate::segment::Segmentation;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -938,6 +939,15 @@ struct RegularizedStrand {
 }
 
 #[derive(Clone, Debug)]
+struct FittedBaseStrand {
+    strand: Vec<u64>,
+    raw: Vec<Point>,
+    regularized: RegularizedStrand,
+    polygon: Vec<usize>,
+    curves: Vec<TaggedCurve>,
+}
+
+#[derive(Clone, Debug)]
 struct ExcursionCandidate {
     excess: f32,
     area: f32,
@@ -1322,9 +1332,10 @@ fn regularize_short_corner_excursions(
 fn boundary_topology(
     segmentation: &Segmentation,
     stride: usize,
+    topology: Option<&HierarchicalTopology>,
 ) -> (VertexTangents, VertexPositions, Vec<Vec<u64>>, HashSet<u64>) {
     let mut remaining = BTreeSet::<EdgeKey>::new();
-    for edges in pair_boundary_edges(segmentation, stride).into_values() {
+    for edges in pair_boundary_edges(segmentation, stride, topology).into_values() {
         remaining.extend(edges);
     }
     let mut adjacency = HashMap::<u64, BTreeSet<u64>>::new();
@@ -1337,34 +1348,7 @@ fn boundary_topology(
     // that face on its right.  The exact insertion order is immaterial to
     // `_trace_region_loops`, which always starts from the lexicographically
     // smallest remaining directed edge.
-    let mut directed = vec![Vec::<GridEdge>::new(); segmentation.regions.len()];
-    for y in 0..segmentation.height {
-        for x in 0..segmentation.width {
-            let index = y * segmentation.width + x;
-            let label = segmentation.labels[index] as usize;
-            let neighbours = [
-                (y > 0).then(|| segmentation.labels[index - segmentation.width]),
-                (x + 1 < segmentation.width).then(|| segmentation.labels[index + 1]),
-                (y + 1 < segmentation.height)
-                    .then(|| segmentation.labels[index + segmentation.width]),
-                (x > 0).then(|| segmentation.labels[index - 1]),
-            ];
-            let vertices = [
-                (vertex_id(x, y, stride), vertex_id(x + 1, y, stride)),
-                (vertex_id(x + 1, y, stride), vertex_id(x + 1, y + 1, stride)),
-                (vertex_id(x + 1, y + 1, stride), vertex_id(x, y + 1, stride)),
-                (vertex_id(x, y + 1, stride), vertex_id(x, y, stride)),
-            ];
-            for side in 0..4 {
-                if neighbours[side] != Some(label as u32) {
-                    directed[label].push(GridEdge {
-                        start: vertices[side].0,
-                        end: vertices[side].1,
-                    });
-                }
-            }
-        }
-    }
+    let (directed, _) = region_boundary_edges(segmentation, stride, topology);
     let mut votes = HashMap::<(u64, EdgeKey), f64>::new();
     for edges in &directed {
         for points in trace_region_vertex_loops(edges, stride) {
@@ -3840,11 +3824,157 @@ fn cubic_point(segment: CurveSegment, parameter: f32) -> Point {
     }
 }
 
+fn region_boundary_edges(
+    segmentation: &Segmentation,
+    stride: usize,
+    topology: Option<&HierarchicalTopology>,
+) -> (Vec<Vec<GridEdge>>, usize) {
+    let count = segmentation.regions.len();
+    let mut edges = vec![Vec::<GridEdge>::new(); count];
+    let mut shared = 0_usize;
+    let Some(topology) = topology.filter(|value| value.dimensions_match(segmentation)) else {
+        for y in 0..segmentation.height {
+            for x in 0..segmentation.width {
+                let index = y * segmentation.width + x;
+                let label = segmentation.labels[index] as usize;
+                let neighbours = [
+                    (y > 0).then(|| segmentation.labels[index - segmentation.width]),
+                    (x + 1 < segmentation.width).then(|| segmentation.labels[index + 1]),
+                    (y + 1 < segmentation.height)
+                        .then(|| segmentation.labels[index + segmentation.width]),
+                    (x > 0).then(|| segmentation.labels[index - 1]),
+                ];
+                let vertices = [
+                    (vertex_id(x, y, stride), vertex_id(x + 1, y, stride)),
+                    (vertex_id(x + 1, y, stride), vertex_id(x + 1, y + 1, stride)),
+                    (vertex_id(x + 1, y + 1, stride), vertex_id(x, y + 1, stride)),
+                    (vertex_id(x, y + 1, stride), vertex_id(x, y, stride)),
+                ];
+                for side in 0..4 {
+                    if neighbours[side] == Some(label as u32) {
+                        continue;
+                    }
+                    edges[label].push(GridEdge {
+                        start: vertices[side].0,
+                        end: vertices[side].1,
+                    });
+                    shared += usize::from(neighbours[side].is_some());
+                }
+            }
+        }
+        return (edges, shared);
+    };
+    for cell in &topology.cells {
+        let label = cell.label as usize;
+        for x in cell.x..cell.x + cell.width {
+            let above =
+                (cell.y > 0).then(|| segmentation.labels[(cell.y - 1) * segmentation.width + x]);
+            if above != Some(cell.label) {
+                edges[label].push(GridEdge {
+                    start: vertex_id(x, cell.y, stride),
+                    end: vertex_id(x + 1, cell.y, stride),
+                });
+                shared += usize::from(above.is_some());
+            }
+            let bottom_y = cell.y + cell.height;
+            let below = (bottom_y < segmentation.height)
+                .then(|| segmentation.labels[bottom_y * segmentation.width + x]);
+            if below != Some(cell.label) {
+                edges[label].push(GridEdge {
+                    start: vertex_id(x + 1, bottom_y, stride),
+                    end: vertex_id(x, bottom_y, stride),
+                });
+                shared += usize::from(below.is_some());
+            }
+        }
+        for y in cell.y..cell.y + cell.height {
+            let left =
+                (cell.x > 0).then(|| segmentation.labels[y * segmentation.width + cell.x - 1]);
+            if left != Some(cell.label) {
+                edges[label].push(GridEdge {
+                    start: vertex_id(cell.x, y + 1, stride),
+                    end: vertex_id(cell.x, y, stride),
+                });
+                shared += usize::from(left.is_some());
+            }
+            let right_x = cell.x + cell.width;
+            let right = (right_x < segmentation.width)
+                .then(|| segmentation.labels[y * segmentation.width + right_x]);
+            if right != Some(cell.label) {
+                edges[label].push(GridEdge {
+                    start: vertex_id(right_x, y, stride),
+                    end: vertex_id(right_x, y + 1, stride),
+                });
+                shared += usize::from(right.is_some());
+            }
+        }
+    }
+    (edges, shared)
+}
+
 fn pair_boundary_edges(
     segmentation: &Segmentation,
     stride: usize,
+    topology: Option<&HierarchicalTopology>,
 ) -> HashMap<RegionPair, Vec<EdgeKey>> {
     let mut pairs = HashMap::<RegionPair, Vec<EdgeKey>>::new();
+    if let Some(topology) = topology.filter(|value| value.dimensions_match(segmentation)) {
+        for cell in &topology.cells {
+            for x in cell.x..cell.x + cell.width {
+                let above = if cell.y == 0 {
+                    -1
+                } else {
+                    segmentation.labels[(cell.y - 1) * segmentation.width + x] as i32
+                };
+                let below = cell.label as i32;
+                if above != below {
+                    pairs
+                        .entry(RegionPair::new(above, below))
+                        .or_default()
+                        .push(EdgeKey::new(
+                            vertex_id(x, cell.y, stride),
+                            vertex_id(x + 1, cell.y, stride),
+                        ));
+                }
+                if cell.y + cell.height == segmentation.height {
+                    pairs
+                        .entry(RegionPair::new(below, -1))
+                        .or_default()
+                        .push(EdgeKey::new(
+                            vertex_id(x, segmentation.height, stride),
+                            vertex_id(x + 1, segmentation.height, stride),
+                        ));
+                }
+            }
+            for y in cell.y..cell.y + cell.height {
+                let left = if cell.x == 0 {
+                    -1
+                } else {
+                    segmentation.labels[y * segmentation.width + cell.x - 1] as i32
+                };
+                let right = cell.label as i32;
+                if left != right {
+                    pairs
+                        .entry(RegionPair::new(left, right))
+                        .or_default()
+                        .push(EdgeKey::new(
+                            vertex_id(cell.x, y, stride),
+                            vertex_id(cell.x, y + 1, stride),
+                        ));
+                }
+                if cell.x + cell.width == segmentation.width {
+                    pairs
+                        .entry(RegionPair::new(right, -1))
+                        .or_default()
+                        .push(EdgeKey::new(
+                            vertex_id(segmentation.width, y, stride),
+                            vertex_id(segmentation.width, y + 1, stride),
+                        ));
+                }
+            }
+        }
+        return pairs;
+    }
     for y in 0..=segmentation.height {
         for x in 0..segmentation.width {
             let above = if y == 0 {
@@ -4199,12 +4329,13 @@ fn fit_adaptive_boundary_geometry(
     stride: usize,
     strands: &[Vec<u64>],
     protected_vertices: &HashSet<u64>,
+    topology: Option<&HierarchicalTopology>,
 ) -> AdaptiveBoundaryGeometry {
     let mut edge_spans = HashMap::<EdgeKey, Vec<AdaptiveCurveSpan>>::new();
     let mut proposals = HashMap::<u64, Vec<(usize, Point)>>::new();
     let mut regularized_proposals = HashMap::<u64, Vec<(usize, Point)>>::new();
     let mut regularized_fixed_points = HashSet::<u64>::new();
-    let mut next_master_id = 0_usize;
+    let mut next_master_id;
     let mut optimal_polygons = 0_usize;
     let mut regularized_excursions = 0_usize;
     let mut continuity_faired_master_ids = HashSet::<usize>::new();
@@ -4212,31 +4343,63 @@ fn fit_adaptive_boundary_geometry(
     let strand_diagnostics_enabled = std::env::var_os("PICVEC_STRAND_DIAGNOSTICS").is_some();
     let mut strand_diagnostics = Vec::<serde_json::Value>::new();
     let mut edge_pair = HashMap::<EdgeKey, RegionPair>::new();
-    for (pair, edges) in pair_boundary_edges(segmentation, stride) {
+    for (pair, edges) in pair_boundary_edges(segmentation, stride, topology) {
         for edge in edges {
             edge_pair.insert(edge, pair);
         }
     }
-    for strand in strands {
-        if strand.len() < 2 {
-            continue;
-        }
+    const MASTER_IDS_PER_STRAND: usize = 1_000_000;
+    let fitted_base_strands: Vec<FittedBaseStrand> = strands
+        .par_iter()
+        .enumerate()
+        .filter_map(|(strand_index, strand)| {
+            if strand.len() < 2 {
+                return None;
+            }
+            let closed = strand.len() > 2 && strand.first() == strand.last();
+            let raw: Vec<Point> = strand
+                .iter()
+                .map(|&vertex| point_from_vertex(vertex, stride))
+                .collect();
+            let strand_pairs: Vec<RegionPair> = strand
+                .windows(2)
+                .map(|vertices| edge_pair[&EdgeKey::new(vertices[0], vertices[1])])
+                .collect();
+            let regularized = regularize_short_corner_excursions(
+                &raw,
+                &strand_pairs,
+                protected_vertices,
+                stride,
+                0.5,
+            );
+            let mut master_id = strand_index.saturating_mul(MASTER_IDS_PER_STRAND);
+            let (polygon, curves) = potrace_master_curves(
+                &regularized.points,
+                closed,
+                0.5,
+                1.2,
+                &mut master_id,
+                &regularized.fixed,
+            );
+            Some(FittedBaseStrand {
+                strand: strand.clone(),
+                raw,
+                regularized,
+                polygon,
+                curves,
+            })
+        })
+        .collect();
+    next_master_id = strands.len().saturating_mul(MASTER_IDS_PER_STRAND);
+    for fitted_strand in fitted_base_strands {
+        let FittedBaseStrand {
+            strand,
+            raw,
+            regularized,
+            polygon,
+            curves,
+        } = fitted_strand;
         let closed = strand.len() > 2 && strand.first() == strand.last();
-        let raw: Vec<Point> = strand
-            .iter()
-            .map(|&vertex| point_from_vertex(vertex, stride))
-            .collect();
-        let strand_pairs: Vec<RegionPair> = strand
-            .windows(2)
-            .map(|vertices| edge_pair[&EdgeKey::new(vertices[0], vertices[1])])
-            .collect();
-        let regularized = regularize_short_corner_excursions(
-            &raw,
-            &strand_pairs,
-            protected_vertices,
-            stride,
-            0.5,
-        );
         if strand_diagnostics_enabled && raw.len() >= 24 {
             let point = |value: Point| serde_json::json!([value.x, value.y]);
             strand_diagnostics.push(serde_json::json!({
@@ -4265,8 +4428,6 @@ fn fit_adaptive_boundary_geometry(
         for &index in &forced {
             regularized_fixed_points.insert(strand[index % vertex_count]);
         }
-        let (polygon, curves) =
-            potrace_master_curves(&fitting, closed, 0.5, 1.2, &mut next_master_id, &forced);
         if let Some(path) = std::env::var_os("PICVEC_ADAPTIVE_MASTER_DIAGNOSTICS") {
             if curves.iter().any(|value| value.2 == 7384) {
                 let adjusted = adjust_polygon_vertices(&fitting, &polygon, closed);
@@ -4999,7 +5160,7 @@ fn fit_adaptive_boundary_geometry(
         }
     }
 
-    let all_edges = pair_boundary_edges(segmentation, stride);
+    let all_edges = pair_boundary_edges(segmentation, stride, topology);
     let vertices: HashSet<u64> = all_edges
         .values()
         .flatten()
@@ -5253,6 +5414,7 @@ fn shared_chain_diagnostic(
 fn build_shared_chains(
     segmentation: &Segmentation,
     stride: usize,
+    topology: Option<&HierarchicalTopology>,
 ) -> (
     Vec<SharedChain>,
     EdgeChainLookup,
@@ -5263,8 +5425,9 @@ fn build_shared_chains(
     usize,
     Vec<String>,
 ) {
-    let (_, _, strands, junctions) = boundary_topology(segmentation, stride);
-    let adaptive = fit_adaptive_boundary_geometry(segmentation, stride, &strands, &junctions);
+    let (_, _, strands, junctions) = boundary_topology(segmentation, stride, topology);
+    let adaptive =
+        fit_adaptive_boundary_geometry(segmentation, stride, &strands, &junctions, topology);
     let positions = adaptive.vertex_positions.clone();
     let mut chains = Vec::<SharedChain>::new();
     let mut lookup = HashMap::<EdgeKey, (usize, u64, u64)>::new();
@@ -5272,9 +5435,10 @@ fn build_shared_chains(
     let mut diagnostics = Vec::<serde_json::Value>::new();
     let stage_diagnostics_enabled = std::env::var_os("PICVEC_GEOMETRY_STAGE_DIAGNOSTICS").is_some();
     let mut stage_diagnostics = serde_json::Map::new();
-    let mut pairs: Vec<(RegionPair, Vec<EdgeKey>)> = pair_boundary_edges(segmentation, stride)
-        .into_iter()
-        .collect();
+    let mut pairs: Vec<(RegionPair, Vec<EdgeKey>)> =
+        pair_boundary_edges(segmentation, stride, topology)
+            .into_iter()
+            .collect();
     pairs.sort_by_key(|value| value.0);
     let mut tasks = Vec::<(RegionPair, Vec<u64>)>::new();
     for (pair, pair_edges) in pairs {
@@ -6083,42 +6247,24 @@ fn hole_is_covered_by_later_regions(
 }
 
 pub fn build(segmentation: &Segmentation) -> (Vec<RegionGeometry>, GeometrySummary) {
+    build_internal(segmentation, None)
+}
+
+pub fn build_with_topology(
+    segmentation: &Segmentation,
+    topology: &HierarchicalTopology,
+) -> (Vec<RegionGeometry>, GeometrySummary) {
+    build_internal(segmentation, Some(topology))
+}
+
+fn build_internal(
+    segmentation: &Segmentation,
+    topology: Option<&HierarchicalTopology>,
+) -> (Vec<RegionGeometry>, GeometrySummary) {
     let count = segmentation.regions.len();
     let order_ranks = paint_order_ranks(segmentation);
     let stride = segmentation.width + 1;
-    let mut edges = vec![Vec::<GridEdge>::new(); count];
-    let mut shared = 0_usize;
-    for y in 0..segmentation.height {
-        for x in 0..segmentation.width {
-            let index = y * segmentation.width + x;
-            let label = segmentation.labels[index] as usize;
-            let neighbours = [
-                (y > 0).then(|| segmentation.labels[index - segmentation.width]),
-                (x + 1 < segmentation.width).then(|| segmentation.labels[index + 1]),
-                (y + 1 < segmentation.height)
-                    .then(|| segmentation.labels[index + segmentation.width]),
-                (x > 0).then(|| segmentation.labels[index - 1]),
-            ];
-            let vertices = [
-                (vertex_id(x, y, stride), vertex_id(x + 1, y, stride)),
-                (vertex_id(x + 1, y, stride), vertex_id(x + 1, y + 1, stride)),
-                (vertex_id(x + 1, y + 1, stride), vertex_id(x, y + 1, stride)),
-                (vertex_id(x, y + 1, stride), vertex_id(x, y, stride)),
-            ];
-            for side in 0..4 {
-                if neighbours[side] == Some(label as u32) {
-                    continue;
-                }
-                edges[label].push(GridEdge {
-                    start: vertices[side].0,
-                    end: vertices[side].1,
-                });
-                if neighbours[side].is_some() {
-                    shared += 1;
-                }
-            }
-        }
-    }
+    let (edges, shared) = region_boundary_edges(segmentation, stride, topology);
     let source_edges = edges.iter().map(Vec::len).sum();
     let (
         shared_chains,
@@ -6129,7 +6275,7 @@ pub fn build(segmentation: &Segmentation) -> (Vec<RegionGeometry>, GeometrySumma
         regularized_corner_excursions,
         regularized_corner_vertices,
         cool_silhouette_paths,
-    ) = build_shared_chains(segmentation, stride);
+    ) = build_shared_chains(segmentation, stride, topology);
     let mut endpoint_degree = HashMap::<(i64, i64), usize>::new();
     let mut endpoint_order = Vec::<(i64, i64)>::new();
     for chain in &shared_chains {
@@ -6657,7 +6803,7 @@ mod tests {
             summary: SegmentationSummary::default(),
         };
         let stride = width + 1;
-        let (chains, lookup, _, _, _, _, _, _) = build_shared_chains(&segmentation, stride);
+        let (chains, lookup, _, _, _, _, _, _) = build_shared_chains(&segmentation, stride, None);
         let chain_ids: Vec<usize> = (0..height)
             .map(|y| lookup[&EdgeKey::new(vertex_id(3, y, stride), vertex_id(3, y + 1, stride))].0)
             .collect();
@@ -6722,7 +6868,7 @@ mod tests {
             summary: SegmentationSummary::default(),
         };
         let stride = width + 1;
-        let (chains, lookup, _, _, _, _, _, _) = build_shared_chains(&segmentation, stride);
+        let (chains, lookup, _, _, _, _, _, _) = build_shared_chains(&segmentation, stride, None);
         let upper = lookup[&EdgeKey::new(vertex_id(3, 2, stride), vertex_id(3, 3, stride))].0;
         let lower = lookup[&EdgeKey::new(vertex_id(3, 3, stride), vertex_id(3, 4, stride))].0;
         assert_ne!(upper, lower);

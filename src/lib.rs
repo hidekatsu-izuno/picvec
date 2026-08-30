@@ -9,6 +9,7 @@ pub mod config;
 pub mod edge;
 pub mod geometry;
 pub mod gradient;
+pub mod hierarchy;
 pub mod metrics;
 pub mod optimize;
 pub mod ownership;

@@ -27,6 +27,9 @@ struct Arguments {
     quantization_light_delta_e: f32,
     #[arg(long, default_value_t = 2.3)]
     gradient_merge_error: f32,
+    /// Rayon workers; zero selects the detected physical core count.
+    #[arg(long, default_value_t = 0)]
+    threads: usize,
     /// Print an in-memory diagnostic report to stderr; no sidecar is written.
     #[arg(long)]
     verbose: bool,
@@ -46,6 +49,7 @@ fn run() -> picvec::Result<()> {
         quantization_dark_delta_e: arguments.quantization_dark_delta_e.max(0.1),
         quantization_light_delta_e: arguments.quantization_light_delta_e.max(0.1),
         gradient_merge_error: arguments.gradient_merge_error.max(0.0),
+        rayon_threads: arguments.threads,
         retain_diagnostics: arguments.verbose,
         ..defaults
     };

@@ -37,6 +37,7 @@ Useful controls:
 --quantization-dark-delta-e <DE>
 --quantization-light-delta-e <DE>
 --gradient-merge-error <DE>
+--threads <N>                 # 0: detected physical cores
 --verbose
 ```
 
@@ -74,7 +75,11 @@ content-addressed caching, and reproducibility controls.
    graph cut, then regularize only quantization boundaries unsupported by a
    dilated source barrier; structural pixels and topology-changing moves stay
    locked.
-7. Fit each physical raster interface as one master Bezier chain, inserting
+7. Compress the exact dense ownership partition into a non-uniform quadtree.
+   Uniform interiors retain one rectangular cell while mixed cells split down
+   to source pixels; expanding the leaves reproduces the raster labels exactly.
+8. Fit each physical raster interface from the same hierarchy as one master
+   Bezier chain, inserting
    material transitions and high-degree intersections as exact nodes before
    fitting, and reuse every resulting boundary in reverse for its neighbour.
    Validate the complete partition together; if a curve collapses an incident
@@ -82,9 +87,10 @@ content-addressed caching, and reproducibility controls.
    either face independently. Closed faces must preserve orientation and
    source-supported area before exact rectangles/circles/ellipses are
    substituted.
-8. Fit solid, arbitrarily oriented axial linear, or elliptical radial
+9. Validate each Paint owner against the same hierarchy, then fit solid,
+   arbitrarily oriented axial linear, or elliptical radial
    Office-compatible Paint with at most five stops. Adjacent linear gradients
    are coupled only when the combined fitted error remains acceptable.
-9. Render the Paint base at native resolution in memory, transfer only missing
+10. Render the Paint base at native resolution in memory, transfer only missing
    structural intervals, and retain the lower-DeltaE ownership candidate.
-10. Overlap Paint boundaries by 0.2 source pixels to suppress renderer seams.
+11. Overlap Paint boundaries by 0.2 source pixels to suppress renderer seams.
