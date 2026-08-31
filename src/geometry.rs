@@ -1899,8 +1899,8 @@ fn least_squares_cubic(
     let parameter_squared: Vec<f32> = parameters.iter().map(|&value| value * value).collect();
     let mut b0 = inverses.clone();
     let mut b3 = parameters.to_vec();
-    crate::svml::pow_f32_in_place(&mut b0, 3.0);
-    crate::svml::pow_f32_in_place(&mut b3, 3.0);
+    crate::elementary::pow_f32_in_place(&mut b0, 3.0);
+    crate::elementary::pow_f32_in_place(&mut b3, 3.0);
     let mut aa_values = Vec::with_capacity(points.len() * 2);
     let mut ab_values = Vec::with_capacity(points.len() * 2);
     let mut bb_values = Vec::with_capacity(points.len() * 2);
@@ -1985,8 +1985,8 @@ fn cubic_points(segment: CurveSegment, parameters: &[f32]) -> Vec<Point> {
     let parameter_squared: Vec<f32> = parameters.iter().map(|&value| value * value).collect();
     let mut inverse_cubed = inverses.clone();
     let mut parameter_cubed = parameters.to_vec();
-    crate::svml::pow_f32_in_place(&mut inverse_cubed, 3.0);
-    crate::svml::pow_f32_in_place(&mut parameter_cubed, 3.0);
+    crate::elementary::pow_f32_in_place(&mut inverse_cubed, 3.0);
+    crate::elementary::pow_f32_in_place(&mut parameter_cubed, 3.0);
     (0..parameters.len())
         .map(|index| {
             let coordinate = |start: f32, first: f32, second: f32, end: f32| {
@@ -2806,8 +2806,8 @@ fn sample_curve_sequence(curves: &[CurveSegment], spacing: f32) -> Vec<Point> {
                     parameters.iter().map(|&value| value * value).collect();
                 let mut inverse_cubed = inverses.clone();
                 let mut parameter_cubed = parameters.clone();
-                crate::svml::pow_f32_in_place(&mut inverse_cubed, 3.0);
-                crate::svml::pow_f32_in_place(&mut parameter_cubed, 3.0);
+                crate::elementary::pow_f32_in_place(&mut inverse_cubed, 3.0);
+                crate::elementary::pow_f32_in_place(&mut parameter_cubed, 3.0);
                 (0..parameters.len())
                     .map(|sample| {
                         let coordinate = |start: f32, first: f32, second: f32, end: f32| {

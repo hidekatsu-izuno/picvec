@@ -105,7 +105,7 @@ pub fn skimage_lab_values_to_rgb(labs: &[Lab]) -> Vec<[f32; 3]> {
             }
         }
     }
-    crate::svml::pow_f32_in_place(&mut nonlinear, 3.0);
+    crate::elementary::pow_f32_in_place(&mut nonlinear, 3.0);
     let mut transformed = xyz.clone();
     for (row, value) in transformed.iter_mut().enumerate() {
         for channel in 0..3 {
@@ -138,7 +138,7 @@ pub fn skimage_lab_values_to_rgb(labs: &[Lab]) -> Vec<[f32; 3]> {
             }
         }
     }
-    crate::svml::pow_f32_in_place(&mut gamma_values, 1.0 / 2.4);
+    crate::elementary::pow_f32_in_place(&mut gamma_values, 1.0 / 2.4);
     for (row, value) in rgb.iter_mut().enumerate() {
         for (channel, entry) in value.iter_mut().enumerate() {
             if let Some(position) = gamma_positions
@@ -169,7 +169,7 @@ pub fn lab_pixels_to_rgb(labs: &[Lab]) -> Vec<[f32; 3]> {
     let mut xyz = vec![[0.0_f32; 3]; labs.len()];
     for channel in 0..3 {
         let mut powered: Vec<f32> = f.iter().map(|value| value[channel]).collect();
-        crate::svml::pow_f32_in_place(&mut powered, 3.0);
+        crate::elementary::pow_f32_in_place(&mut powered, 3.0);
         for (index, value) in f.iter().enumerate() {
             let nonlinear = if value[channel] > DELTA {
                 powered[index]
@@ -199,7 +199,7 @@ pub fn lab_pixels_to_rgb(labs: &[Lab]) -> Vec<[f32; 3]> {
         .iter()
         .flat_map(|value| value.iter().map(|&channel| channel.max(0.0)))
         .collect();
-    crate::svml::pow_f32_in_place(&mut powered, 1.0 / 2.4);
+    crate::elementary::pow_f32_in_place(&mut powered, 1.0 / 2.4);
     for (index, value) in rgb.iter_mut().enumerate() {
         for channel in 0..3 {
             let linear = value[channel];
@@ -246,8 +246,8 @@ pub fn delta_e2000(first: Lab, second: Lab) -> f32 {
     delta_e2000_pairs(&[first], &[second])[0]
 }
 
-/// CIEDE2000 over contiguous pairs, preserving NumPy's vector `atan2`
-/// dispatch and float32 degree/radian constants.
+/// CIEDE2000 over contiguous pairs, evaluating `atan2` in portable SIMD
+/// batches and preserving NumPy's float32 degree/radian constants.
 pub fn delta_e2000_pairs(first: &[Lab], second: &[Lab]) -> Vec<f32> {
     assert_eq!(first.len(), second.len());
     delta_e2000_map(first, |index| second[index])
@@ -255,10 +255,9 @@ pub fn delta_e2000_pairs(first: &[Lab], second: &[Lab]) -> Vec<f32> {
 
 /// CIEDE2000 from every contiguous Lab value to one common reference.
 ///
-/// Keeping the comparison in one batch lets the dispatched elementary
-/// functions process complete SIMD vectors.  Calling `delta_e2000` in a
-/// tight nearest-colour loop would otherwise dispatch a one-lane vector for
-/// every candidate.
+/// Keeping the comparison in one batch lets the elementary functions process
+/// complete SIMD vectors. Calling `delta_e2000` in a tight nearest-colour loop
+/// would otherwise evaluate a padded vector for every candidate.
 pub fn delta_e2000_to_many(first: &[Lab], second: Lab) -> Vec<f32> {
     delta_e2000_map(first, |_| second)
 }
@@ -285,8 +284,8 @@ fn delta_e2000_map(first: &[Lab], second: impl Fn(usize) -> Lab) -> Vec<f32> {
         atan_y_second.push(second.b);
         atan_x_second.push(a2p);
     }
-    let atan_first = crate::svml::atan2_f32(&atan_y_first, &atan_x_first);
-    let atan_second = crate::svml::atan2_f32(&atan_y_second, &atan_x_second);
+    let atan_first = crate::elementary::atan2_f32(&atan_y_first, &atan_x_first);
+    let atan_second = crate::elementary::atan2_f32(&atan_y_second, &atan_x_second);
     // NumPy defines RAD2DEG and DEG2RAD from float32 PI operands. Rust's
     // `to_degrees` uses a differently rounded precomputed constant.
     const RAD2DEG: f32 = 180.0_f32 / std::f32::consts::PI;

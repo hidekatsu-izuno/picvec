@@ -8,16 +8,6 @@ The provenance and redistribution terms of the raster fixtures under
 crate and are not asserted to be covered by picvec's MIT license; see
 `sample/README.md` before redistributing them.
 
-## Intel SVML routines
-
-Files: `src/svml/*.s`
-
-Source: [NumPy/SVML](https://github.com/numpy/SVML)
-
-Copyright (c) 2023 Intel Corporation  
-Copyright (c) 2005-2021 NumPy Developers  
-SPDX-License-Identifier: BSD-3-Clause
-
 ## Real-ESRGAN model
 
 File: `scripts/picvec_eval/model/RealESRGAN_x4plus_anime_6B.pth`

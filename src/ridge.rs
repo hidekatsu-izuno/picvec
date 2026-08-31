@@ -88,7 +88,7 @@ fn gaussian_kernel(sigma: f64, order: usize, truncate: f64) -> Vec<f64> {
     let mut phi: Vec<f64> = (-(radius as isize)..=radius as isize)
         .map(|x| -0.5 / sigma2 * (x * x) as f64)
         .collect();
-    crate::svml::exp_f64_in_place(&mut phi);
+    crate::elementary::exp_f64_in_place(&mut phi);
     let total = numpy_sum_f64(&phi);
     phi.iter_mut().for_each(|value| *value /= total);
     if order == 1 {

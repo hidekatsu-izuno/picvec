@@ -7,6 +7,7 @@
 pub mod color;
 pub mod config;
 pub mod edge;
+mod elementary;
 pub mod geometry;
 pub mod gradient;
 pub mod hierarchy;
@@ -19,7 +20,6 @@ pub mod ridge;
 pub mod segment;
 pub mod structural;
 pub mod svg;
-mod svml;
 mod union_find;
 
 pub use config::Config;

@@ -11,6 +11,10 @@ analytic primitives, and source-supported structural centre-lines.
 mise exec -- cargo build --release --locked
 ```
 
+The converter uses the portable [`wide`](https://crates.io/crates/wide) SIMD
+library across supported CPU architectures. It contains no vendored or
+hand-written assembly and requires no assembly-specific build step.
+
 ## Run
 
 ```bash

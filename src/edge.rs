@@ -80,7 +80,7 @@ pub fn lab_pixels(image: &Raster) -> Vec<Lab> {
             }
         }
     }
-    crate::svml::pow_f32_in_place(&mut nonlinear_values, 2.4);
+    crate::elementary::pow_f32_in_place(&mut nonlinear_values, 2.4);
     for ((pixel, channel), value) in nonlinear_indices.into_iter().zip(nonlinear_values) {
         linear[pixel][channel] = value;
     }
@@ -110,7 +110,7 @@ pub fn lab_pixels(image: &Raster) -> Vec<Lab> {
             }
         }
     }
-    crate::svml::cbrt_f32_in_place(&mut nonlinear_values);
+    crate::elementary::cbrt_f32_in_place(&mut nonlinear_values);
     for ((pixel, channel), value) in nonlinear_indices.into_iter().zip(nonlinear_values) {
         normalized[pixel][channel] = value;
     }
@@ -153,7 +153,7 @@ pub fn preprocess_lab_values(pixels: &[[f32; 3]]) -> Vec<Lab> {
             }
         }
     }
-    crate::svml::pow_f32_in_place(&mut nonlinear_values, 2.4);
+    crate::elementary::pow_f32_in_place(&mut nonlinear_values, 2.4);
     for ((pixel, channel), value) in nonlinear_indices.into_iter().zip(nonlinear_values) {
         linear[pixel][channel] = value;
     }
@@ -197,7 +197,7 @@ pub fn preprocess_lab_values(pixels: &[[f32; 3]]) -> Vec<Lab> {
             }
         }
     }
-    crate::svml::cbrt_f32_in_place(&mut nonlinear_values);
+    crate::elementary::cbrt_f32_in_place(&mut nonlinear_values);
     for ((pixel, channel), value) in nonlinear_indices.into_iter().zip(nonlinear_values) {
         normalized[pixel][channel] = value;
     }
@@ -3212,7 +3212,7 @@ pub fn perceptual_smooth(image: &Raster, config: &Config) -> Raster {
                 -0.5_f32 * (ratio * ratio)
             })
             .collect();
-        crate::svml::exp_f32_in_place(&mut weights);
+        crate::elementary::exp_f32_in_place(&mut weights);
         cached_range_weights.push(weights);
     }
     // Python advances one complete shifted image at a time. Besides enabling
@@ -3221,7 +3221,7 @@ pub fn perceptual_smooth(image: &Raster, config: &Config) -> Raster {
     for dy in -radius..=radius {
         for dx in -radius..=radius {
             let spatial =
-                crate::svml::exp_f64(-0.5_f64 * (dx * dx + dy * dy) as f64 / (sigma * sigma));
+                crate::elementary::exp_f64(-0.5_f64 * (dx * dx + dy * dy) as f64 / (sigma * sigma));
             numerator
                 .par_iter_mut()
                 .zip(denominator.par_iter_mut())
@@ -3301,11 +3301,12 @@ pub fn perceptual_smooth(image: &Raster, config: &Config) -> Raster {
                 let sample = lab[py * image.width + px];
                 let distance = delta_e2000(centre, sample);
                 let threshold = adaptive_tolerance(0.5 * (centre.l + sample.l), config).max(1e-3);
-                let spatial =
-                    crate::svml::exp_f64(-0.5_f64 * (dx * dx + dy * dy) as f64 / (sigma * sigma));
+                let spatial = crate::elementary::exp_f64(
+                    -0.5_f64 * (dx * dx + dy * dy) as f64 / (sigma * sigma),
+                );
                 let ratio = distance / threshold;
                 let mut exponent = [-0.5_f32 * (ratio * ratio)];
-                crate::svml::exp_f32_in_place(&mut exponent);
+                crate::elementary::exp_f32_in_place(&mut exponent);
                 let range = exponent[0];
                 let weight = (spatial * range as f64) as f32;
                 sum[0] += sample.l * weight;
