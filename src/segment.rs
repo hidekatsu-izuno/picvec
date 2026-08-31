@@ -3,7 +3,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use serde::Serialize;
 
 use crate::color::{
-    delta_e2000, delta_e2000_to_many, lab_pixels_to_rgb, lab_to_rgb, rgb_to_lab, Lab,
+    delta_e2000, delta_e2000_nearest, lab_pixels_to_rgb, lab_to_rgb, rgb_to_lab,
+    DeltaE2000Workspace, Lab,
 };
 use crate::config::Config;
 use crate::edge::{lab_pixels, EdgeRoles};
@@ -280,6 +281,11 @@ fn build_palette(lab: &[Lab], config: &Config) -> (Vec<u32>, Vec<Lab>, usize) {
     let mut bins: Vec<(LabKey, usize)> = histogram.into_iter().collect();
     bins.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     let mut palette = Vec::<PaletteEntry>::new();
+    let mut palette_labs = Vec::<Lab>::new();
+    let mut distance_workspace = DeltaE2000Workspace::default();
+    let maximum_palette_distance = config
+        .quantization_dark_delta_e
+        .max(config.quantization_light_delta_e);
     let mut assignments = HashMap::<LabKey, u32>::new();
     for (key, count) in bins {
         let colour = Lab {
@@ -287,21 +293,24 @@ fn build_palette(lab: &[Lab], config: &Config) -> (Vec<u32>, Vec<Lab>, usize) {
             a: key.1 as f32,
             b: key.2 as f32,
         };
-        // Match the reference implementation exactly: compare a histogram
-        // cell with every existing palette representative.  The former
-        // bucket shortcut could omit the true CIEDE2000 nearest colour after
-        // a representative moved, changing both ownership and topology.
-        let palette_labs: Vec<Lab> = palette.iter().map(|entry| entry.lab).collect();
-        let best = delta_e2000_to_many(&palette_labs, colour)
-            .into_iter()
-            .enumerate()
-            .min_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+        // Match the reference nearest colour exactly inside the largest
+        // possible acceptance radius. The CIEDE2000 lightness lower bound
+        // only rejects representatives that cannot be selected; unlike the
+        // former bucket shortcut it remains valid after a representative
+        // moves and therefore preserves ownership and topology.
+        let best = delta_e2000_nearest(
+            &palette_labs,
+            colour,
+            maximum_palette_distance,
+            &mut distance_workspace,
+        );
         let selected = if let Some((index, distance)) = best {
             let threshold = adaptive_tolerance((palette[index].lab.l + colour.l) * 0.5, config);
             if distance <= threshold {
                 let previous = palette[index].clone();
                 palette[index].lab = weighted_merge(previous.lab, previous.weight, colour, count);
                 palette[index].weight += count;
+                palette_labs[index] = palette[index].lab;
                 index
             } else {
                 let index = palette.len();
@@ -309,6 +318,7 @@ fn build_palette(lab: &[Lab], config: &Config) -> (Vec<u32>, Vec<Lab>, usize) {
                     lab: colour,
                     weight: count,
                 });
+                palette_labs.push(colour);
                 index
             }
         } else {
@@ -317,6 +327,7 @@ fn build_palette(lab: &[Lab], config: &Config) -> (Vec<u32>, Vec<Lab>, usize) {
                 lab: colour,
                 weight: count,
             });
+            palette_labs.push(colour);
             index
         };
         assignments.insert(key, selected as u32);
@@ -1205,6 +1216,7 @@ fn networkx_preflow_cut_assignment(
 
     let reaches_sink = preflow_reaches_sink_after_saturated_removal(&graph, sink);
     let assignment: Vec<bool> = (0..count).map(|node| !reaches_sink[node]).collect();
+    #[cfg(feature = "diagnostics")]
     if let Ok(path) = std::env::var("PICVEC_PREFLOW_GRAPH_DIAGNOSTIC") {
         let diagnostic_index = 911_usize.saturating_mul(width).saturating_add(383);
         if component.contains(&diagnostic_index) {
@@ -2356,6 +2368,7 @@ fn correct_antialias_partition(
                 image.width,
             )
         };
+        #[cfg(feature = "diagnostics")]
         if let Ok(path) = std::env::var("PICVEC_ANTIALIAS_DIAGNOSTIC") {
             let diagnostic_index = 911_usize.saturating_mul(image.width).saturating_add(383);
             if component.contains(&diagnostic_index) {
@@ -2423,10 +2436,28 @@ fn correct_antialias_partition(
 /// Absolute Lab histogram quantization without transitive spatial chaining.
 /// Only equal-palette four-connected samples become one geometry owner.
 pub fn segment(image: &Raster, roles: &EdgeRoles, config: &Config) -> Segmentation {
+    let segment_started = std::time::Instant::now();
+    let mut substage_started = segment_started;
     let source_lab = lab_pixels(image);
     let maximum_area = effective_minimum_area(config, image.width, image.height);
     let local_area = local_area_map(roles, config, maximum_area);
+    if cfg!(feature = "diagnostics") && config.retain_diagnostics {
+        eprintln!(
+            "picvec segmentation substage setup: {:.3}s",
+            substage_started.elapsed().as_secs_f64()
+        );
+        substage_started = std::time::Instant::now();
+    }
     let (mut palette_map, palette_lab, histogram_cells) = build_palette(&source_lab, config);
+    if cfg!(feature = "diagnostics") && config.retain_diagnostics {
+        eprintln!(
+            "picvec segmentation substage palette: {:.3}s ({histogram_cells} histogram cells, {} colours)",
+            substage_started.elapsed().as_secs_f64(),
+            palette_lab.len(),
+        );
+        substage_started = std::time::Instant::now();
+    }
+    #[cfg(feature = "diagnostics")]
     if let Ok(prefix) = std::env::var("PICVEC_PIPELINE_DIAGNOSTICS") {
         let mut bytes = Vec::with_capacity(palette_map.len() * 4);
         for &palette in &palette_map {
@@ -2441,6 +2472,13 @@ pub fn segment(image: &Raster, roles: &EdgeRoles, config: &Config) -> Segmentati
         );
     }
     let (_, initial_count) = compact_connected(&palette_map, image.width, image.height);
+    if cfg!(feature = "diagnostics") && config.retain_diagnostics {
+        eprintln!(
+            "picvec segmentation substage initial-components: {:.3}s",
+            substage_started.elapsed().as_secs_f64()
+        );
+        substage_started = std::time::Instant::now();
+    }
     // The reference pass visits palette owners in stable palette order and
     // updates later owners' bounds as pixels move.  Repeating the complete
     // pass changes that ownership decision and over-erodes fine Paint.
@@ -2454,7 +2492,22 @@ pub fn segment(image: &Raster, roles: &EdgeRoles, config: &Config) -> Segmentati
         maximum_area,
         config,
     );
+    if cfg!(feature = "diagnostics") && config.retain_diagnostics {
+        eprintln!(
+            "picvec segmentation substage small-components: {:.3}s",
+            substage_started.elapsed().as_secs_f64()
+        );
+        substage_started = std::time::Instant::now();
+    }
     let (labels, count) = compact_connected(&palette_map, image.width, image.height);
+    if cfg!(feature = "diagnostics") && config.retain_diagnostics {
+        eprintln!(
+            "picvec segmentation substage compact: {:.3}s",
+            substage_started.elapsed().as_secs_f64()
+        );
+        substage_started = std::time::Instant::now();
+    }
+    #[cfg(feature = "diagnostics")]
     if let Ok(prefix) = std::env::var("PICVEC_PIPELINE_DIAGNOSTICS") {
         let mut bytes = Vec::with_capacity(labels.len() * 4);
         for &label in &labels {
@@ -2475,6 +2528,13 @@ pub fn segment(image: &Raster, roles: &EdgeRoles, config: &Config) -> Segmentati
             .collect(),
     );
     let correction = correct_antialias_partition(image, &labels, count, roles);
+    if cfg!(feature = "diagnostics") && config.retain_diagnostics {
+        eprintln!(
+            "picvec segmentation substage antialias: {:.3}s",
+            substage_started.elapsed().as_secs_f64()
+        );
+        substage_started = std::time::Instant::now();
+    }
     let labels = correction.labels;
     let count = labels
         .iter()
@@ -2483,6 +2543,13 @@ pub fn segment(image: &Raster, roles: &EdgeRoles, config: &Config) -> Segmentati
         .map_or(0, |value| value as usize + 1);
     let regions = region_stats(image, &labels, count);
     let canonical = region_mean_raster_for(&quantized, &labels, count);
+    if cfg!(feature = "diagnostics") && config.retain_diagnostics {
+        eprintln!(
+            "picvec segmentation substage finalize: {:.3}s (total {:.3}s)",
+            substage_started.elapsed().as_secs_f64(),
+            segment_started.elapsed().as_secs_f64(),
+        );
+    }
     let mut sorted_areas = local_area.clone();
     sorted_areas.sort_unstable();
     Segmentation {
@@ -2712,6 +2779,7 @@ pub fn split_adaptive_paint_patches(
     }
     let mut candidates = HashSet::<usize>::new();
     let mut candidate_runs = 0_usize;
+    #[cfg(feature = "diagnostics")]
     let mut adaptive_run_diagnostics = Vec::new();
     for ((first, second), samples) in boundaries {
         let mut by_cell = BTreeMap::<usize, Vec<f32>>::new();
@@ -2764,6 +2832,7 @@ pub fn split_adaptive_paint_patches(
             let p90 = percentile_f64(&deltas, 0.90);
             if median_delta <= 1.5 && p90 <= 3.0 {
                 let separation = delta_e2000(median_labs[first], median_labs[second]);
+                #[cfg(feature = "diagnostics")]
                 adaptive_run_diagnostics.push(serde_json::json!({
                     "left": first,
                     "right": second,
@@ -2804,6 +2873,7 @@ pub fn split_adaptive_paint_patches(
     {
         candidates.remove(&background);
     }
+    #[cfg(feature = "diagnostics")]
     if let Ok(path) = std::env::var("PICVEC_ADAPTIVE_DIAGNOSTICS") {
         let mut candidate_labels: Vec<usize> = candidates.iter().copied().collect();
         candidate_labels.sort_unstable();

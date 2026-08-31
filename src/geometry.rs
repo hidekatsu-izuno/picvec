@@ -686,7 +686,8 @@ fn potrace_optimal_polygon(points: &[Point], corridor: f32) -> Vec<usize> {
         indices.push(previous);
     }
     indices.reverse();
-    if std::env::var_os("PICVEC_STRAND_DIAGNOSTICS").is_some()
+    if cfg!(feature = "diagnostics")
+        && std::env::var_os("PICVEC_STRAND_DIAGNOSTICS").is_some()
         && count == 261
         && points
             .iter()
@@ -1032,7 +1033,8 @@ fn regularize_short_corner_excursions(
             edge_pairs.to_vec()
         };
         let polygon = potrace_optimal_polygon(&rotated, uncertainty);
-        if std::env::var_os("PICVEC_STRAND_DIAGNOSTICS").is_some()
+        if cfg!(feature = "diagnostics")
+            && std::env::var_os("PICVEC_STRAND_DIAGNOSTICS").is_some()
             && base
                 .iter()
                 .any(|point| point.x == 1136.0 && point.y == 577.0)
@@ -4343,7 +4345,9 @@ fn fit_adaptive_boundary_geometry(
     let mut regularized_excursions = 0_usize;
     let mut continuity_faired_master_ids = HashSet::<usize>::new();
     let mut cool_silhouette_curves = Vec::<Vec<CurveSegment>>::new();
+    #[cfg(feature = "diagnostics")]
     let strand_diagnostics_enabled = std::env::var_os("PICVEC_STRAND_DIAGNOSTICS").is_some();
+    #[cfg(feature = "diagnostics")]
     let mut strand_diagnostics = Vec::<serde_json::Value>::new();
     let mut edge_pair = HashMap::<EdgeKey, RegionPair>::new();
     for (pair, edges) in pair_boundary_edges(segmentation, stride, topology) {
@@ -4402,7 +4406,10 @@ fn fit_adaptive_boundary_geometry(
             polygon,
             curves,
         } = fitted_strand;
+        #[cfg(not(feature = "diagnostics"))]
+        let _ = (&raw, &polygon);
         let closed = strand.len() > 2 && strand.first() == strand.last();
+        #[cfg(feature = "diagnostics")]
         if strand_diagnostics_enabled && raw.len() >= 24 {
             let point = |value: Point| serde_json::json!([value.x, value.y]);
             strand_diagnostics.push(serde_json::json!({
@@ -4431,6 +4438,7 @@ fn fit_adaptive_boundary_geometry(
         for &index in &forced {
             regularized_fixed_points.insert(strand[index % vertex_count]);
         }
+        #[cfg(feature = "diagnostics")]
         if let Some(path) = std::env::var_os("PICVEC_ADAPTIVE_MASTER_DIAGNOSTICS") {
             if curves.iter().any(|value| value.2 == 7384) {
                 let adjusted = adjust_polygon_vertices(&fitting, &polygon, closed);
@@ -4525,6 +4533,7 @@ fn fit_adaptive_boundary_geometry(
         }
     }
 
+    #[cfg(feature = "diagnostics")]
     if let Some(path) = std::env::var_os("PICVEC_ADAPTIVE_BASE_DIAGNOSTICS") {
         let encode_curve = |curve: CurveSegment| match curve {
             CurveSegment::Line { start, end } => serde_json::json!([
@@ -4794,8 +4803,10 @@ fn fit_adaptive_boundary_geometry(
         .iter()
         .filter_map(|(&point, neighbours)| (neighbours.len() != 2).then_some(point))
         .collect();
+    #[cfg(feature = "diagnostics")]
     let continuity_diagnostics_enabled =
         std::env::var_os("PICVEC_CONTINUITY_DIAGNOSTICS").is_some();
+    #[cfg(feature = "diagnostics")]
     let mut continuity_diagnostics = Vec::<serde_json::Value>::new();
     for class_pair in class_pair_order {
         let edges = &class_edges_by_pair[&class_pair];
@@ -4974,7 +4985,9 @@ fn fit_adaptive_boundary_geometry(
                 } else {
                     bounded_fairing_direct_shared_boundary(&raw, &baseline, false, true)
                 };
+                #[cfg(feature = "diagnostics")]
                 let fair_candidate_len = fair.len();
+                #[cfg(feature = "diagnostics")]
                 let mut fair_raster_error = None;
                 if fair.len() < baseline.len() {
                     if let Some(tangent) = start_tangent {
@@ -4985,6 +4998,7 @@ fn fit_adaptive_boundary_geometry(
                         fair[last] = align_tangent(fair[last], tangent, true);
                     }
                     let rendered = sample_curve_sequence(&fair, 0.25);
+                    #[cfg(feature = "diagnostics")]
                     if continuity_diagnostics_enabled {
                         let observations: Vec<Point> = raw
                             .windows(2)
@@ -5011,6 +5025,7 @@ fn fit_adaptive_boundary_geometry(
                         fair = baseline.clone();
                     }
                 }
+                #[cfg(feature = "diagnostics")]
                 if continuity_diagnostics_enabled {
                     let encode_curve = |curve: &CurveSegment| match *curve {
                         CurveSegment::Line { start, end } => serde_json::json!([
@@ -5157,6 +5172,7 @@ fn fit_adaptive_boundary_geometry(
             }
         }
     }
+    #[cfg(feature = "diagnostics")]
     if let Some(path) = std::env::var_os("PICVEC_CONTINUITY_DIAGNOSTICS") {
         if let Ok(encoded) = serde_json::to_vec(&continuity_diagnostics) {
             let _ = std::fs::write(path, encoded);
@@ -5220,6 +5236,7 @@ fn fit_adaptive_boundary_geometry(
             },
         );
     }
+    #[cfg(feature = "diagnostics")]
     if let Some(path) = std::env::var_os("PICVEC_STRAND_DIAGNOSTICS") {
         if let Ok(encoded) = serde_json::to_vec(&strand_diagnostics) {
             let _ = std::fs::write(path, encoded);
@@ -5363,6 +5380,7 @@ fn adaptive_chain_curves(
     (raw, curves)
 }
 
+#[cfg(feature = "diagnostics")]
 fn shared_chain_diagnostic(
     id: usize,
     pair: RegionPair,
@@ -5434,9 +5452,13 @@ fn build_shared_chains(
     let positions = adaptive.vertex_positions.clone();
     let mut chains = Vec::<SharedChain>::new();
     let mut lookup = HashMap::<EdgeKey, (usize, u64, u64)>::new();
+    #[cfg(feature = "diagnostics")]
     let diagnostics_enabled = std::env::var_os("PICVEC_GEOMETRY_DIAGNOSTICS").is_some();
+    #[cfg(feature = "diagnostics")]
     let mut diagnostics = Vec::<serde_json::Value>::new();
+    #[cfg(feature = "diagnostics")]
     let stage_diagnostics_enabled = std::env::var_os("PICVEC_GEOMETRY_STAGE_DIAGNOSTICS").is_some();
+    #[cfg(feature = "diagnostics")]
     let mut stage_diagnostics = serde_json::Map::new();
     let mut pairs: Vec<(RegionPair, Vec<EdgeKey>)> =
         pair_boundary_edges(segmentation, stride, topology)
@@ -5456,15 +5478,19 @@ fn build_shared_chains(
         .into_par_iter()
         .enumerate()
         .map(|(chain_id, (pair, track))| {
+            #[cfg(not(feature = "diagnostics"))]
+            let _ = (chain_id, pair);
             let raw_edges: Vec<(u64, u64)> = track
                 .windows(2)
                 .map(|vertices| (vertices[0], vertices[1]))
                 .collect();
+            #[cfg(feature = "diagnostics")]
             let target_stage_boundary = [
                 57_usize, 221, 462, 1473, 1519, 1788, 2360, 2361, 2398, 2410, 3278, 3417, 3418,
                 3419, 3912, 5322,
             ]
             .contains(&chain_id);
+            #[cfg(feature = "diagnostics")]
             let diagnostic_spans = if stage_diagnostics_enabled && target_stage_boundary {
                 raw_edges
                     .iter()
@@ -5514,6 +5540,7 @@ fn build_shared_chains(
                     .map(|points| straight_cubic(points[0], points[1]))
                     .collect();
             }
+            #[cfg(feature = "diagnostics")]
             let base_segments = segments.clone();
             let observed = |vertex: u64| {
                 adaptive
@@ -5579,6 +5606,7 @@ fn build_shared_chains(
                     segments = replacement;
                 }
             }
+            #[cfg(feature = "diagnostics")]
             let encode_diagnostic_curves = |values: &[CurveSegment]| {
                 values
                     .iter()
@@ -5609,6 +5637,7 @@ fn build_shared_chains(
                     })
                     .collect::<Vec<_>>()
             };
+            #[cfg(feature = "diagnostics")]
             let mut smoothing_candidate_diagnostics = Vec::new();
             if source.len() >= 16 && segments.len() > 1 {
                 let mut candidate_points: Vec<Point> = track
@@ -5672,6 +5701,7 @@ fn build_shared_chains(
                             &sample_curve_sequence(&candidate, 0.25),
                             1.0,
                         );
+                    #[cfg(feature = "diagnostics")]
                     if stage_diagnostics_enabled && target_stage_boundary {
                         smoothing_candidate_diagnostics.push(serde_json::json!({
                             "sigma": sigma,
@@ -5685,7 +5715,9 @@ fn build_shared_chains(
                 }
                 segments = best;
             }
+            #[cfg(feature = "diagnostics")]
             let corridor_segments = segments.clone();
+            #[cfg(feature = "diagnostics")]
             let direct_diagnostics = if stage_diagnostics_enabled && target_stage_boundary {
                 let catmull = bounded_fairing_shared_boundary(&source, &segments, 0.75);
                 let least = least_squares_fairing_shared_boundary(&source, &segments);
@@ -5847,6 +5879,7 @@ fn build_shared_chains(
                     },
                 };
             }
+            #[cfg(feature = "diagnostics")]
             let stage_diagnostic =
                 (stage_diagnostics_enabled && target_stage_boundary).then(|| {
                     (
@@ -5869,6 +5902,7 @@ fn build_shared_chains(
                     points.push(last.end());
                 }
             }
+            #[cfg(feature = "diagnostics")]
             let diagnostic = diagnostics_enabled.then(|| {
                 shared_chain_diagnostic(
                     chain_id,
@@ -5896,7 +5930,8 @@ fn build_shared_chains(
                     points.push(last.end());
                 }
             }
-            (
+            #[cfg(feature = "diagnostics")]
+            let result = (
                 SharedChain {
                     points,
                     segments,
@@ -5905,9 +5940,20 @@ fn build_shared_chains(
                 raw_edges,
                 diagnostic,
                 stage_diagnostic,
-            )
+            );
+            #[cfg(not(feature = "diagnostics"))]
+            let result = (
+                SharedChain {
+                    points,
+                    segments,
+                    closed,
+                },
+                raw_edges,
+            );
+            result
         })
         .collect();
+    #[cfg(feature = "diagnostics")]
     for (chain_id, (chain, raw_edges, diagnostic, stage_diagnostic)) in
         results.into_iter().enumerate()
     {
@@ -5922,11 +5968,20 @@ fn build_shared_chains(
         }
         chains.push(chain);
     }
+    #[cfg(not(feature = "diagnostics"))]
+    for (chain_id, (chain, raw_edges)) in results.into_iter().enumerate() {
+        for (first, second) in raw_edges {
+            lookup.insert(EdgeKey::new(first, second), (chain_id, first, second));
+        }
+        chains.push(chain);
+    }
+    #[cfg(feature = "diagnostics")]
     if let Some(path) = std::env::var_os("PICVEC_GEOMETRY_DIAGNOSTICS") {
         if let Ok(encoded) = serde_json::to_vec(&diagnostics) {
             let _ = std::fs::write(path, encoded);
         }
     }
+    #[cfg(feature = "diagnostics")]
     if let Some(path) = std::env::var_os("PICVEC_GEOMETRY_STAGE_DIAGNOSTICS") {
         if let Ok(encoded) = serde_json::to_vec(&stage_diagnostics) {
             let _ = std::fs::write(path, encoded);

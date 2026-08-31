@@ -69,6 +69,7 @@ pub struct Summary {
     pub quality: Option<QualityMetrics>,
 }
 
+#[cfg(feature = "diagnostics")]
 fn report_progress(config: &Config, stage: &str, started: Instant, checkpoint: &mut Instant) {
     if !config.retain_diagnostics {
         return;
@@ -82,6 +83,10 @@ fn report_progress(config: &Config, stage: &str, started: Instant, checkpoint: &
     *checkpoint = now;
 }
 
+#[cfg(not(feature = "diagnostics"))]
+fn report_progress(_config: &Config, _stage: &str, _started: Instant, _checkpoint: &mut Instant) {}
+
+#[cfg(feature = "diagnostics")]
 fn save_pipeline_diagnostic(name: &str, image: &Raster) {
     let Ok(prefix) = std::env::var("PICVEC_PIPELINE_DIAGNOSTICS") else {
         return;
@@ -100,6 +105,9 @@ fn save_pipeline_diagnostic(name: &str, image: &Raster) {
     ));
     let _ = fs::write(raw_path, bytes);
 }
+
+#[cfg(not(feature = "diagnostics"))]
+fn save_pipeline_diagnostic(_name: &str, _image: &Raster) {}
 
 fn merge_exact_final_paints(
     source: &Raster,
@@ -161,6 +169,7 @@ fn merge_exact_final_paints(
     accepted
 }
 
+#[cfg(feature = "diagnostics")]
 fn save_label_diagnostic(name: &str, labels: &[u32], width: usize, height: usize) {
     let Ok(prefix) = std::env::var("PICVEC_PIPELINE_DIAGNOSTICS") else {
         return;
@@ -173,6 +182,10 @@ fn save_label_diagnostic(name: &str, labels: &[u32], width: usize, height: usize
     let _ = fs::write(path, bytes);
 }
 
+#[cfg(not(feature = "diagnostics"))]
+fn save_label_diagnostic(_name: &str, _labels: &[u32], _width: usize, _height: usize) {}
+
+#[cfg(feature = "diagnostics")]
 fn save_mask_diagnostic(name: &str, mask: &[bool], width: usize, height: usize) {
     let Ok(prefix) = std::env::var("PICVEC_PIPELINE_DIAGNOSTICS") else {
         return;
@@ -181,6 +194,9 @@ fn save_mask_diagnostic(name: &str, mask: &[bool], width: usize, height: usize) 
     let path = PathBuf::from(format!("{prefix}-{name}-{width}x{height}.u8"));
     let _ = fs::write(path, values);
 }
+
+#[cfg(not(feature = "diagnostics"))]
+fn save_mask_diagnostic(_name: &str, _mask: &[bool], _width: usize, _height: usize) {}
 
 fn estimate_dimension(image: &Raster, config: &Config) -> ComplexityProbe {
     let probe_max = image.width.max(image.height).min(1024) as u32;
@@ -516,6 +532,7 @@ fn vectorize_inner(
     report_progress(config, "structural-analysis", started, &mut checkpoint);
     let smoothed = perceptual_smooth(&paint_reference, config);
     save_pipeline_diagnostic("smoothed", &smoothed);
+    #[cfg(feature = "diagnostics")]
     if std::env::var_os("PICVEC_PIPELINE_DIAGNOSTICS").is_some() {
         let smoothed_lab = Raster::new(
             smoothed.width,
@@ -694,6 +711,7 @@ fn vectorize_inner(
     report_progress(config, "structural-selection", started, &mut checkpoint);
     // The complete preview is report-only. Structural ownership is already
     // authoritative, so the normal conversion path does not render it again.
+    #[cfg(feature = "diagnostics")]
     let quality = if config.compute_quality_metrics {
         let residual_render = render_svg_preview(
             (processing.width, processing.height),
@@ -709,6 +727,8 @@ fn vectorize_inner(
     } else {
         None
     };
+    #[cfg(not(feature = "diagnostics"))]
+    let quality = None;
     let ownership_summary = ownership.summary.clone();
     let paint_overlap = ownership.paint_overlap;
     let structural = ownership.structural;
@@ -899,6 +919,7 @@ mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 
+    #[cfg(feature = "diagnostics")]
     #[test]
     fn quality_metrics_require_explicit_opt_in() {
         let nonce = SystemTime::now()

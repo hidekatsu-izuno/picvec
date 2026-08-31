@@ -2,7 +2,9 @@ use rayon::prelude::*;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use crate::color::{delta_e2000, delta_e94_local, lab_pixels_to_rgb, Lab};
+#[cfg(feature = "diagnostics")]
+use crate::color::delta_e2000;
+use crate::color::{delta_e94_local, lab_pixels_to_rgb, Lab};
 use crate::config::Config;
 use crate::raster::{percentile, Raster};
 
@@ -138,7 +140,8 @@ pub fn preprocess_lab_pixels(image: &Raster) -> Vec<Lab> {
 }
 
 pub fn preprocess_lab_values(pixels: &[[f32; 3]]) -> Vec<Lab> {
-    let trace = std::env::var_os("PICVEC_TRACE_PREPROCESS_LAB").is_some();
+    let trace =
+        cfg!(feature = "diagnostics") && std::env::var_os("PICVEC_TRACE_PREPROCESS_LAB").is_some();
     let mut linear = pixels.to_vec();
     let mut nonlinear_indices = Vec::with_capacity(linear.len() * 3);
     let mut nonlinear_values = Vec::with_capacity(linear.len() * 3);
@@ -705,6 +708,7 @@ fn edge_hysteresis(nms: &[f32], field: &EdgeField, width: usize, height: usize) 
     let thinned = thin_edge_mask(&repaired, width, height);
     let final_repaired = bridge_short_gaps(&thinned, nms, field, width, height, 8.0 * scale);
     let final_mask = thin_edge_mask(&final_repaired, width, height);
+    #[cfg(feature = "diagnostics")]
     if let Some(prefix) = std::env::var_os("PICVEC_EDGE_DIAGNOSTICS") {
         let prefix = prefix.to_string_lossy();
         for (name, mask) in [
@@ -2220,7 +2224,7 @@ fn add_supported_medial_ridges(
     let radius = 7.0 * scale;
     let mut candidate_count = 0_usize;
     let mut supported_count = 0_usize;
-    for (candidate_index, (mut candidate, maximum_width)) in [
+    for (_candidate_index, (mut candidate, maximum_width)) in [
         (absolute_dark.to_vec(), 6.0 * scale),
         (relative_extension, 4.0 * scale),
     ]
@@ -2229,6 +2233,7 @@ fn add_supported_medial_ridges(
     {
         remove_tiny_components(&mut candidate, width, height, 2);
         let (mut medial, distance) = medial_axis(&candidate, width, height);
+        #[cfg(feature = "diagnostics")]
         if let Some(prefix) = std::env::var_os("PICVEC_EDGE_DIAGNOSTICS") {
             let prefix = prefix.to_string_lossy();
             for (name, mask) in [("candidate", &candidate), ("medial", &medial)] {
@@ -2239,7 +2244,7 @@ fn add_supported_medial_ridges(
                         0
                     }])
                 });
-                let _ = raster.save(format!("{prefix}-{name}-{candidate_index}.png"));
+                let _ = raster.save(format!("{prefix}-{name}-{_candidate_index}.png"));
             }
         }
         for index in 0..medial.len() {
@@ -2899,6 +2904,7 @@ fn classify_normal_profile_edges(image: &Raster) -> EdgeRoles {
     let height = image.height;
     let lab = lab_pixels(image);
     let field = estimate_profile_edge_field(image, &lab);
+    #[cfg(feature = "diagnostics")]
     if let Some(prefix) = std::env::var_os("PICVEC_EDGE_DIAGNOSTICS") {
         let prefix = prefix.to_string_lossy();
         let write_f32 = |name: &str, values: &[f32]| {
@@ -2920,6 +2926,7 @@ fn classify_normal_profile_edges(image: &Raster) -> EdgeRoles {
     }
     let nms = oriented_nonmaximum(&field, width, height);
     let skeleton = edge_hysteresis(&nms, &field, width, height);
+    #[cfg(feature = "diagnostics")]
     if let Some(prefix) = std::env::var_os("PICVEC_EDGE_DIAGNOSTICS") {
         let prefix = prefix.to_string_lossy();
         let mut nms_bytes = Vec::with_capacity(nms.len() * std::mem::size_of::<f32>());
@@ -3110,6 +3117,7 @@ fn classify_normal_profile_edges(image: &Raster) -> EdgeRoles {
 
 pub fn classify(image: &Raster) -> EdgeRoles {
     let profile = classify_normal_profile_edges(image);
+    #[cfg(feature = "diagnostics")]
     if let Some(prefix) = std::env::var_os("PICVEC_EDGE_DIAGNOSTICS") {
         let prefix = prefix.to_string_lossy();
         for (name, mask) in [
@@ -3156,6 +3164,7 @@ pub fn perceptual_smooth(image: &Raster, config: &Config) -> Raster {
         return image.clone();
     }
     let lab = lab_pixels(image);
+    #[cfg(feature = "diagnostics")]
     if let Ok(path) = std::env::var("PICVEC_SMOOTH_INPUT_LAB_DIAGNOSTIC") {
         let mut bytes = Vec::with_capacity(lab.len() * 12);
         for value in &lab {
@@ -3272,6 +3281,7 @@ pub fn perceptual_smooth(image: &Raster, config: &Config) -> Raster {
             }
         })
         .collect();
+    #[cfg(feature = "diagnostics")]
     if let Ok(path) = std::env::var("PICVEC_SMOOTH_LAB_DIAGNOSTIC") {
         let mut bytes = Vec::with_capacity(smoothed_lab.len() * 12);
         for value in &smoothed_lab {
@@ -3281,6 +3291,7 @@ pub fn perceptual_smooth(image: &Raster, config: &Config) -> Raster {
         }
         let _ = std::fs::write(path, bytes);
     }
+    #[cfg(feature = "diagnostics")]
     if let Ok(path) = std::env::var("PICVEC_SMOOTH_PIXEL_DIAGNOSTIC") {
         let x = std::env::var("PICVEC_SMOOTH_PIXEL_X")
             .ok()

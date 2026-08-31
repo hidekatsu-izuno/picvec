@@ -525,6 +525,7 @@ fn source_structural_lines(source: &Raster) -> (Vec<bool>, Vec<bool>) {
         .collect();
     let propagated = binary_propagation(&seeds, &support, width, height);
     let candidates = erode(&dilate(&propagated, width, height, 1), width, height, 1);
+    #[cfg(feature = "diagnostics")]
     if let Some(prefix) = std::env::var_os("PICVEC_PIPELINE_DIAGNOSTICS") {
         let raster = image::GrayImage::from_fn(width as u32, height as u32, |x, y| {
             image::Luma([if candidates[y as usize * width + x as usize] {
@@ -690,6 +691,7 @@ fn source_structural_lines(source: &Raster) -> (Vec<bool>, Vec<bool>) {
         })
         .collect();
     remove_small_components(&mut lines, width, height, 6);
+    #[cfg(feature = "diagnostics")]
     if let Some(prefix) = std::env::var_os("PICVEC_PIPELINE_DIAGNOSTICS") {
         let raster = image::GrayImage::from_fn(width as u32, height as u32, |x, y| {
             image::Luma([if lines[y as usize * width + x as usize] {
@@ -1204,6 +1206,7 @@ pub fn analyse(source: &Raster, roles: &mut EdgeRoles) -> (Raster, StructuralInk
     // that original graph coverage for candidate construction below.
     let original_visible_ridge_coverage = roles.visible_ridge_coverage.clone();
     let mut paint_reference = nearest_underpaint(source, &original_visible_ridge_coverage);
+    #[cfg(feature = "diagnostics")]
     if let Some(prefix) = std::env::var_os("PICVEC_PIPELINE_DIAGNOSTICS") {
         let prefix = prefix.to_string_lossy();
         let _ = paint_reference.save(std::path::Path::new(&format!(
@@ -1276,6 +1279,7 @@ pub fn analyse(source: &Raster, roles: &mut EdgeRoles) -> (Raster, StructuralInk
         .zip(&original_visible_ridge_coverage)
         .map(|((&classified, &shading), &ridge)| (classified && !shading) || ridge)
         .collect();
+    #[cfg(feature = "diagnostics")]
     if let Some(prefix) = std::env::var_os("PICVEC_PIPELINE_DIAGNOSTICS") {
         let raster =
             image::GrayImage::from_fn(source.width as u32, source.height as u32, |x, y| {
@@ -1452,6 +1456,7 @@ fn residual_line_masks(
                 || (chroma < 12.0 && reference.l <= 50.0 && minimum_lightness <= reference.l + 4.0)
         })
         .collect();
+    #[cfg(feature = "diagnostics")]
     if let Some(prefix) = std::env::var_os("PICVEC_STRUCTURAL_DIAGNOSTICS") {
         let bytes = represented
             .iter()
@@ -1646,9 +1651,11 @@ fn boundary_profile_flags(
             .map(|point| [point.x as f64, point.y as f64])
             .collect()
     });
+    #[cfg(feature = "diagnostics")]
     let debug_target = precise_points
         .iter()
         .any(|point| (point[0] - 224.1524).hypot(point[1] - 769.4954) < 0.01);
+    #[cfg(feature = "diagnostics")]
     let mut debug_values = Vec::<serde_json::Value>::new();
     for (index, &point) in precise_points.iter().enumerate() {
         let [nx, ny] = precise_normal_at(&precise_points, index);
@@ -1704,6 +1711,7 @@ fn boundary_profile_flags(
                 || rendered_minimum_lightness - target.l >= rendered_core_lightness_excess);
         valley.push(has_valley);
         missing.push(is_missing);
+        #[cfg(feature = "diagnostics")]
         if debug_target {
             debug_values.push(serde_json::json!({
                 "point": point,
@@ -1718,6 +1726,7 @@ fn boundary_profile_flags(
             }));
         }
     }
+    #[cfg(feature = "diagnostics")]
     if debug_target {
         if let Some(prefix) = std::env::var_os("PICVEC_STRUCTURAL_DIAGNOSTICS") {
             let suffix = if rendered_core_lightness_excess.is_finite() {
@@ -2366,6 +2375,20 @@ fn remove_graph_aligned_overlap(
         .map(|value| value.2)
         .fold(0.0_f32, f32::max);
     let neighbour_count = owner_values.len().min(16);
+    // Querying every owner point for every candidate point dominated dense
+    // photographs. A fixed grid only changes candidate discovery: the final
+    // distance/index sort below retains the exact dense-scan ordering.
+    let cell_size = maximum_distance.max(1.0);
+    let cell_key = |point: Point| {
+        (
+            (point.x / cell_size).floor() as i32,
+            (point.y / cell_size).floor() as i32,
+        )
+    };
+    let mut owner_cells = HashMap::<(i32, i32), Vec<usize>>::new();
+    for (index, &(point, _, _)) in owner_values.iter().enumerate() {
+        owner_cells.entry(cell_key(point)).or_default().push(index);
+    }
     let mut result = Vec::new();
     for edge in edges {
         if edge.points.len() < 2 {
@@ -2379,21 +2402,32 @@ fn remove_graph_aligned_overlap(
                 0.0
             };
         let mut keep = Vec::with_capacity(edge.points.len());
+        let mut neighbours = Vec::<(f32, usize)>::new();
         for (&point, tangent) in edge.points.iter().zip(tangents) {
-            let mut neighbours = owner_values
-                .iter()
-                .enumerate()
-                .filter_map(|(index, &(owner, _, _))| {
-                    let distance = point.distance(owner);
-                    (distance <= query_distance).then_some((distance, index))
-                })
-                .collect::<Vec<_>>();
+            neighbours.clear();
+            let minimum_cell_x = ((point.x - query_distance) / cell_size).floor() as i32;
+            let maximum_cell_x = ((point.x + query_distance) / cell_size).floor() as i32;
+            let minimum_cell_y = ((point.y - query_distance) / cell_size).floor() as i32;
+            let maximum_cell_y = ((point.y + query_distance) / cell_size).floor() as i32;
+            for cell_y in minimum_cell_y..=maximum_cell_y {
+                for cell_x in minimum_cell_x..=maximum_cell_x {
+                    let Some(indices) = owner_cells.get(&(cell_x, cell_y)) else {
+                        continue;
+                    };
+                    for &index in indices {
+                        let distance = point.distance(owner_values[index].0);
+                        if distance <= query_distance {
+                            neighbours.push((distance, index));
+                        }
+                    }
+                }
+            }
             neighbours
                 .sort_by(|first, second| first.0.total_cmp(&second.0).then(first.1.cmp(&second.1)));
             let aligned = neighbours
-                .into_iter()
+                .iter()
                 .take(neighbour_count)
-                .any(|(distance, index)| {
+                .any(|&(distance, index)| {
                     let (_, owner_tangent, owner_width) = owner_values[index];
                     let local_limit = maximum_distance.max(0.0)
                         + if include_stroke_envelope {
@@ -3352,6 +3386,7 @@ pub fn select_missing_with_junctions(
         .zip(&structural.legacy_line_mask)
         .map(|(&residual, &legacy)| residual && legacy)
         .collect();
+    #[cfg(feature = "diagnostics")]
     if let Some(prefix) = std::env::var_os("PICVEC_STRUCTURAL_DIAGNOSTICS") {
         let selected_bytes = residual_lines
             .iter()
@@ -3389,6 +3424,7 @@ pub fn select_missing_with_junctions(
     {
         *measured |= ridge;
     }
+    #[cfg(feature = "diagnostics")]
     if let Some(prefix) = std::env::var_os("PICVEC_STRUCTURAL_DIAGNOSTICS") {
         for (name, mask) in [
             ("face-barrier", &structural.face_barrier),
@@ -3475,6 +3511,7 @@ pub fn select_missing_with_junctions(
     let mut selected_graph = visible_graph;
     selected_graph.extend(complete_profile_edges);
     selected_graph.extend(interval_edges);
+    #[cfg(feature = "diagnostics")]
     if let Some(prefix) = std::env::var_os("PICVEC_STRUCTURAL_DIAGNOSTICS") {
         let document = serde_json::json!({
             "legacy_lines": structural.legacy_line_mask.iter().filter(|&&value| value).count(),
@@ -3503,6 +3540,7 @@ pub fn select_missing_with_junctions(
     let mut skeleton = skeletonize(&residual_legacy_line_mask, width, height);
     remove_small_components(&mut skeleton, width, height, 1);
     let residual_skeleton_pixels = skeleton.iter().filter(|&&value| value).count();
+    #[cfg(feature = "diagnostics")]
     if let Some(prefix) = std::env::var_os("PICVEC_STRUCTURAL_DIAGNOSTICS") {
         let _ = std::fs::write(
             format!("{}-residual-source-skeleton.json", prefix.to_string_lossy()),
@@ -3701,6 +3739,7 @@ pub fn select_missing_with_junctions(
         .zip(&residual_lines)
         .map(|(&barrier, &line)| barrier || line)
         .collect::<Vec<_>>();
+    #[cfg(feature = "diagnostics")]
     if let Some(prefix) = std::env::var_os("PICVEC_STRUCTURAL_DIAGNOSTICS") {
         let bytes = paint_junction_support
             .iter()

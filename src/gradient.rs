@@ -1584,10 +1584,11 @@ fn fit_region(
         config.paint_primary_min_explained_variance
     }
     .clamp(0.0, 1.0);
-    let traced = std::env::var("PICVEC_TRACE_PAINT_LABEL")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        == Some(label);
+    let traced = cfg!(feature = "diagnostics")
+        && std::env::var("PICVEC_TRACE_PAINT_LABEL")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            == Some(label);
     let run_full_fit = !use_primary_gate
         || traced
         || primary_gradient_coherence(
@@ -1668,10 +1669,11 @@ fn fit_region_samples(
     if !run_full_fit {
         return (Paint::Solid { color: solid_color }, solid_error.mean);
     }
-    let trace = std::env::var("PICVEC_TRACE_PAINT_LABEL")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        == Some(label);
+    let trace = cfg!(feature = "diagnostics")
+        && std::env::var("PICVEC_TRACE_PAINT_LABEL")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            == Some(label);
     let small_region = area < config.minimum_gradient_area as usize;
     let minimum_improvement = 0.25 * 2.3;
     // Small faces start from Solid and can only be promoted by the Office
@@ -1793,7 +1795,7 @@ fn fitted_stops_direct(
         // scalar back to float32 for the array division below.
         let determinant_f64 = aa as f64 * bb as f64 - ab as f64 * ab as f64;
         let determinant = determinant_f64 as f32;
-        if std::env::var("PICVEC_TRACE_FIT_SAMPLES").is_ok() {
+        if cfg!(feature = "diagnostics") && std::env::var("PICVEC_TRACE_FIT_SAMPLES").is_ok() {
             let requested = std::env::var("PICVEC_TRACE_FIT_SAMPLES").unwrap_or_default();
             let actual = samples
                 .iter()
@@ -1949,15 +1951,16 @@ fn expand_merge_stops(
     initial_stats: ErrorStats,
     maximum: usize,
 ) -> (Paint, ErrorStats) {
-    let trace = std::env::var("PICVEC_TRACE_FIT_SAMPLES")
-        .ok()
-        .map(|value| {
-            value
-                .split(',')
-                .filter_map(|part| part.parse::<usize>().ok())
-                .eq(samples.iter().copied())
-        })
-        .unwrap_or(false);
+    let trace = cfg!(feature = "diagnostics")
+        && std::env::var("PICVEC_TRACE_FIT_SAMPLES")
+            .ok()
+            .map(|value| {
+                value
+                    .split(',')
+                    .filter_map(|part| part.parse::<usize>().ok())
+                    .eq(samples.iter().copied())
+            })
+            .unwrap_or(false);
     let mut offsets = vec![0.0_f64, 1.0];
     let mut current_stops = initial_stops;
     let mut current_stats = initial_stats;
@@ -2120,16 +2123,17 @@ fn fit_merge_paint(
     region_bounds: Bounds,
     maximum_stops: usize,
 ) -> (Paint, ErrorStats) {
-    let trace_fit = std::env::var("PICVEC_TRACE_FIT_SAMPLES")
-        .ok()
-        .map(|value| {
-            let requested: Vec<usize> = value
-                .split(',')
-                .filter_map(|part| part.parse::<usize>().ok())
-                .collect();
-            requested == samples
-        })
-        .unwrap_or(false);
+    let trace_fit = cfg!(feature = "diagnostics")
+        && std::env::var("PICVEC_TRACE_FIT_SAMPLES")
+            .ok()
+            .map(|value| {
+                let requested: Vec<usize> = value
+                    .split(',')
+                    .filter_map(|part| part.parse::<usize>().ok())
+                    .collect();
+                requested == samples
+            })
+            .unwrap_or(false);
     let solid_color = mean_color(source, samples);
     let solid = Paint::Solid { color: solid_color };
     let solid_stats = paint_stats(source, samples, &solid);
@@ -2676,25 +2680,26 @@ fn merge_proposal(
     second: &MergeRegion,
     config: &Config,
 ) -> MergeProposal {
-    let trace_pair = std::env::var("PICVEC_TRACE_MERGE_PAIR")
-        .ok()
-        .and_then(|value| {
-            let mut values = value
-                .split(',')
-                .filter_map(|part| part.parse::<usize>().ok());
-            Some((values.next()?, values.next()?))
-        })
-        .map(|(left, right)| {
-            (first.labels.len() == 1
-                && second.labels.len() == 1
-                && first.labels.contains(&left)
-                && second.labels.contains(&right))
-                || (first.labels.len() == 1
+    let trace_pair = cfg!(feature = "diagnostics")
+        && std::env::var("PICVEC_TRACE_MERGE_PAIR")
+            .ok()
+            .and_then(|value| {
+                let mut values = value
+                    .split(',')
+                    .filter_map(|part| part.parse::<usize>().ok());
+                Some((values.next()?, values.next()?))
+            })
+            .map(|(left, right)| {
+                (first.labels.len() == 1
                     && second.labels.len() == 1
-                    && first.labels.contains(&right)
-                    && second.labels.contains(&left))
-        })
-        .unwrap_or(false);
+                    && first.labels.contains(&left)
+                    && second.labels.contains(&right))
+                    || (first.labels.len() == 1
+                        && second.labels.len() == 1
+                        && first.labels.contains(&right)
+                        && second.labels.contains(&left))
+            })
+            .unwrap_or(false);
     let (first_samples, second_samples) = balanced_sample_parts(
         &first.samples,
         &second.samples,
@@ -3124,6 +3129,7 @@ pub fn merge_partition(
         }
     }
     let mut structural_by_label = vec![Vec::<usize>::new(); count];
+    #[cfg(feature = "diagnostics")]
     if let Ok(prefix) = std::env::var("PICVEC_PIPELINE_DIAGNOSTICS") {
         let mut protected: Vec<(usize, usize)> = protected_pairs.iter().copied().collect();
         protected.sort_unstable();
@@ -3234,7 +3240,9 @@ pub fn merge_partition(
         }
     }
     let mut accepted = 0_usize;
+    #[cfg(feature = "diagnostics")]
     let retain_merge_diagnostics = std::env::var_os("PICVEC_PIPELINE_DIAGNOSTICS").is_some();
+    #[cfg(feature = "diagnostics")]
     let mut accepted_diagnostics = Vec::<serde_json::Value>::new();
     while let Some(entry) = queue.pop() {
         if entry.score > config.gradient_merge_error {
@@ -3249,6 +3257,7 @@ pub fn merge_partition(
         }
         let mut first = regions[entry.left].take().unwrap();
         let second = regions[entry.right].take().unwrap();
+        #[cfg(feature = "diagnostics")]
         if retain_merge_diagnostics {
             let mut left_labels: Vec<usize> = first.labels.iter().copied().collect();
             let mut right_labels: Vec<usize> = second.labels.iter().copied().collect();
@@ -3309,6 +3318,7 @@ pub fn merge_partition(
     if accepted == 0 {
         return 0;
     }
+    #[cfg(feature = "diagnostics")]
     if let Ok(prefix) = std::env::var("PICVEC_PIPELINE_DIAGNOSTICS") {
         if let Ok(value) = serde_json::to_string_pretty(&accepted_diagnostics) {
             let _ = std::fs::write(format!("{prefix}-merge-accepted.json"), value);
@@ -5111,7 +5121,7 @@ pub(crate) fn merge_source_supported_paints(
         accepted.push((left, right, proposal.paint, boundary.length));
     }
     if accepted.is_empty() {
-        if config.retain_diagnostics {
+        if cfg!(feature = "diagnostics") && config.retain_diagnostics {
             eprintln!(
                 "picvec layered merge candidates: considered {considered}, evidence {rejected_evidence}, seam {rejected_seam}, layered {layered_selected}, nonfinite {rejected_nonfinite}, face {rejected_face}, combined {rejected_combined}, accepted 0"
             );
@@ -5119,7 +5129,7 @@ pub(crate) fn merge_source_supported_paints(
         return SupportedPaintMergeReport::default();
     }
 
-    if config.retain_diagnostics {
+    if cfg!(feature = "diagnostics") && config.retain_diagnostics {
         eprintln!(
             "picvec layered merge candidates: considered {considered}, evidence {rejected_evidence}, seam {rejected_seam}, layered {layered_selected}, nonfinite {rejected_nonfinite}, face {rejected_face}, combined {rejected_combined}, accepted {}",
             accepted.len(),
@@ -5184,7 +5194,7 @@ pub fn fit_all(
             region_paint_indices[label as usize].push(index);
         }
     }
-    if config.retain_diagnostics {
+    if cfg!(feature = "diagnostics") && config.retain_diagnostics {
         eprintln!(
             "picvec paint substage setup: {:.3}s",
             fit_started.elapsed().as_secs_f64()
@@ -5251,7 +5261,7 @@ pub fn fit_all(
         })
         .collect();
     let full_fit_regions = fitted.iter().filter(|value| value.2).count();
-    if config.retain_diagnostics {
+    if cfg!(feature = "diagnostics") && config.retain_diagnostics {
         eprintln!(
             "picvec paint substage initial: {:.3}s (primary solid {}, full fit {})",
             initial_started.elapsed().as_secs_f64(),
@@ -5261,11 +5271,13 @@ pub fn fit_all(
     }
     let mut paints: Vec<Paint> = fitted.iter().map(|value| value.0.clone()).collect();
     let mut errors: Vec<f32> = fitted.iter().map(|value| value.1).collect();
+    #[cfg(feature = "diagnostics")]
     if let Ok(prefix) = std::env::var("PICVEC_PAINT_DIAGNOSTICS") {
         save_paint_kinds(&format!("{prefix}-initial.json"), &paints);
         save_paint_details(&format!("{prefix}-initial-details.json"), &paints);
     }
     let paint_boundaries = smooth_paint_boundaries(boundary_source, segmentation, 2, true);
+    #[cfg(feature = "diagnostics")]
     if let Ok(prefix) = std::env::var("PICVEC_PAINT_DIAGNOSTICS") {
         let values: Vec<serde_json::Value> = paint_boundaries
             .iter()
@@ -5297,12 +5309,13 @@ pub fn fit_all(
         &mut errors,
         config,
     );
-    if config.retain_diagnostics {
+    if cfg!(feature = "diagnostics") && config.retain_diagnostics {
         eprintln!(
             "picvec paint substage harmonize: {:.3}s",
             harmonize_started.elapsed().as_secs_f64()
         );
     }
+    #[cfg(feature = "diagnostics")]
     if let Ok(prefix) = std::env::var("PICVEC_PAINT_DIAGNOSTICS") {
         save_paint_kinds(&format!("{prefix}-harmonized.json"), &paints);
         save_paint_details(&format!("{prefix}-harmonized-details.json"), &paints);
@@ -5328,12 +5341,13 @@ pub fn fit_all(
             break;
         }
     }
-    if config.retain_diagnostics {
+    if cfg!(feature = "diagnostics") && config.retain_diagnostics {
         eprintln!(
             "picvec paint substage couple: {:.3}s",
             coupling_started.elapsed().as_secs_f64()
         );
     }
+    #[cfg(feature = "diagnostics")]
     if let Ok(prefix) = std::env::var("PICVEC_PAINT_DIAGNOSTICS") {
         save_paint_kinds(&format!("{prefix}-coupled.json"), &paints);
         save_paint_details(&format!("{prefix}-coupled-details.json"), &paints);
@@ -5349,6 +5363,7 @@ pub fn fit_all(
     (paints, summary)
 }
 
+#[cfg(feature = "diagnostics")]
 fn save_paint_kinds(path: &str, paints: &[Paint]) {
     let values: Vec<&str> = paints
         .iter()
@@ -5364,6 +5379,7 @@ fn save_paint_kinds(path: &str, paints: &[Paint]) {
     }
 }
 
+#[cfg(feature = "diagnostics")]
 fn save_paint_details(path: &str, paints: &[Paint]) {
     let values: Vec<serde_json::Value> = paints
         .iter()

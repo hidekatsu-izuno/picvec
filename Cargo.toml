@@ -18,13 +18,17 @@ include = [
     "/THIRD_PARTY_NOTICES.md",
 ]
 
+[features]
+default = []
+diagnostics = ["dep:serde_json"]
+
 [dependencies]
 clap = { version = "4.6.6", features = ["derive"] }
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
 rayon = "1.12.0"
 resvg = { version = "0.48.1", default-features = false }
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.151"
+serde_json = { version = "1.0.151", optional = true }
 tempfile = "3.23.0"
 wide = "1.7.0"
 

@@ -59,6 +59,14 @@ pub fn pow_f32_in_place(values: &mut [f32], exponent: f32) {
 pub fn atan2_f32(first: &[f32], second: &[f32]) -> Vec<f32> {
     assert_eq!(first.len(), second.len());
     let mut result = Vec::with_capacity(first.len());
+    atan2_f32_into(first, second, &mut result);
+    result
+}
+
+pub fn atan2_f32_into(first: &[f32], second: &[f32], result: &mut Vec<f32>) {
+    assert_eq!(first.len(), second.len());
+    result.clear();
+    result.reserve(first.len());
     for (first_chunk, second_chunk) in first.chunks(F32_LANES).zip(second.chunks(F32_LANES)) {
         let mut y = [1.0_f32; F32_LANES];
         let mut x = [1.0_f32; F32_LANES];
@@ -67,7 +75,6 @@ pub fn atan2_f32(first: &[f32], second: &[f32]) -> Vec<f32> {
         let output = f32x8::new(y).atan2(f32x8::new(x)).to_array();
         result.extend_from_slice(&output[..first_chunk.len()]);
     }
-    result
 }
 
 #[cfg(test)]

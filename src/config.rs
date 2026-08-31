@@ -45,8 +45,10 @@ pub struct Config {
     /// Rayon worker count. Zero selects physical cores when discoverable.
     pub rayon_threads: usize,
     /// Render the complete SVG in memory and calculate report-only quality
-    /// metrics. Disabled by default because it cannot affect the output.
+    /// metrics. Requires the `diagnostics` Cargo feature.
     pub compute_quality_metrics: bool,
+    /// Print in-memory progress diagnostics. Requires the `diagnostics` Cargo
+    /// feature.
     pub retain_diagnostics: bool,
 }
 
@@ -79,8 +81,8 @@ impl Default for Config {
             maximum_gradient_stops: 5,
             paint_primary_sample_budget: 64,
             paint_primary_min_region_density: 0.015,
-            paint_primary_min_explained_variance: 0.06,
-            paint_primary_small_min_explained_variance: 0.16,
+            paint_primary_min_explained_variance: 0.08,
+            paint_primary_small_min_explained_variance: 0.24,
             rayon_threads: 0,
             compute_quality_metrics: false,
             retain_diagnostics: false,

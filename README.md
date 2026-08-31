@@ -11,6 +11,13 @@ analytic primitives, and source-supported structural centre-lines.
 mise exec -- cargo build --release --locked
 ```
 
+Diagnostic CLI options and JSON diagnostic output are available in builds
+that enable the optional `diagnostics` feature:
+
+```bash
+mise exec -- cargo build --release --locked --features diagnostics
+```
+
 The converter uses the portable [`wide`](https://crates.io/crates/wide) SIMD
 library across supported CPU architectures. It contains no vendored or
 hand-written assembly and requires no assembly-specific build step.
@@ -39,8 +46,8 @@ Useful controls:
 --gradient-merge-error <DE>
 --solid-color-max-delta-e <DE>
 --threads <N>                 # 0: detected physical cores
---quality-metrics             # optional full-SVG DeltaE00/SSIM report
---verbose
+--quality-metrics             # diagnostics feature: full-SVG DeltaE00/SSIM report
+--verbose                     # diagnostics feature: JSON report on stderr
 ```
 
 `--solid-color-max-delta-e` controls the within-region colour range that can

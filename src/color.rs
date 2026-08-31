@@ -262,6 +262,96 @@ pub fn delta_e2000_to_many(first: &[Lab], second: Lab) -> Vec<f32> {
     delta_e2000_map(first, |_| second)
 }
 
+#[derive(Default)]
+pub(crate) struct DeltaE2000Workspace {
+    initial: Vec<(usize, Lab, Lab, f32, f32)>,
+    atan_y_first: Vec<f32>,
+    atan_x_first: Vec<f32>,
+    atan_y_second: Vec<f32>,
+    atan_x_second: Vec<f32>,
+    atan_first: Vec<f32>,
+    atan_second: Vec<f32>,
+}
+
+/// Return the exact first minimum produced by `delta_e2000_to_many` while
+/// retaining all temporary SIMD buffers for the next palette lookup.
+pub(crate) fn delta_e2000_nearest(
+    first: &[Lab],
+    second: Lab,
+    maximum_distance: f32,
+    workspace: &mut DeltaE2000Workspace,
+) -> Option<(usize, f32)> {
+    if first.is_empty() {
+        return None;
+    }
+    workspace.initial.clear();
+    workspace.atan_y_first.clear();
+    workspace.atan_x_first.clear();
+    workspace.atan_y_second.clear();
+    workspace.atan_x_second.clear();
+    workspace.initial.reserve(first.len());
+    workspace.atan_y_first.reserve(first.len());
+    workspace.atan_x_first.reserve(first.len());
+    workspace.atan_y_second.reserve(first.len());
+    workspace.atan_x_second.reserve(first.len());
+    for (index, &value) in first.iter().enumerate() {
+        // The CIEDE2000 chroma/hue quadratic is non-negative because
+        // |R_T| <= 2, so |delta-L| / S_L is an exact lower bound. Palette
+        // quantization only needs candidates inside its largest acceptance
+        // radius; anything beyond this bound creates a new representative
+        // regardless of its ordering among rejected colours.
+        let l_bar = (value.l + second.l) * 0.5;
+        let l_offset = l_bar - 50.0;
+        let sl = 1.0 + 0.015 * l_offset.powi(2) / (20.0 + l_offset.powi(2)).sqrt();
+        let lightness_lower_bound = (value.l - second.l).abs() / sl;
+        if lightness_lower_bound > maximum_distance + 1e-4 {
+            continue;
+        }
+        let c1 = value.a.hypot(value.b);
+        let c2 = second.a.hypot(second.b);
+        let c_bar = (c1 + c2) * 0.5;
+        let g = 0.5 * (1.0 - (c_bar.powi(7) / (c_bar.powi(7) + 25_f32.powi(7))).sqrt());
+        let a1p = (1.0 + g) * value.a;
+        let a2p = (1.0 + g) * second.a;
+        let c1p = a1p.hypot(value.b);
+        let c2p = a2p.hypot(second.b);
+        workspace.initial.push((index, value, second, c1p, c2p));
+        workspace.atan_y_first.push(value.b);
+        workspace.atan_x_first.push(a1p);
+        workspace.atan_y_second.push(second.b);
+        workspace.atan_x_second.push(a2p);
+    }
+    crate::elementary::atan2_f32_into(
+        &workspace.atan_y_first,
+        &workspace.atan_x_first,
+        &mut workspace.atan_first,
+    );
+    crate::elementary::atan2_f32_into(
+        &workspace.atan_y_second,
+        &workspace.atan_x_second,
+        &mut workspace.atan_second,
+    );
+    const RAD2DEG: f32 = 180.0_f32 / std::f32::consts::PI;
+    const DEG2RAD: f32 = std::f32::consts::PI / 180.0_f32;
+    let mut best = (usize::MAX, f32::INFINITY);
+    for ((&(index, value, reference, c1p, c2p), &atan_first), &atan_second) in workspace
+        .initial
+        .iter()
+        .zip(&workspace.atan_first)
+        .zip(&workspace.atan_second)
+    {
+        let h1p = (atan_first * RAD2DEG) % 360.0;
+        let h1p = if h1p < 0.0 { h1p + 360.0 } else { h1p };
+        let h2p = (atan_second * RAD2DEG) % 360.0;
+        let h2p = if h2p < 0.0 { h2p + 360.0 } else { h2p };
+        let distance = delta_e2000_after_hue(value, reference, c1p, c2p, h1p, h2p, DEG2RAD);
+        if distance <= maximum_distance && distance.total_cmp(&best.1).is_lt() {
+            best = (index, distance);
+        }
+    }
+    (best.0 != usize::MAX).then_some(best)
+}
+
 fn delta_e2000_map(first: &[Lab], second: impl Fn(usize) -> Lab) -> Vec<f32> {
     let mut initial = Vec::with_capacity(first.len());
     let mut atan_y_first = Vec::with_capacity(first.len());
@@ -411,6 +501,67 @@ mod tests {
             .map(|&value| delta_e2000(value, reference))
             .collect();
         assert_eq!(delta_e2000_to_many(&values, reference), scalar);
+    }
+
+    #[test]
+    fn reusable_nearest_matches_common_reference_batch() {
+        let reference = rgb_to_lab([0.37, 0.21, 0.82]);
+        let values: Vec<Lab> = (0..33)
+            .map(|index| {
+                let amount = index as f32 / 32.0;
+                rgb_to_lab([amount, 0.8 - 0.6 * amount, 0.1 + 0.7 * amount])
+            })
+            .collect();
+        let expected = delta_e2000_to_many(&values, reference)
+            .into_iter()
+            .enumerate()
+            .min_by(|left, right| {
+                left.1
+                    .total_cmp(&right.1)
+                    .then_with(|| left.0.cmp(&right.0))
+            });
+        let mut workspace = DeltaE2000Workspace::default();
+        assert_eq!(
+            delta_e2000_nearest(&values, reference, f32::INFINITY, &mut workspace),
+            expected
+        );
+        assert_eq!(
+            delta_e2000_nearest(&[], reference, f32::INFINITY, &mut workspace),
+            None
+        );
+        assert_eq!(
+            delta_e2000_nearest(&values, reference, f32::INFINITY, &mut workspace),
+            expected
+        );
+    }
+
+    #[test]
+    fn lightness_bound_keeps_every_candidate_inside_radius() {
+        let reference = Lab {
+            l: 51.0,
+            a: 28.0,
+            b: -31.0,
+        };
+        let values = (-20..=120)
+            .map(|lightness| Lab {
+                l: lightness as f32,
+                a: (lightness % 37) as f32 - 18.0,
+                b: (lightness % 29) as f32 - 14.0,
+            })
+            .collect::<Vec<_>>();
+        let distances = delta_e2000_to_many(&values, reference);
+        let radius = 5.0;
+        let expected = distances
+            .iter()
+            .enumerate()
+            .filter(|&(_, distance)| *distance <= radius)
+            .min_by(|left, right| left.1.total_cmp(right.1).then_with(|| left.0.cmp(&right.0)))
+            .map(|(index, &distance)| (index, distance));
+        let mut workspace = DeltaE2000Workspace::default();
+        assert_eq!(
+            delta_e2000_nearest(&values, reference, radius, &mut workspace),
+            expected
+        );
     }
 
     #[test]
