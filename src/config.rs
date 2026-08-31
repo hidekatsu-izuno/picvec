@@ -27,6 +27,8 @@ pub struct Config {
     pub quantization_dark_delta_e: f32,
     pub quantization_light_delta_e: f32,
     pub gradient_merge_error: f32,
+    /// Maximum within-region DeltaE00 range treated unconditionally as Solid.
+    pub solid_color_max_delta_e: f32,
     pub minimum_gradient_area: u32,
     pub shared_boundary_overlap: f32,
     pub maximum_gradient_stops: usize,
@@ -71,6 +73,7 @@ impl Default for Config {
             quantization_dark_delta_e: 2.5,
             quantization_light_delta_e: 5.0,
             gradient_merge_error: 2.3,
+            solid_color_max_delta_e: 1.5,
             minimum_gradient_area: 64,
             shared_boundary_overlap: 0.2,
             maximum_gradient_stops: 5,
@@ -175,6 +178,10 @@ impl Config {
             "gradient_merge_error must be finite and non-negative",
         )?;
         require(
+            self.solid_color_max_delta_e.is_finite() && self.solid_color_max_delta_e >= 0.0,
+            "solid_color_max_delta_e must be finite and non-negative",
+        )?;
+        require(
             self.minimum_gradient_area >= 1,
             "minimum_gradient_area must be at least 1",
         )?;
@@ -241,6 +248,12 @@ mod tests {
     fn nonfinite_threshold_is_rejected() {
         let config = Config {
             paint_primary_min_explained_variance: f32::NAN,
+            ..Config::default()
+        };
+        assert!(config.validate().is_err());
+
+        let config = Config {
+            solid_color_max_delta_e: f32::INFINITY,
             ..Config::default()
         };
         assert!(config.validate().is_err());

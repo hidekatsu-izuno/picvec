@@ -1689,7 +1689,11 @@ fn fit_region_samples(
         delta_e2000_pairs(&sample_labs, &vec![median_lab; sample_labs.len()]),
         0.90,
     );
-    if perceptual_range <= 2.3 {
+    // A complete just-noticeable-difference is too coarse for smooth,
+    // low-chroma shading: on light monochrome artwork it can make a visibly
+    // modelled ramp look flat after vectorization. The improvement and
+    // complexity gates below still prevent gratuitous SVG gradients.
+    if perceptual_range <= config.solid_color_max_delta_e {
         return (Paint::Solid { color: solid_color }, solid_error.mean);
     }
     // The area threshold is a model-complexity guard, not evidence that a

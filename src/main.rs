@@ -36,6 +36,9 @@ struct Arguments {
     quantization_light_delta_e: f32,
     #[arg(long, default_value_t = 2.3)]
     gradient_merge_error: f32,
+    /// Maximum within-region DeltaE00 range treated unconditionally as Solid.
+    #[arg(long, default_value_t = 1.5)]
+    solid_color_max_delta_e: f32,
     /// Samples used by the inexpensive Paint coherence gate.
     #[arg(long, default_value_t = 64)]
     paint_primary_samples: usize,
@@ -84,6 +87,7 @@ fn run() -> picvec::Result<()> {
         quantization_dark_delta_e: arguments.quantization_dark_delta_e,
         quantization_light_delta_e: arguments.quantization_light_delta_e,
         gradient_merge_error: arguments.gradient_merge_error,
+        solid_color_max_delta_e: arguments.solid_color_max_delta_e,
         paint_primary_sample_budget: arguments.paint_primary_samples,
         paint_primary_min_region_density: arguments.paint_primary_min_region_density,
         paint_primary_min_explained_variance: arguments.paint_primary_threshold,

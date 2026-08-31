@@ -37,10 +37,16 @@ Useful controls:
 --quantization-dark-delta-e <DE>
 --quantization-light-delta-e <DE>
 --gradient-merge-error <DE>
+--solid-color-max-delta-e <DE>
 --threads <N>                 # 0: detected physical cores
 --quality-metrics             # optional full-SVG DeltaE00/SSIM report
 --verbose
 ```
+
+`--solid-color-max-delta-e` controls the within-region colour range that can
+be accepted immediately as a solid fill. Lower values retain more subtle
+shading as gradients; higher values favour simpler SVG output. The default is
+1.5.
 
 Input dimensions and total area are checked from the image header before
 decoding (32,768 pixels per axis and 32 megapixels by default), and decoder
