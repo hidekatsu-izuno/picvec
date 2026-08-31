@@ -1408,30 +1408,42 @@ fn office_gradient_candidate(
     maximum_stops: usize,
 ) -> Option<(Paint, ErrorStats)> {
     let mut candidates = Vec::<(f32, Paint, Vec<f32>, Option<ErrorStats>)>::new();
-    for preset in [
-        LinearPreset::LeftToRight,
-        LinearPreset::TopToBottom,
-        LinearPreset::TopLeftToBottomRight,
-        LinearPreset::TopRightToBottomLeft,
-    ] {
-        let (start, end) = linear_geometry(preset, region_bounds);
-        let parameters: Vec<f32> = samples
-            .iter()
-            .map(|&index| linear_parameter(index, source.width, start, end).clamp(0.0, 1.0))
-            .collect();
-        let stops = fitted_stops(source, samples, &parameters, &[0.0, 1.0]);
-        let paint = Paint::Linear {
-            preset,
-            start,
-            end,
-            stops,
+    {
+        let mut push_linear = |preset: LinearPreset, start: Point, end: Point| {
+            let parameters: Vec<f32> = samples
+                .iter()
+                .map(|&index| linear_parameter(index, source.width, start, end).clamp(0.0, 1.0))
+                .collect();
+            let stops = fitted_stops(source, samples, &parameters, &[0.0, 1.0]);
+            let paint = Paint::Linear {
+                preset,
+                start,
+                end,
+                stops,
+            };
+            candidates.push((
+                paint_rgb_mse(source, samples, &paint),
+                paint,
+                parameters,
+                None,
+            ));
         };
-        candidates.push((
-            paint_rgb_mse(source, samples, &paint),
-            paint,
-            parameters,
-            None,
-        ));
+        for preset in [
+            LinearPreset::LeftToRight,
+            LinearPreset::TopToBottom,
+            LinearPreset::TopLeftToBottomRight,
+            LinearPreset::TopRightToBottomLeft,
+        ] {
+            let (start, end) = linear_geometry(preset, region_bounds);
+            push_linear(preset, start, end);
+        }
+        // Estimate continuous angles from the source lightness plane instead
+        // of constraining rotation to horizontal, vertical, or 45-degree
+        // presets.
+        for direction in fitted_linear_directions(source, samples) {
+            let (start, end) = fitted_linear_geometry(samples, source.width, direction);
+            push_linear(LinearPreset::Fitted, start, end);
+        }
     }
     for origin in [
         RadialOrigin::Center,
@@ -1600,11 +1612,10 @@ fn fit_region(
     (paint, error, run_full_fit)
 }
 
-fn office_gain_is_sufficient(
-    selected: ErrorStats,
-    office: ErrorStats,
+fn gradient_gain_is_sufficient(
+    solid: ErrorStats,
+    gradient: ErrorStats,
     small_region: bool,
-    selected_is_solid: bool,
     minimum_improvement: f32,
     region_area: usize,
     minimum_gradient_area: usize,
@@ -1618,15 +1629,13 @@ fn office_gain_is_sufficient(
         // One full DeltaE00 just-noticeable-difference over the minimum face
         // area is the fixed perceptual budget for adding an SVG definition.
         small_region_office_required_gain(minimum_improvement, region_area, minimum_gradient_area)
-    } else if selected_is_solid {
-        0.05 * 2.3
     } else {
-        1e-3
+        0.05 * 2.3
     };
-    let relative_gain = !small_region || office.mean <= selected.mean * 0.88;
+    let relative_gain = !small_region || gradient.mean <= solid.mean * 0.88;
     relative_gain
-        && selected.mean - office.mean >= required_gain
-        && office.percentile <= selected.percentile + 1e-4
+        && solid.mean - gradient.mean >= required_gain
+        && gradient.percentile <= solid.percentile + 1e-4
 }
 
 fn small_region_office_required_gain(
@@ -1696,44 +1705,20 @@ fn fit_region_samples(
     if perceptual_range <= config.solid_color_max_delta_e {
         return (Paint::Solid { color: solid_color }, solid_error.mean);
     }
-    // The area threshold is a model-complexity guard, not evidence that a
-    // small face is perceptually flat.  Keep the reference legacy fit for
-    // normal faces.  Small faces start from Solid and may only use the
-    // bounded Office model below when it passes the same strict improvement
-    // gate as a legacy Solid-to-gradient promotion.
-    let mut selected = if small_region {
-        Paint::Solid { color: solid_color }
-    } else {
-        // Preserve the reference's two independent model families.  The
-        // legacy robust three-stop model competes with Solid first; only then
-        // does the richer Office-preset estimator get a chance to replace
-        // that selection.
-        let (legacy, legacy_stats) = legacy_gradient_candidate(
+    // Rank every geometry family with one perceptual objective. Previously
+    // the source-fitted direction and the Office presets had different
+    // promotion thresholds, so a less accurate radial preset could replace
+    // Solid after a better continuously rotated linear fit was rejected.
+    let mut candidates = vec![(Paint::Solid { color: solid_color }, solid_error)];
+    if !small_region {
+        candidates.push(legacy_gradient_candidate(
             source,
             source_labs,
             samples,
             region_bounds,
             directional_only,
-        );
-        if trace {
-            eprintln!(
-                "paint trace label={label} area={area} samples={} solid={solid_error:?} legacy={legacy:?} legacy_stats={legacy_stats:?}",
-                samples.len(),
-            );
-        }
-        if solid_error.mean - legacy_stats.mean >= minimum_improvement
-            && legacy_stats.mean <= solid_error.mean * 0.88
-        {
-            legacy
-        } else {
-            Paint::Solid { color: solid_color }
-        }
-    };
-    // `_fit_stops` ranks legacy geometries using its three-stop basis, then
-    // `_spec_error_stats` re-samples the selected exported Paint before the
-    // Office candidate comparison.
-    let mut selected_stats =
-        paint_stats_against_labs(source_labs, samples, source.width, &selected);
+        ));
+    }
 
     let office_candidate = office_gradient_candidate(
         source,
@@ -1741,29 +1726,34 @@ fn fit_region_samples(
         samples,
         region_bounds,
         config.maximum_gradient_stops,
-    );
+    )
+    .filter(|(paint, _)| !directional_only || matches!(paint, Paint::Linear { .. }));
+    if let Some(candidate) = office_candidate.clone() {
+        candidates.push(candidate);
+    }
+    let (selected, selected_stats) = candidates
+        .into_iter()
+        .min_by(|left, right| objective(left.1).total_cmp(&objective(right.1)))
+        .expect("Solid always supplies one Paint candidate");
     if trace {
         eprintln!(
-            "paint trace selected_before_office={selected:?} selected_stats={selected_stats:?} office={office_candidate:?}"
+            "paint trace label={label} area={area} samples={} solid={solid_error:?} selected={selected:?} selected_stats={selected_stats:?} office={office_candidate:?}",
+            samples.len(),
         );
     }
-    if let Some((office, office_stats)) = office_candidate
-        .filter(|(paint, _)| !directional_only || matches!(paint, Paint::Linear { .. }))
-    {
-        if office_gain_is_sufficient(
+    if !matches!(selected, Paint::Solid { .. })
+        && gradient_gain_is_sufficient(
+            solid_error,
             selected_stats,
-            office_stats,
             small_region,
-            matches!(selected, Paint::Solid { .. }),
             minimum_improvement,
             area,
             config.minimum_gradient_area as usize,
-        ) {
-            selected = office;
-            selected_stats = office_stats;
-        }
+        )
+    {
+        return (selected, selected_stats.mean);
     }
-    (selected, selected_stats.mean)
+    (Paint::Solid { color: solid_color }, solid_error.mean)
 }
 
 fn fitted_stops_direct(
@@ -5523,6 +5513,53 @@ mod tests {
     }
 
     #[test]
+    fn office_fit_uses_the_source_angle_for_a_rotated_linear_ramp() {
+        let width = 31;
+        let height = 29;
+        let source_direction = (0.26_f32, 0.97_f32);
+        let maximum_projection =
+            (width - 1) as f32 * source_direction.0 + (height - 1) as f32 * source_direction.1;
+        let source = Raster::new(
+            width,
+            height,
+            (0..height)
+                .flat_map(|y| {
+                    (0..width).map(move |x| {
+                        let parameter = (x as f32 * source_direction.0
+                            + y as f32 * source_direction.1)
+                            / maximum_projection;
+                        [
+                            0.18 + 0.52 * parameter,
+                            0.32 + 0.36 * parameter,
+                            0.78 - 0.31 * parameter,
+                        ]
+                    })
+                })
+                .collect(),
+        );
+        let samples = (0..width * height).collect::<Vec<_>>();
+        let source_labs = lab_pixels(&source);
+        let (paint, _) =
+            office_gradient_candidate(&source, &source_labs, &samples, bounds(&samples, width), 5)
+                .expect("a coherent ramp must produce a gradient candidate");
+        let Paint::Linear {
+            preset: LinearPreset::Fitted,
+            start,
+            end,
+            ..
+        } = paint
+        else {
+            panic!("a non-cardinal ramp must retain its continuously fitted angle");
+        };
+        let fitted = (end.x - start.x, end.y - start.y);
+        let fitted_length = fitted.0.hypot(fitted.1);
+        let source_length = source_direction.0.hypot(source_direction.1);
+        let alignment = (fitted.0 * source_direction.0 + fitted.1 * source_direction.1).abs()
+            / (fitted_length * source_length);
+        assert!(alignment > 0.995, "angle alignment was {alignment}");
+    }
+
+    #[test]
     fn gradient_discontinuity_separates_a_ramp_from_a_step() {
         let lab = |lightness| Lab {
             l: lightness,
@@ -5654,52 +5691,68 @@ mod tests {
             percentile: 6.0,
         };
         let minimum_improvement = 0.25 * 2.3;
-        assert!(office_gain_is_sufficient(
+        assert!(gradient_gain_is_sufficient(
             selected,
             ErrorStats {
                 mean: 7.5,
                 percentile: 6.0,
             },
             true,
-            true,
             minimum_improvement,
             60,
             64,
         ));
-        assert!(!office_gain_is_sufficient(
+        assert!(!gradient_gain_is_sufficient(
             selected,
             ErrorStats {
                 mean: 8.0,
                 percentile: 6.0,
             },
             true,
-            true,
             minimum_improvement,
             60,
             64,
         ));
-        assert!(!office_gain_is_sufficient(
+        assert!(!gradient_gain_is_sufficient(
             selected,
             ErrorStats {
                 mean: 7.5,
                 percentile: 6.1,
             },
             true,
-            true,
             minimum_improvement,
             60,
             64,
         ));
-        assert!(!office_gain_is_sufficient(
+        assert!(!gradient_gain_is_sufficient(
             selected,
             ErrorStats {
                 mean: 3.0,
                 percentile: 6.0,
             },
             true,
-            true,
             minimum_improvement,
             16,
+            64,
+        ));
+    }
+
+    #[test]
+    fn normal_region_uses_one_gain_gate_for_every_gradient_model() {
+        let solid = ErrorStats {
+            mean: 2.4,
+            percentile: 3.8,
+        };
+        let gradient = ErrorStats {
+            mean: 1.9,
+            percentile: 3.3,
+        };
+        assert!(gradient_gain_is_sufficient(
+            solid,
+            gradient,
+            false,
+            0.25 * 2.3,
+            14_000,
             64,
         ));
     }
