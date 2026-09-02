@@ -4082,6 +4082,54 @@ struct CouplingBoundary {
     same_paint_key: bool,
 }
 
+/// Rank the interfaces that compete for a pairwise continuity solve.
+///
+/// A long, source-supported ramp interface contributes many more visible
+/// false-edge pixels than a short interface with the same rendered seam.
+/// The fourth-root weight is deliberately weak: it breaks that scheduling
+/// tie without letting a long, low-error boundary eclipse a short severe one.
+/// Flat/quantized interfaces retain the former seam-only order because their
+/// source evidence does not identify a continuous material ramp.
+fn coupling_boundary_priority(boundary: &CouplingBoundary) -> f32 {
+    let length_weight = if boundary_has_continuous_gradient(&boundary.boundary)
+        && !boundary_has_low_source_delta(&boundary.boundary)
+    {
+        (boundary.boundary.length as f32).sqrt().sqrt()
+    } else {
+        1.0
+    };
+    boundary.seam_p90 * length_weight
+}
+
+fn coupling_regression_limits(
+    has_continuous_gradient_boundary: bool,
+    has_patch_boundary: bool,
+    config: &Config,
+) -> (f32, f32) {
+    let mut maximum_mean = if has_continuous_gradient_boundary {
+        0.35
+    } else if has_patch_boundary {
+        0.25
+    } else {
+        0.15
+    } * config.gradient_merge_error;
+    let mut maximum_p90 = if has_continuous_gradient_boundary {
+        0.95
+    } else if has_patch_boundary {
+        0.75
+    } else {
+        0.50
+    } * config.gradient_merge_error;
+    // Native faces are independently meaningful Paint owners.  Seam removal
+    // must not buy continuity by visibly degrading either interior.  Patch
+    // faces are different slices of one owner and retain their wider gate.
+    if !has_patch_boundary {
+        maximum_mean = maximum_mean.min(0.05);
+        maximum_p90 = maximum_p90.min(0.20);
+    }
+    (maximum_mean, maximum_p90)
+}
+
 const FIXED_STOP_OFFSETS: [f32; 5] = [0.0, 0.25, 0.50, 0.75, 1.0];
 
 fn five_stop_basis(parameter: f32, offsets: &[f32; 5]) -> [f64; 5] {
@@ -4538,6 +4586,7 @@ fn couple_adjacent_paints(
         second
             .same_paint_key
             .cmp(&first.same_paint_key)
+            .then(coupling_boundary_priority(second).total_cmp(&coupling_boundary_priority(first)))
             .then(second.seam_p90.total_cmp(&first.seam_p90))
     });
     let mut union = UnionFind::new(paints.len());
@@ -4833,23 +4882,14 @@ fn couple_adjacent_paints(
         let has_continuous_gradient_boundary = boundaries
             .iter()
             .any(|boundary| boundary_has_continuous_gradient(&boundary.boundary));
-        // When the native four-sample profile proves slope continuity, allow
-        // a little more local fit error in exchange for removing a much
-        // larger artificial Paint seam.  The pairwise solve bounds its reach.
-        let maximum_mean_regression = if has_continuous_gradient_boundary {
-            0.35
-        } else if has_patch_boundary {
-            0.25
-        } else {
-            0.15
-        } * config.gradient_merge_error;
-        let maximum_p90_regression = if has_continuous_gradient_boundary {
-            0.95
-        } else if has_patch_boundary {
-            0.75
-        } else {
-            0.50
-        } * config.gradient_merge_error;
+        // Keep artificial patch slices on their wider reconstruction gate,
+        // while independently meaningful native faces use the sub-JND limits
+        // above. The pairwise solve bounds the spatial reach in either case.
+        let (maximum_mean_regression, maximum_p90_regression) = coupling_regression_limits(
+            has_continuous_gradient_boundary,
+            has_patch_boundary,
+            config,
+        );
         let accepted = mean_regression <= maximum_mean_regression
             && p90_regression <= maximum_p90_regression
             && before_p90 - after_p90 >= 0.50
@@ -5615,6 +5655,49 @@ mod tests {
         let source = Raster::new(12, 8, pixels);
         let segmentation = two_face_segmentation(&source);
         assert!(smooth_paint_boundaries(&source, &segmentation, 8, false).is_empty());
+    }
+
+    fn coupling_boundary(length: usize, median_delta_e: f32) -> CouplingBoundary {
+        CouplingBoundary {
+            boundary: SmoothPaintBoundary {
+                left: 0,
+                right: 1,
+                points: Vec::new(),
+                length,
+                median_delta_e,
+                percentile_delta_e: median_delta_e + 1.0,
+                gradient_sample_fraction: 1.0,
+                median_gradient_discontinuity: 0.2,
+                percentile_gradient_discontinuity: 0.3,
+            },
+            seam_p90: 4.0,
+            same_paint_key: false,
+        }
+    }
+
+    #[test]
+    fn continuous_ramp_priority_accounts_for_visible_boundary_length() {
+        let short = coupling_boundary(16, 6.0);
+        let long = coupling_boundary(256, 6.0);
+        assert!(coupling_boundary_priority(&long) > coupling_boundary_priority(&short));
+
+        let flat_short = coupling_boundary(16, 0.5);
+        let flat_long = coupling_boundary(256, 0.5);
+        assert_eq!(
+            coupling_boundary_priority(&flat_short),
+            coupling_boundary_priority(&flat_long)
+        );
+    }
+
+    #[test]
+    fn native_continuity_gate_keeps_interior_colour_regression_sub_jnd() {
+        let config = Config::default();
+        let native = coupling_regression_limits(true, false, &config);
+        assert_eq!(native, (0.05, 0.20));
+
+        let patch = coupling_regression_limits(true, true, &config);
+        assert!(patch.0 > native.0);
+        assert!(patch.1 > native.1);
     }
 
     #[test]
