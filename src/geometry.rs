@@ -2656,6 +2656,60 @@ pub fn fitted_structural_open_path_data(
     tolerance: f32,
     smoothing_sigma: f32,
 ) -> String {
+    fitted_structural_open_path_data_with_tangents(points, tolerance, smoothing_sigma, None, None)
+}
+
+fn constrain_structural_endpoint_tangents(
+    curves: &mut [CurveSegment],
+    start_tangent: Option<Point>,
+    end_tangent: Option<Point>,
+) {
+    if let (Some(curve), Some(tangent)) = (curves.first_mut(), start_tangent.map(normalized)) {
+        if tangent.x != 0.0 || tangent.y != 0.0 {
+            if let CurveSegment::Cubic {
+                start,
+                ref mut first,
+                ..
+            } = curve
+            {
+                let handle = start.distance(*first);
+                *first = Point {
+                    x: start.x + handle * tangent.x,
+                    y: start.y + handle * tangent.y,
+                };
+            }
+        }
+    }
+    if let (Some(curve), Some(tangent)) = (curves.last_mut(), end_tangent.map(normalized)) {
+        if tangent.x != 0.0 || tangent.y != 0.0 {
+            if let CurveSegment::Cubic {
+                ref mut second,
+                end,
+                ..
+            } = curve
+            {
+                let handle = end.distance(*second);
+                *second = Point {
+                    x: end.x - handle * tangent.x,
+                    y: end.y - handle * tangent.y,
+                };
+            }
+        }
+    }
+}
+
+/// Fit an editable centre-line while preserving a graph-level continuation
+/// direction at either endpoint. The tangent directions follow the path from
+/// start to end. Candidate controls are still accepted only when their dense
+/// samples remain in the detector-chain corridor, so G1 regularization cannot
+/// invent an unsupported hook at a junction.
+pub(crate) fn fitted_structural_open_path_data_with_tangents(
+    points: &[Point],
+    tolerance: f32,
+    smoothing_sigma: f32,
+    start_tangent: Option<Point>,
+    end_tangent: Option<Point>,
+) -> String {
     if points.len() < 2 {
         return String::new();
     }
@@ -2672,14 +2726,14 @@ pub fn fitted_structural_open_path_data(
         effective_sigma,
         70.0,
         &HashSet::new(),
-        None,
-        None,
+        start_tangent,
+        end_tangent,
     );
     let fitted_samples = sample_curve_sequence(&fitted, 0.35);
     let fitted_supported = !fitted.is_empty()
         && nearest_sample_distances(&fitted_samples, &raw, tolerance.max(0.25)).is_some()
         && nearest_sample_distances(&raw, &fitted_samples, tolerance.max(0.25)).is_some();
-    let baseline = if fitted_supported {
+    let mut baseline = if fitted_supported {
         fitted
     } else if closed {
         simplify_polyline(&raw, tolerance.max(0.25), true)
@@ -2692,6 +2746,11 @@ pub fn fitted_structural_open_path_data(
             .map(|pair| straight_cubic(pair[0], pair[1]))
             .collect::<Vec<_>>()
     };
+    let unconstrained_baseline = baseline.clone();
+    constrain_structural_endpoint_tangents(&mut baseline, start_tangent, end_tangent);
+    if !boundary_corridor_supported(&raw, &baseline, tolerance.max(0.25)) {
+        baseline = unconstrained_baseline;
+    }
     if baseline.is_empty() {
         return String::new();
     }
@@ -2734,8 +2793,10 @@ pub fn fitted_structural_open_path_data(
     candidate_tolerances.dedup_by(|first, second| *first == *second);
     for candidate_tolerance in candidate_tolerances {
         for &sigma in &scales {
-            let (candidate, candidate_samples, _) =
+            let (mut candidate, _, _) =
                 fairing_candidate_segments(&reference, candidate_tolerance, sigma);
+            constrain_structural_endpoint_tangents(&mut candidate, start_tangent, end_tangent);
+            let candidate_samples = sample_curve_sequence(&candidate, 0.35);
             let complexity = candidate.len();
             if candidate.is_empty() || complexity >= best_key.0 {
                 continue;
@@ -6531,6 +6592,36 @@ mod tests {
     use crate::color::rgb_to_lab;
     use crate::raster::Raster;
     use crate::segment::{RegionStats, Segmentation, SegmentationSummary};
+
+    #[test]
+    fn structural_endpoint_constraint_preserves_anchor_and_sets_g1_direction() {
+        let mut curves = vec![CurveSegment::Cubic {
+            start: Point { x: 0.0, y: 0.0 },
+            first: Point { x: 1.0, y: 1.0 },
+            second: Point { x: 3.0, y: 1.0 },
+            end: Point { x: 4.0, y: 0.0 },
+        }];
+        constrain_structural_endpoint_tangents(
+            &mut curves,
+            Some(Point { x: 1.0, y: 0.0 }),
+            Some(Point { x: 1.0, y: 0.0 }),
+        );
+        let CurveSegment::Cubic {
+            start,
+            first,
+            second,
+            end,
+        } = curves[0]
+        else {
+            panic!("expected cubic");
+        };
+        assert_eq!(start, Point { x: 0.0, y: 0.0 });
+        assert_eq!(end, Point { x: 4.0, y: 0.0 });
+        assert_eq!(first.y, start.y);
+        assert_eq!(second.y, end.y);
+        assert!(first.x > start.x);
+        assert!(second.x < end.x);
+    }
 
     #[test]
     fn neutral_gradient_patch_inherits_adjacent_material_hue_class() {

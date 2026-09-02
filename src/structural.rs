@@ -5,7 +5,7 @@ use serde::Serialize;
 
 use crate::color::{delta_e2000, delta_e76, rgb_to_lab, Lab};
 use crate::edge::{dilate, dilate_square, erode, lab_pixels, EdgeRoles};
-use crate::geometry::{fitted_structural_open_path_data, Point};
+use crate::geometry::{fitted_structural_open_path_data_with_tangents, Point};
 use crate::raster::{percentile, Raster};
 
 #[derive(Clone, Debug)]
@@ -2162,6 +2162,188 @@ fn graph_point_tangents(points: &[Point]) -> Vec<(f32, f32)> {
         .collect()
 }
 
+fn point_key(point: Point) -> (i64, i64) {
+    (
+        (point.x * 1_000_000.0).round() as i64,
+        (point.y * 1_000_000.0).round() as i64,
+    )
+}
+
+/// Select geometric straight-through continuations at graph junctions and
+/// return a directed path tangent for each participating endpoint.  This is
+/// the deterministic counterpart of the topology-aware stroke initialization
+/// used by recent line-art vectorizers: it does not guess semantics, and only
+/// pairs branches whose local directions already agree within 50 degrees.
+fn graph_continuation_tangents(strokes: &[StructuralStroke]) -> HashMap<(usize, bool), Point> {
+    let mut groups = HashMap::<(i64, i64), Vec<(usize, bool, Point)>>::new();
+    for (stroke_index, stroke) in strokes.iter().enumerate() {
+        if stroke.points.len() < 2 {
+            continue;
+        }
+        for at_start in [true, false] {
+            let (endpoint, tangent) = graph_endpoint(stroke, at_start);
+            groups.entry(point_key(endpoint)).or_default().push((
+                stroke_index,
+                at_start,
+                Point {
+                    x: tangent.0,
+                    y: tangent.1,
+                },
+            ));
+        }
+    }
+
+    let minimum_opposition = 50.0_f32.to_radians().cos();
+    let mut result = HashMap::new();
+    for members in groups.values().filter(|members| members.len() >= 2) {
+        let mut candidates = Vec::<(f32, usize, usize)>::new();
+        for first in 0..members.len() {
+            for second in first + 1..members.len() {
+                if members[first].0 == members[second].0 {
+                    continue;
+                }
+                let opposition = -(members[first].2.x * members[second].2.x
+                    + members[first].2.y * members[second].2.y);
+                if opposition >= minimum_opposition {
+                    candidates.push((opposition, first, second));
+                }
+            }
+        }
+        candidates.sort_by(|first, second| {
+            second
+                .0
+                .total_cmp(&first.0)
+                .then(first.1.cmp(&second.1))
+                .then(first.2.cmp(&second.2))
+        });
+        let mut used = HashSet::new();
+        for (_, first, second) in candidates {
+            if used.contains(&first) || used.contains(&second) {
+                continue;
+            }
+            let mut axis = Point {
+                x: members[first].2.x - members[second].2.x,
+                y: members[first].2.y - members[second].2.y,
+            };
+            let length = axis.x.hypot(axis.y);
+            if length <= 1e-8 {
+                continue;
+            }
+            axis.x /= length;
+            axis.y /= length;
+            if axis.x * members[first].2.x + axis.y * members[first].2.y < 0.0 {
+                axis.x = -axis.x;
+                axis.y = -axis.y;
+            }
+            for (member, outward) in [
+                (first, axis),
+                (
+                    second,
+                    Point {
+                        x: -axis.x,
+                        y: -axis.y,
+                    },
+                ),
+            ] {
+                let (stroke, at_start, _) = members[member];
+                let directed = if at_start {
+                    Point {
+                        x: -outward.x,
+                        y: -outward.y,
+                    }
+                } else {
+                    outward
+                };
+                result.insert((stroke, at_start), directed);
+            }
+            used.extend([first, second]);
+        }
+    }
+    result
+}
+
+/// Move centre-line samples by at most half a pixel toward the source colour
+/// response along the local normal.  The profile search is followed by a
+/// three-sample median, which removes alternating pixel-centre jitter without
+/// moving graph endpoints; high-turn samples themselves are never scored.
+fn refine_stroke_centerline(
+    stroke: &StructuralStroke,
+    source_lab: &[Lab],
+    width: usize,
+    height: usize,
+) -> Vec<Point> {
+    if stroke.points.len() < 5 || !matches!(stroke.role, "ridge" | "legacy-structural") {
+        return stroke.points.clone();
+    }
+    let target = rgb_to_lab(stroke.color);
+    let tangents = graph_point_tangents(&stroke.points);
+    let offsets = [-0.5_f32, -0.25, 0.0, 0.25, 0.5];
+    let mut selected = vec![0.0_f32; stroke.points.len()];
+    for index in 1..stroke.points.len() - 1 {
+        let tangent = tangents[index];
+        if tangent.0 == 0.0 && tangent.1 == 0.0 {
+            continue;
+        }
+        let point = stroke.points[index];
+        let incoming = stroke.points[index - 1];
+        let outgoing = stroke.points[index + 1];
+        let left_length = incoming.distance(point);
+        let right_length = outgoing.distance(point);
+        if left_length > 1e-8 && right_length > 1e-8 {
+            let left = (
+                (point.x - incoming.x) / left_length,
+                (point.y - incoming.y) / left_length,
+            );
+            let right = (
+                (outgoing.x - point.x) / right_length,
+                (outgoing.y - point.y) / right_length,
+            );
+            if left.0 * right.0 + left.1 * right.1 < 45.0_f32.to_radians().cos() {
+                continue;
+            }
+        }
+        let normal = (-tangent.1, tangent.0);
+        let score = |offset: f32| {
+            let sample = bilinear_lab_precise(
+                source_lab,
+                width,
+                height,
+                [
+                    point.x as f64 + offset as f64 * normal.0 as f64,
+                    point.y as f64 + offset as f64 * normal.1 as f64,
+                ],
+            );
+            delta_e2000(sample, target) + 0.75 * offset * offset
+        };
+        let centre_score = score(0.0);
+        let (best_offset, best_score) = offsets
+            .iter()
+            .copied()
+            .map(|offset| (offset, score(offset)))
+            .min_by(|first, second| first.1.total_cmp(&second.1))
+            .unwrap_or((0.0, centre_score));
+        if best_score + 0.15 < centre_score {
+            selected[index] = best_offset;
+        }
+    }
+    let mut regularized = selected.clone();
+    for index in 1..selected.len() - 1 {
+        let mut neighbourhood = [selected[index - 1], selected[index], selected[index + 1]];
+        neighbourhood.sort_by(f32::total_cmp);
+        regularized[index] = neighbourhood[1];
+    }
+    stroke
+        .points
+        .iter()
+        .zip(tangents)
+        .zip(regularized)
+        .map(|((&point, tangent), offset)| Point {
+            x: point.x - offset * tangent.1,
+            y: point.y + offset * tangent.0,
+        })
+        .collect()
+}
+
 fn straight_graph_line(
     points: &[Point],
     tolerance: f32,
@@ -3778,16 +3960,13 @@ pub fn select_missing_with_junctions(
     let mut endpoint_counts = HashMap::<(i64, i64), usize>::new();
     for edge in &selected_graph {
         for point in [edge.points[0], edge.points[edge.points.len() - 1]] {
-            *endpoint_counts
-                .entry((
-                    (point.x * 1_000_000.0).round() as i64,
-                    (point.y * 1_000_000.0).round() as i64,
-                ))
-                .or_default() += 1;
+            let key = point_key(point);
+            *endpoint_counts.entry(key).or_default() += 1;
         }
     }
+    let endpoint_tangents = graph_continuation_tangents(&selected_graph);
     let mut strokes = Vec::new();
-    for stroke in selected_graph {
+    for (stroke_index, stroke) in selected_graph.into_iter().enumerate() {
         let length = stroke
             .points
             .windows(2)
@@ -3806,19 +3985,13 @@ pub fn select_missing_with_junctions(
         } else {
             1.0
         };
-        let start_key = (
-            (stroke.points[0].x * 1_000_000.0).round() as i64,
-            (stroke.points[0].y * 1_000_000.0).round() as i64,
-        );
-        let end_key = (
-            (stroke.points[stroke.points.len() - 1].x * 1_000_000.0).round() as i64,
-            (stroke.points[stroke.points.len() - 1].y * 1_000_000.0).round() as i64,
-        );
+        let start_key = point_key(stroke.points[0]);
+        let end_key = point_key(stroke.points[stroke.points.len() - 1]);
         let shared_start = endpoint_counts.get(&start_key).copied().unwrap_or(0) > 1;
         let shared_end = endpoint_counts.get(&end_key).copied().unwrap_or(0) > 1;
-        let (points, path_data) = if let Some((mut start, mut end)) =
-            straight_graph_line(&stroke.points, std::f32::consts::FRAC_1_SQRT_2, minimum)
-        {
+        let straight =
+            straight_graph_line(&stroke.points, std::f32::consts::FRAC_1_SQRT_2, minimum);
+        let (points, path_data) = if let Some((mut start, mut end)) = straight {
             if shared_start {
                 start = stroke.points[0];
             }
@@ -3827,7 +4000,14 @@ pub fn select_missing_with_junctions(
             }
             (vec![start, end], None)
         } else {
-            let path_data = fitted_structural_open_path_data(&stroke.points, 0.75, 0.45);
+            let fitting_points = refine_stroke_centerline(&stroke, &source_lab, width, height);
+            let path_data = fitted_structural_open_path_data_with_tangents(
+                &fitting_points,
+                0.75,
+                0.45,
+                endpoint_tangents.get(&(stroke_index, true)).copied(),
+                endpoint_tangents.get(&(stroke_index, false)).copied(),
+            );
             (stroke.points.clone(), Some(path_data))
         };
         if points.len() < 2 {
@@ -3919,6 +4099,49 @@ mod tests {
             }
         }
         values
+    }
+
+    fn graph_stroke(points: &[(f32, f32)]) -> StructuralStroke {
+        StructuralStroke {
+            points: points.iter().map(|&(x, y)| Point { x, y }).collect(),
+            path_data: None,
+            precise_points: None,
+            color: [0.0; 3],
+            width: 1.0,
+            role: "legacy-structural",
+            width_samples: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn junction_grouping_selects_the_straight_through_pair() {
+        let strokes = vec![
+            graph_stroke(&[(-4.0, 0.0), (-2.0, 0.0), (0.0, 0.0)]),
+            graph_stroke(&[(0.0, 0.0), (2.0, 0.0), (4.0, 0.0)]),
+            graph_stroke(&[(0.0, 0.0), (0.0, 2.0), (0.0, 4.0)]),
+        ];
+        let tangents = graph_continuation_tangents(&strokes);
+        assert_eq!(tangents.get(&(0, false)), Some(&Point { x: 1.0, y: 0.0 }));
+        assert_eq!(tangents.get(&(1, true)), Some(&Point { x: 1.0, y: 0.0 }));
+        assert!(!tangents.contains_key(&(2, true)));
+    }
+
+    #[test]
+    fn source_profile_refines_a_pixel_centred_skeleton_without_moving_endpoints() {
+        let mut source = Raster::blank(9, 9, [1.0; 3]);
+        for x in 1..8 {
+            source.pixels[3 * 9 + x] = [0.0; 3];
+            source.pixels[4 * 9 + x] = [0.45; 3];
+        }
+        let stroke = graph_stroke(&(1..8).map(|x| (x as f32 + 0.5, 4.5)).collect::<Vec<_>>());
+        let refined = refine_stroke_centerline(&stroke, &lab_pixels(&source), 9, 9);
+        assert_eq!(refined[0], stroke.points[0]);
+        assert_eq!(
+            refined[refined.len() - 1],
+            stroke.points[stroke.points.len() - 1]
+        );
+        assert!(refined[3].y < 4.25, "refined={refined:?}");
+        assert!(refined[3].y >= 4.0);
     }
 
     #[test]
