@@ -4190,6 +4190,7 @@ fn connected_adaptive_edge_geometry(
     start_vertex: u64,
     end_vertex: u64,
     at_end: bool,
+    stride: usize,
 ) -> Option<(Point, Point)> {
     let edge = EdgeKey::new(start_vertex, end_vertex);
     let mut pieces = edge_spans.get(&edge)?.clone();
@@ -4210,7 +4211,7 @@ fn connected_adaptive_edge_geometry(
         pieces.first().copied()
     }?;
     let interval = oriented_curve_interval(piece.curve, piece.start_parameter, piece.end_parameter);
-    match (at_end, interval) {
+    let (position, tangent) = match (at_end, interval) {
         (true, CurveSegment::Line { start, end }) => Some((
             end,
             Point {
@@ -4239,6 +4240,35 @@ fn connected_adaptive_edge_geometry(
                 y: first.y - start.y,
             },
         )),
+    }?;
+    // A Potrace master is parameterized by raster-chain index. On a long
+    // curve its geometric speed need not be uniform, so the endpoint of one
+    // sliced unit edge can lie several pixels beyond the grid vertex that the
+    // slice represents. Vertex proposals are bounded later, but continuity
+    // fitting used to consume the unbounded endpoint here and could therefore
+    // begin by travelling backwards. Use the same source-cell constraint at
+    // both stages so adjacent fits share a feasible endpoint.
+    let connection_vertex = if at_end { end_vertex } else { start_vertex };
+    let origin = point_from_vertex(connection_vertex, stride);
+    Some((bounded_vertex_position(origin, position), tangent))
+}
+
+fn bounded_vertex_position(origin: Point, position: Point) -> Point {
+    let displacement = Point {
+        x: position.x - origin.x,
+        y: position.y - origin.y,
+    };
+    let distance = displacement.x.hypot(displacement.y);
+    // Match the shared-vertex displacement budget used by the reference
+    // implementation for the 0.5-pixel Paint fitting corridor.
+    const MAXIMUM_SHIFT: f32 = 0.25;
+    if distance <= MAXIMUM_SHIFT {
+        position
+    } else {
+        Point {
+            x: origin.x + MAXIMUM_SHIFT * displacement.x / distance,
+            y: origin.y + MAXIMUM_SHIFT * displacement.y / distance,
+        }
     }
 }
 
@@ -4513,11 +4543,15 @@ fn fit_adaptive_boundary_geometry(
                 0.5,
             );
             let mut master_id = strand_index.saturating_mul(MASTER_IDS_PER_STRAND);
+            // Use Potrace's standard corner threshold for material
+            // silhouettes. The previous 1.2 value rounded compact cusps into
+            // bulb-shaped caps; same-material continuity contours use their
+            // separate, more permissive fit below.
             let (polygon, curves) = potrace_master_curves(
                 &regularized.points,
                 closed,
                 0.5,
-                1.2,
+                1.0,
                 &mut master_id,
                 &regularized.fixed,
             );
@@ -5118,6 +5152,7 @@ fn fit_adaptive_boundary_geometry(
                         track[fit_start - 1],
                         track[fit_start],
                         true,
+                        stride,
                     ) {
                         raw[0] = position;
                         start_tangent = Some(tangent);
@@ -5129,6 +5164,7 @@ fn fit_adaptive_boundary_geometry(
                         track[fit_end],
                         track[fit_end + 1],
                         false,
+                        stride,
                     ) {
                         let last = raw.len() - 1;
                         raw[last] = position;
@@ -5464,25 +5500,11 @@ fn fit_adaptive_boundary_geometry(
             .iter()
             .filter_map(|&(weight, point)| (weight == best_weight).then_some(point))
             .collect();
-        let mut position = Point {
+        let position = Point {
             x: best.iter().map(|point| point.x).sum::<f32>() / best.len() as f32,
             y: best.iter().map(|point| point.y).sum::<f32>() / best.len() as f32,
         };
-        let displacement = Point {
-            x: position.x - origin.x,
-            y: position.y - origin.y,
-        };
-        let distance = displacement.x.hypot(displacement.y);
-        // Python uses min(0.5, max(0.25, corridor - 0.25)); the Paint
-        // fitting corridor is 0.5, so the actual vertex adjustment is 0.25.
-        let maximum_shift = 0.25_f32;
-        if distance > maximum_shift {
-            position = Point {
-                x: origin.x + maximum_shift * displacement.x / distance,
-                y: origin.y + maximum_shift * displacement.y / distance,
-            };
-        }
-        vertex_positions.insert(vertex, position);
+        vertex_positions.insert(vertex, bounded_vertex_position(origin, position));
     }
     let mut regularized_observations = VertexPositions::new();
     for (vertex, values) in regularized_proposals {
@@ -5524,8 +5546,8 @@ fn adaptive_chain_curves(
     if raw_edges.is_empty() {
         return (Vec::new(), Vec::new());
     }
-    let mut spans = Vec::<AdaptiveCurveSpan>::new();
-    for &(start, end) in raw_edges {
+    let mut spans = Vec::<(AdaptiveCurveSpan, usize)>::new();
+    for (edge_index, &(start, end)) in raw_edges.iter().enumerate() {
         let edge = EdgeKey::new(start, end);
         let mut pieces = geometry.edge_spans.get(&edge).cloned().unwrap_or_default();
         if start != edge.0 {
@@ -5539,19 +5561,20 @@ fn adaptive_chain_curves(
                 })
                 .collect();
         }
-        spans.extend(pieces);
+        spans.extend(pieces.into_iter().map(|piece| (piece, edge_index)));
     }
-    let mut merged = Vec::<AdaptiveCurveSpan>::new();
-    for span in spans {
+    let mut merged = Vec::<(AdaptiveCurveSpan, usize, usize)>::new();
+    for (span, edge_index) in spans {
         if let Some(previous) = merged.last_mut() {
-            if previous.master_id == span.master_id
-                && (previous.end_parameter - span.start_parameter).abs() <= 1e-5
+            if previous.0.master_id == span.master_id
+                && (previous.0.end_parameter - span.start_parameter).abs() <= 1e-5
             {
-                previous.end_parameter = span.end_parameter;
+                previous.0.end_parameter = span.end_parameter;
+                previous.2 = edge_index;
                 continue;
             }
         }
-        merged.push(span);
+        merged.push((span, edge_index, edge_index));
     }
     let positioned = |vertex: u64| {
         geometry
@@ -5564,8 +5587,8 @@ fn adaptive_chain_curves(
     raw.push(positioned(raw_edges[raw_edges.len() - 1].1));
     let mut continuity_curve = Vec::with_capacity(merged.len());
     let mut curves: Vec<CurveSegment> = merged
-        .into_iter()
-        .map(|span| {
+        .iter()
+        .map(|(span, _, _)| {
             continuity_curve.push(
                 geometry
                     .continuity_faired_master_ids
@@ -5583,6 +5606,33 @@ fn adaptive_chain_curves(
             })
             .collect();
         continuity_curve.resize(curves.len(), false);
+    }
+    // A curve master is parameterized by source-chain index, but Bézier
+    // speed within that master is not uniform. When two different masters
+    // meet exactly between raster edges, their sliced endpoints can therefore
+    // disagree even though both refer to the same topology vertex. Anchor
+    // only such edge-boundary handoffs to the already bounded shared vertex;
+    // transitions inside one raster edge retain their fitted parameter.
+    if merged.len() == curves.len() {
+        for index in 0..curves.len().saturating_sub(1) {
+            let (_, _, left_edge) = merged[index];
+            let (_, right_edge, _) = merged[index + 1];
+            if left_edge + 1 == right_edge {
+                let joint = raw[right_edge];
+                // Moving a sliced endpoint also translates its adjacent
+                // control handle. Keep that repair inside the same local
+                // raster-support budget as fairing; otherwise a badly
+                // parameterized master can turn a small corner into a long
+                // spike even though the topology itself is valid.
+                let maximum_handoff_shift = 2.0 * fairing_raster_corridor();
+                if curves[index].end().distance(joint) <= maximum_handoff_shift
+                    && curves[index + 1].start().distance(joint) <= maximum_handoff_shift
+                {
+                    curves[index] = curve_with_end(curves[index], joint);
+                    curves[index + 1] = curve_with_start(curves[index + 1], joint);
+                }
+            }
+        }
     }
     if let Some(first) = curves.first_mut() {
         let delta = Point {
@@ -6859,6 +6909,125 @@ mod tests {
         assert_eq!(second.y, end.y);
         assert!(first.x > start.x);
         assert!(second.x < end.x);
+    }
+
+    #[test]
+    fn connected_curve_endpoint_stays_inside_shared_vertex_budget() {
+        let stride = 64;
+        let start = vertex_id(10, 10, stride);
+        let end = vertex_id(11, 10, stride);
+        let edge = EdgeKey::new(start, end);
+        let spans = HashMap::from([(
+            edge,
+            vec![AdaptiveCurveSpan {
+                master_id: 0,
+                curve: straight_cubic(Point { x: 0.0, y: 10.0 }, Point { x: 30.0, y: 10.0 }),
+                start_parameter: 0.5,
+                end_parameter: 0.75,
+            }],
+        )]);
+
+        let (at_start, _) =
+            connected_adaptive_edge_geometry(&spans, start, end, false, stride).unwrap();
+        let (at_end, _) =
+            connected_adaptive_edge_geometry(&spans, start, end, true, stride).unwrap();
+
+        assert_eq!(at_start, Point { x: 10.25, y: 10.0 });
+        assert_eq!(at_end, Point { x: 11.25, y: 10.0 });
+    }
+
+    #[test]
+    fn potrace_default_corner_threshold_keeps_a_compact_cusp() {
+        let mut master_id = 0;
+        let smooth = potrace_corner_curves(
+            Point { x: -1.0, y: 0.0 },
+            Point { x: 0.0, y: 3.0 },
+            Point { x: 1.0, y: 0.0 },
+            [0.0, 1.0, 2.0],
+            1.2,
+            &mut master_id,
+        );
+        let sharp = potrace_corner_curves(
+            Point { x: -1.0, y: 0.0 },
+            Point { x: 0.0, y: 3.0 },
+            Point { x: 1.0, y: 0.0 },
+            [0.0, 1.0, 2.0],
+            1.0,
+            &mut master_id,
+        );
+
+        assert_eq!(smooth.len(), 1);
+        assert_eq!(sharp.len(), 2);
+        assert_eq!(sharp[0].3.end(), Point { x: 0.0, y: 3.0 });
+        assert_eq!(sharp[1].3.start(), Point { x: 0.0, y: 3.0 });
+    }
+
+    #[test]
+    fn adjacent_masters_share_their_raster_vertex_exactly() {
+        let stride = 64;
+        let first = vertex_id(10, 10, stride);
+        let joint = vertex_id(11, 10, stride);
+        let last = vertex_id(12, 10, stride);
+        let mut geometry = AdaptiveBoundaryGeometry::default();
+        geometry.edge_spans.insert(
+            EdgeKey::new(first, joint),
+            vec![AdaptiveCurveSpan {
+                master_id: 1,
+                curve: straight_cubic(Point { x: 10.0, y: 10.0 }, Point { x: 11.0, y: 10.0 }),
+                start_parameter: 0.0,
+                end_parameter: 1.0,
+            }],
+        );
+        geometry.edge_spans.insert(
+            EdgeKey::new(joint, last),
+            vec![AdaptiveCurveSpan {
+                master_id: 2,
+                curve: straight_cubic(Point { x: 8.5, y: 10.0 }, Point { x: 12.0, y: 10.0 }),
+                start_parameter: 0.0,
+                end_parameter: 1.0,
+            }],
+        );
+
+        let (_, curves) =
+            adaptive_chain_curves(&[(first, joint), (joint, last)], &geometry, stride);
+
+        assert_eq!(curves.len(), 2);
+        assert_eq!(curves[0].end(), Point { x: 11.0, y: 10.0 });
+        assert_eq!(curves[1].start(), Point { x: 11.0, y: 10.0 });
+    }
+
+    #[test]
+    fn distant_master_handoff_does_not_translate_a_control_handle() {
+        let stride = 64;
+        let first = vertex_id(10, 10, stride);
+        let joint = vertex_id(11, 10, stride);
+        let last = vertex_id(12, 10, stride);
+        let mut geometry = AdaptiveBoundaryGeometry::default();
+        geometry.edge_spans.insert(
+            EdgeKey::new(first, joint),
+            vec![AdaptiveCurveSpan {
+                master_id: 1,
+                curve: straight_cubic(Point { x: 10.0, y: 10.0 }, Point { x: 11.0, y: 10.0 }),
+                start_parameter: 0.0,
+                end_parameter: 1.0,
+            }],
+        );
+        geometry.edge_spans.insert(
+            EdgeKey::new(joint, last),
+            vec![AdaptiveCurveSpan {
+                master_id: 2,
+                curve: straight_cubic(Point { x: 15.0, y: 10.0 }, Point { x: 12.0, y: 10.0 }),
+                start_parameter: 0.0,
+                end_parameter: 1.0,
+            }],
+        );
+
+        let (_, curves) =
+            adaptive_chain_curves(&[(first, joint), (joint, last)], &geometry, stride);
+
+        assert_eq!(curves.len(), 2);
+        assert_eq!(curves[0].end(), Point { x: 11.0, y: 10.0 });
+        assert_eq!(curves[1].start(), Point { x: 15.0, y: 10.0 });
     }
 
     #[test]
