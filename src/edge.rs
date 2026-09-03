@@ -1950,13 +1950,16 @@ fn merge_source_edges(
             break;
         }
     }
-    let role = if first.role == "ridge-on-boundary" || second.role == "ridge-on-boundary" {
-        "ridge-on-boundary"
-    } else if first.role == "dark-boundary" || second.role == "dark-boundary" {
-        "dark-boundary"
-    } else {
-        "ridge"
-    };
+    let role =
+        if first.role == "bright-ridge-on-boundary" || second.role == "bright-ridge-on-boundary" {
+            "bright-ridge-on-boundary"
+        } else if first.role == "ridge-on-boundary" || second.role == "ridge-on-boundary" {
+            "ridge-on-boundary"
+        } else if first.role == "dark-boundary" || second.role == "dark-boundary" {
+            "dark-boundary"
+        } else {
+            "ridge"
+        };
     SourceEdge {
         points: first_points,
         width: merged_width,
@@ -2668,6 +2671,7 @@ fn add_profile_supported_ridges(
     lab: &[Lab],
     absolute_dark: &[bool],
     locally_dark: &[bool],
+    strong_bright: &[bool],
     width: usize,
     height: usize,
     scale: f32,
@@ -2710,7 +2714,12 @@ fn add_profile_supported_ridges(
             let bounded_dark = profile.confidence >= 0.65
                 && profile.dark_contrast >= 0.06
                 && profile.width <= (4.0 * scale) as f64;
-            valid[index] = palette_supported || bounded_dark;
+            let bounded_bright_boundary = profile.role == ProfileRole::RidgeOnBoundary
+                && profile.confidence >= 0.8
+                && profile.dark_contrast <= -0.06
+                && profile.width <= (2.5 * scale) as f64
+                && strong_bright[support_index];
+            valid[index] = palette_supported || bounded_dark || bounded_bright_boundary;
         }
         let cumulative: Vec<f64> = std::iter::once(0.0)
             .chain(points.windows(2).scan(0.0, |total, pair| {
@@ -2769,6 +2778,27 @@ fn add_profile_supported_ridges(
             } else {
                 sorted_widths[middle]
             };
+            let bright_boundary_count = profiles[first..=last]
+                .iter()
+                .filter(|profile| {
+                    profile.role == ProfileRole::RidgeOnBoundary && profile.dark_contrast <= -0.06
+                })
+                .count();
+            let bright_boundary = bright_boundary_count * 2 > last + 1 - first;
+            if bright_boundary {
+                let lower = percentile(
+                    local_widths.iter().map(|value| *value as f32).collect(),
+                    0.20,
+                )
+                .max(0.8);
+                let upper = percentile(
+                    local_widths.iter().map(|value| *value as f32).collect(),
+                    0.80,
+                );
+                if upper >= 1.75 * lower && upper - lower >= 1.5 * scale.max(1.0) {
+                    continue;
+                }
+            }
             if offsets.len() >= 3 {
                 let kernel = gaussian_kernel_f64(0.8);
                 let radius = kernel.len() / 2;
@@ -2799,7 +2829,8 @@ fn add_profile_supported_ridges(
                 .windows(2)
                 .map(|pair| (pair[1][0] - pair[0][0]).hypot(pair[1][1] - pair[0][1]))
                 .sum();
-            if run_length < (3.0 * measured_width).max((2.0 * scale) as f64) {
+            let minimum_length_widths = if bright_boundary { 5.0 } else { 3.0 };
+            if run_length < (minimum_length_widths * measured_width).max((2.0 * scale) as f64) {
                 continue;
             }
             let boundary_count = profiles[first..=last]
@@ -2810,7 +2841,9 @@ fn add_profile_supported_ridges(
             profile_ridge_candidates.push(SourceEdge {
                 points: run_points,
                 width: measured_width,
-                role: if is_boundary {
+                role: if bright_boundary {
+                    "bright-ridge-on-boundary"
+                } else if is_boundary {
                     "ridge-on-boundary"
                 } else {
                     "ridge"
@@ -2994,11 +3027,13 @@ fn classify_normal_profile_edges(image: &Raster) -> EdgeRoles {
         &mut raw_ridge_graph,
     );
     let mut profile_dark_boundary_candidates = Vec::<SourceEdge>::new();
+    let strong_bright = crate::ridge::strong_branches(image).bright;
     let (profile_ridge_candidates, profile_ridge_extensions) = add_profile_supported_ridges(
         &classified_chains,
         &lab,
         &absolute_dark,
         &locally_dark,
+        &strong_bright,
         width,
         height,
         scale,
@@ -3009,7 +3044,9 @@ fn classify_normal_profile_edges(image: &Raster) -> EdgeRoles {
     let mut visible_ridge_graph = Vec::<SourceEdge>::new();
     let mut wide_dark_outline_graph = Vec::<SourceEdge>::new();
     for graph in raw_ridge_graph {
-        if graph.role == "ridge" && graph.width <= ownership_width as f64 {
+        if matches!(graph.role, "ridge" | "bright-ridge-on-boundary")
+            && graph.width <= ownership_width as f64
+        {
             visible_ridge_graph.push(graph);
         } else {
             wide_dark_outline_graph.push(graph);
@@ -3351,8 +3388,9 @@ pub fn perceptual_smooth(image: &Raster, config: &Config) -> Raster {
 #[cfg(test)]
 mod tests {
     use super::{
-        classify, nonoverlapping_extensions, point_tangents, width_profile_requires_paint,
-        NumpyPcg64, SourceEdge, PROFILE_OVERLAP_DISTANCE,
+        classify, classify_profile, nonoverlapping_extensions, point_tangents,
+        width_profile_requires_paint, NumpyPcg64, ProfileRole, SourceEdge,
+        PROFILE_OVERLAP_DISTANCE,
     };
     use crate::raster::Raster;
 
@@ -3505,6 +3543,27 @@ mod tests {
         let roles = classify(&image);
         assert!(roles.summary.skeleton_pixels > 0, "{:?}", roles.summary);
         assert!(roles.summary.shading_pixels > 0, "{:?}", roles.summary);
+    }
+
+    #[test]
+    fn narrow_bright_extremum_keeps_boundary_polarity() {
+        let offsets = (-28..=28)
+            .map(|value| value as f32 * 0.25)
+            .collect::<Vec<_>>();
+        let samples = offsets
+            .iter()
+            .map(|&offset| {
+                let side = if offset < 0.0 { 0.22 } else { 0.48 };
+                let peak = (1.0 - offset.abs() / 1.25).max(0.0);
+                [side + peak * (0.94 - side), 0.0, 0.0]
+            })
+            .collect::<Vec<_>>();
+
+        let profile = classify_profile(&samples, &offsets, 7.0);
+
+        assert_eq!(profile.role, ProfileRole::RidgeOnBoundary);
+        assert!(profile.dark_contrast < -0.06);
+        assert!(profile.width < 2.5);
     }
 
     #[test]

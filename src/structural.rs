@@ -67,20 +67,6 @@ impl StructuralInk {
             summary: StructuralSummary::default(),
         }
     }
-
-    pub(crate) fn add_cool_silhouette_path(&mut self, path_data: String) {
-        self.strokes.push(StructuralStroke {
-            points: Vec::new(),
-            path_data: Some(path_data),
-            precise_points: None,
-            color: [0.094, 0.11, 0.122],
-            width: 1.6,
-            role: "cool-silhouette",
-            width_samples: Vec::new(),
-        });
-        self.summary.stroke_count += 1;
-        self.summary.boundary_profile_strokes += 1;
-    }
 }
 
 fn neighbour_indices(index: usize, width: usize, height: usize) -> Vec<usize> {
@@ -1374,7 +1360,10 @@ pub fn analyse(source: &Raster, roles: &mut EdgeRoles) -> (Raster, StructuralInk
             .filter(|stroke| {
                 matches!(
                     stroke.role,
-                    "ridge-on-boundary" | "coloured-ridge-on-boundary" | "dark-boundary"
+                    "ridge-on-boundary"
+                        | "bright-ridge-on-boundary"
+                        | "coloured-ridge-on-boundary"
+                        | "dark-boundary"
                 )
             })
             .count(),
@@ -1642,6 +1631,7 @@ fn boundary_profile_flags(
 ) -> (Vec<bool>, Vec<bool>) {
     let offsets = [-0.75_f32, -0.5, -0.25, 0.0, 0.25, 0.5, 0.75];
     let coloured = stroke.role == "coloured-ridge-on-boundary";
+    let bright = stroke.role == "bright-ridge-on-boundary";
     let mut missing = Vec::with_capacity(stroke.points.len());
     let mut valley = Vec::with_capacity(stroke.points.len());
     let precise_points = stroke.precise_points.clone().unwrap_or_else(|| {
@@ -1679,6 +1669,12 @@ fn boundary_profile_flags(
         let rendered_sides = [sample(rendered_lab, -1.5), sample(rendered_lab, 1.5)];
         let target = if coloured {
             source_profile[3]
+        } else if bright {
+            source_profile
+                .iter()
+                .copied()
+                .max_by(|first, second| first.l.total_cmp(&second.l))
+                .unwrap_or(source_profile[3])
         } else {
             source_profile
                 .iter()
@@ -1687,9 +1683,12 @@ fn boundary_profile_flags(
                 .unwrap_or(source_profile[3])
         };
         let source_dark_contrast = source_sides[0].l.min(source_sides[1].l) - target.l;
+        let source_bright_contrast = target.l - source_sides[0].l.max(source_sides[1].l);
         let source_side_colour_contrast =
             delta_e2000(source_sides[0], target).min(delta_e2000(source_sides[1], target));
-        let source_line_contrast = if coloured {
+        let source_line_contrast = if bright {
+            source_bright_contrast.max(source_side_colour_contrast)
+        } else if coloured {
             source_dark_contrast.max(source_side_colour_contrast)
         } else {
             source_dark_contrast
@@ -1700,15 +1699,25 @@ fn boundary_profile_flags(
             .fold(f32::INFINITY, f32::min);
         let rendered_dark_contrast =
             rendered_sides[0].l.min(rendered_sides[1].l) - rendered_minimum_lightness;
+        let rendered_maximum_lightness = rendered_profile
+            .iter()
+            .map(|value| value.l)
+            .fold(f32::NEG_INFINITY, f32::max);
+        let rendered_bright_contrast =
+            rendered_maximum_lightness - rendered_sides[0].l.max(rendered_sides[1].l);
         let minimum_error = rendered_profile
             .iter()
             .map(|&value| delta_e2000(value, target))
             .fold(f32::INFINITY, f32::min);
         let has_valley = source_line_contrast >= 4.0;
-        let is_missing = minimum_error > 4.0
-            && has_valley
-            && (rendered_dark_contrast < 0.65 * source_dark_contrast
-                || rendered_minimum_lightness - target.l >= rendered_core_lightness_excess);
+        let contrast_missing = if bright {
+            rendered_bright_contrast < 0.65 * source_bright_contrast
+                || target.l - rendered_maximum_lightness >= rendered_core_lightness_excess
+        } else {
+            rendered_dark_contrast < 0.65 * source_dark_contrast
+                || rendered_minimum_lightness - target.l >= rendered_core_lightness_excess
+        };
+        let is_missing = minimum_error > 4.0 && has_valley && contrast_missing;
         valley.push(has_valley);
         missing.push(is_missing);
         #[cfg(feature = "diagnostics")]
@@ -1716,10 +1725,12 @@ fn boundary_profile_flags(
             debug_values.push(serde_json::json!({
                 "point": point,
                 "source_dark": source_dark_contrast,
+                "source_bright": source_bright_contrast,
                 "side_colour": source_side_colour_contrast,
                 "line": source_line_contrast,
                 "error": minimum_error,
                 "rendered_dark": rendered_dark_contrast,
+                "rendered_bright": rendered_bright_contrast,
                 "light_excess": rendered_minimum_lightness - target.l,
                 "valley": has_valley,
                 "missing": is_missing,
@@ -1995,17 +2006,20 @@ fn merge_graph_edges(
     second_points[0] = shared;
     first_points.extend_from_slice(&second_points[1..]);
     let (width, width_samples) = weighted_graph_width(&[first, second]);
-    let role = if first.role == "coloured-ridge-on-boundary"
-        || second.role == "coloured-ridge-on-boundary"
-    {
-        "coloured-ridge-on-boundary"
-    } else if first.role == "ridge-on-boundary" || second.role == "ridge-on-boundary" {
-        "ridge-on-boundary"
-    } else if first.role == "dark-boundary" || second.role == "dark-boundary" {
-        "dark-boundary"
-    } else {
-        "ridge"
-    };
+    let role =
+        if first.role == "bright-ridge-on-boundary" || second.role == "bright-ridge-on-boundary" {
+            "bright-ridge-on-boundary"
+        } else if first.role == "coloured-ridge-on-boundary"
+            || second.role == "coloured-ridge-on-boundary"
+        {
+            "coloured-ridge-on-boundary"
+        } else if first.role == "ridge-on-boundary" || second.role == "ridge-on-boundary" {
+            "ridge-on-boundary"
+        } else if first.role == "dark-boundary" || second.role == "dark-boundary" {
+            "dark-boundary"
+        } else {
+            "ridge"
+        };
     StructuralStroke {
         points: first_points,
         path_data: None,
@@ -2272,7 +2286,12 @@ fn refine_stroke_centerline(
     width: usize,
     height: usize,
 ) -> Vec<Point> {
-    if stroke.points.len() < 5 || !matches!(stroke.role, "ridge" | "legacy-structural") {
+    if stroke.points.len() < 5
+        || !matches!(
+            stroke.role,
+            "ridge" | "bright-ridge-on-boundary" | "legacy-structural"
+        )
+    {
         return stroke.points.clone();
     }
     let target = rgb_to_lab(stroke.color);
@@ -2496,7 +2515,35 @@ fn sample_graph_color(source: &Raster, stroke: &StructuralStroke) -> [f32; 3] {
             samples = core;
         }
     }
-    if !matches!(
+    if stroke.role == "bright-ridge-on-boundary" {
+        samples = indices
+            .iter()
+            .map(|&index| {
+                let x = index % source.width;
+                let y = index / source.width;
+                let mut brightest = source.pixels[index];
+                let mut maximum =
+                    0.2126 * brightest[0] + 0.7152 * brightest[1] + 0.0722 * brightest[2];
+                for dy in -1_isize..=1 {
+                    for dx in -1_isize..=1 {
+                        let px = (x as isize + dx).clamp(0, source.width.saturating_sub(1) as isize)
+                            as usize;
+                        let py = (y as isize + dy)
+                            .clamp(0, source.height.saturating_sub(1) as isize)
+                            as usize;
+                        let candidate = source.pixels[py * source.width + px];
+                        let luminance =
+                            0.2126 * candidate[0] + 0.7152 * candidate[1] + 0.0722 * candidate[2];
+                        if luminance > maximum {
+                            maximum = luminance;
+                            brightest = candidate;
+                        }
+                    }
+                }
+                brightest
+            })
+            .collect();
+    } else if !matches!(
         stroke.role,
         "legacy-structural" | "coloured-ridge-on-boundary"
     ) {
@@ -3624,7 +3671,7 @@ pub fn select_missing_with_junctions(
     let mut visible_graph = Vec::new();
     let mut boundary_graph = Vec::new();
     for mut stroke in graph_candidates {
-        if stroke.role == "ridge" {
+        if matches!(stroke.role, "ridge" | "bright-ridge-on-boundary") {
             visible_graph.push(stroke);
         } else {
             stroke.role = classify_boundary_role(&stroke, &source_lab, width, height);
@@ -3675,7 +3722,8 @@ pub fn select_missing_with_junctions(
             "dark-boundary" => 0.90,
             _ => 0.60,
         };
-        if mask_fraction_along(&stroke, &edge_wide_support, width, height) >= complete_threshold {
+        let wide_fraction = mask_fraction_along(&stroke, &edge_wide_support, width, height);
+        if wide_fraction >= complete_threshold {
             complete_profile_edges.push(stroke);
             continue;
         }
@@ -3773,12 +3821,12 @@ pub fn select_missing_with_junctions(
 
     let primary_graph = selected_graph
         .iter()
-        .filter(|edge| edge.role == "ridge")
+        .filter(|edge| matches!(edge.role, "ridge" | "bright-ridge-on-boundary"))
         .cloned()
         .collect::<Vec<_>>();
     let secondary_graph = selected_graph
         .into_iter()
-        .filter(|edge| edge.role != "ridge")
+        .filter(|edge| !matches!(edge.role, "ridge" | "bright-ridge-on-boundary"))
         .collect::<Vec<_>>();
     let secondary_graph = remove_graph_aligned_overlap(
         secondary_graph,
@@ -3946,7 +3994,10 @@ pub fn select_missing_with_junctions(
     selected_graph.retain(|edge| {
         if !matches!(
             edge.role,
-            "ridge-on-boundary" | "coloured-ridge-on-boundary" | "dark-boundary"
+            "ridge-on-boundary"
+                | "bright-ridge-on-boundary"
+                | "coloured-ridge-on-boundary"
+                | "dark-boundary"
         ) {
             return true;
         }
@@ -4040,7 +4091,10 @@ pub fn select_missing_with_junctions(
         .filter(|stroke| {
             matches!(
                 stroke.role,
-                "ridge-on-boundary" | "coloured-ridge-on-boundary" | "dark-boundary"
+                "ridge-on-boundary"
+                    | "bright-ridge-on-boundary"
+                    | "coloured-ridge-on-boundary"
+                    | "dark-boundary"
             )
         })
         .count();
@@ -4194,6 +4248,43 @@ mod tests {
             18,
             9,
         ));
+    }
+
+    #[test]
+    fn bright_boundary_ridge_uses_positive_profile_polarity() {
+        let width = 18;
+        let height = 9;
+        let mut source = Raster::blank(width, height, [0.18; 3]);
+        for x in 4..14 {
+            source.pixels[4 * width + x] = [0.92; 3];
+        }
+        let rendered = Raster::blank(width, height, [0.18; 3]);
+        let stroke = StructuralStroke {
+            points: (4..14)
+                .map(|x| Point {
+                    x: x as f32 + 0.5,
+                    y: 4.5,
+                })
+                .collect(),
+            path_data: None,
+            precise_points: None,
+            color: [0.92; 3],
+            width: 1.2,
+            role: "bright-ridge-on-boundary",
+            width_samples: Vec::new(),
+        };
+        let (missing, supported) = boundary_profile_flags(
+            &stroke,
+            &lab_pixels(&source),
+            &lab_pixels(&rendered),
+            width,
+            height,
+            5.0,
+        );
+
+        assert!(missing.iter().filter(|&&value| value).count() >= 8);
+        assert!(supported.iter().all(|&value| value));
+        assert!(sample_graph_color(&source, &stroke)[0] > 0.8);
     }
 
     #[test]

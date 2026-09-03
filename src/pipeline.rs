@@ -11,7 +11,7 @@ use std::collections::HashSet;
 
 use crate::color::{rgb_to_lab, Lab};
 use crate::config::Config;
-use crate::edge::{classify, dilate_square, perceptual_smooth, EdgeSummary};
+use crate::edge::{classify, dilate, dilate_square, perceptual_smooth, EdgeSummary};
 use crate::geometry::{build_with_topology as build_geometry, GeometrySummary};
 use crate::gradient::{
     fit_all, merge_partition, merge_source_supported_paints, refresh_summary, GradientSummary,
@@ -608,10 +608,11 @@ fn vectorize_inner(
         processing.height,
     );
     report_progress(config, "paint-aware-merge", started, &mut checkpoint);
-    refine_thin_paint_ownership(
+    let refined_structural_ownership = refine_thin_paint_ownership(
         &paint_reference,
         &mut segmentation,
         &structural_candidates.paint_ownership_mask,
+        &structural_candidates.source_line_mask,
     );
     save_label_diagnostic(
         "thin-labels",
@@ -626,6 +627,21 @@ fn vectorize_inner(
         &segmentation.paint_samples,
         &ridge_analysis,
     );
+    let refined_structural_exclusion = dilate(
+        &refined_structural_ownership,
+        segmentation.width,
+        segmentation.height,
+        1,
+    );
+    for (sample, &structural) in segmentation
+        .paint_samples
+        .iter_mut()
+        .zip(&refined_structural_exclusion)
+    {
+        if structural {
+            *sample = false;
+        }
+    }
     let strong_branches =
         crate::ridge::strong_branches_from_analysis(&segmentation.canonical, &ridge_analysis);
     drop(ridge_analysis);
@@ -678,6 +694,12 @@ fn vectorize_inner(
     if supported_paint_merges.merges > 0 || exact_paint_merges > 0 {
         refresh_summary(&mut gradient_report, &paints);
     }
+    save_label_diagnostic(
+        "paint-merged-labels",
+        &segmentation.labels,
+        processing.width,
+        processing.height,
+    );
     gradient_report.source_supported_paint_merges = supported_paint_merges.merges;
     gradient_report.source_supported_boundary_edges_removed =
         supported_paint_merges.boundary_edges_removed;
@@ -704,9 +726,6 @@ fn vectorize_inner(
         &geometry_report.paint_junctions,
         config.shared_boundary_overlap,
     );
-    for path in &geometry_report.cool_silhouette_paths {
-        ownership.structural.add_cool_silhouette_path(path.clone());
-    }
     ownership.summary.structural_strokes = ownership.structural.strokes.len();
     report_progress(config, "structural-selection", started, &mut checkpoint);
     // The complete preview is report-only. Structural ownership is already

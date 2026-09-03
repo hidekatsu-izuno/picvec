@@ -4938,8 +4938,9 @@ pub(crate) struct SupportedPaintMergeReport {
 /// This is intentionally downstream of Paint fitting.  Quantizer labels are
 /// topology owners, so mere colour similarity is insufficient: every
 /// connected interface must be below a native-source JND, the two emitted
-/// Paints must already agree at that interface, and a single Office-compatible
-/// candidate must preserve the measured error on both incident faces.  The
+/// Paints must already agree at that interface, and one editable Paint made
+/// from Office-compatible gradient components must preserve the measured
+/// error on both incident faces.  The
 /// accepted labels are compacted before shared geometry is rebuilt, which
 /// removes the obsolete master curve instead of hiding it with an overlay.
 pub(crate) fn merge_source_supported_paints(
@@ -5064,29 +5065,39 @@ pub(crate) fn merge_source_supported_paints(
             region_pixels[right].len(),
             256,
         );
-        let (layered, layered_stats) = fit_layered_residual_paint(
-            source,
-            &layered_samples,
-            combined_bounds,
+        // A union fit is not always the best underpaint for a smooth residual:
+        // either incident face may already model the common ramp accurately.
+        // Try each non-layered base and let the same per-face CIEDE2000 gates
+        // below decide whether removing the interface is lossless enough.
+        let mut layered_bases = vec![
             proposal.paint.clone(),
-            1,
-        );
-        let layered_score = objective(layered_stats)
-            .max(objective(paint_stats(
-                source,
-                &region_samples[left],
-                &layered,
-            )))
-            .max(objective(paint_stats(
-                source,
-                &region_samples[right],
-                &layered,
-            )));
-        if layered_score < proposal.score {
-            proposal.paint = layered;
-            proposal.score = layered_score;
-            layered_selected += usize::from(matches!(proposal.paint, Paint::Layered { .. }));
+            paints[left].clone(),
+            paints[right].clone(),
+        ];
+        layered_bases.dedup();
+        for base in layered_bases
+            .into_iter()
+            .filter(|paint| !matches!(paint, Paint::Layered { .. }))
+        {
+            let (layered, layered_stats) =
+                fit_layered_residual_paint(source, &layered_samples, combined_bounds, base, 3);
+            let layered_score = objective(layered_stats)
+                .max(objective(paint_stats(
+                    source,
+                    &region_samples[left],
+                    &layered,
+                )))
+                .max(objective(paint_stats(
+                    source,
+                    &region_samples[right],
+                    &layered,
+                )));
+            if layered_score < proposal.score {
+                proposal.paint = layered;
+                proposal.score = layered_score;
+            }
         }
+        layered_selected += usize::from(matches!(proposal.paint, Paint::Layered { .. }));
         if !proposal.score.is_finite() {
             rejected_nonfinite += 1;
             continue;

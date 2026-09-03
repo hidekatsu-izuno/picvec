@@ -1301,20 +1301,46 @@ fn boundary_sleeve_assignment(
         return None;
     }
 
+    let mut min_x = width;
+    let mut min_y = height;
+    let mut max_x = 0_usize;
+    let mut max_y = 0_usize;
+    for &index in component {
+        let x = index % width;
+        let y = index / width;
+        min_x = min_x.min(x);
+        min_y = min_y.min(y);
+        max_x = max_x.max(x);
+        max_y = max_y.max(y);
+    }
+    let box_width = max_x - min_x + 1;
+    let box_height = max_y - min_y + 1;
+    // A diagonal edge quantized into two intermediate tones can make the
+    // farther durable face just over three pixels away. Extend the lookup by
+    // one pixel only for a small native-width fragment; broad faces and real
+    // thin marks continue to use the conservative radius.
+    let parent_search_radius = if component.len() <= 24 && box_width.min(box_height) <= 4 {
+        4_isize
+    } else {
+        3_isize
+    };
+    let parent_search_radius_squared = parent_search_radius * parent_search_radius;
+
     // For every sleeve pixel, retain the nearest sample of each stable owner
     // in the native antialias radius.  Counting an owner at most once per
     // pixel prevents a large face from winning solely because it occupies
     // more of the neighbourhood disk.
     let mut nearby = Vec::<HashMap<u32, (isize, isize, isize)>>::with_capacity(component.len());
     let mut support = HashMap::<u32, usize>::new();
+    let mut junction_support = HashMap::<u32, usize>::new();
     for &index in component {
         let x = index % width;
         let y = index / width;
         let mut owners = HashMap::<u32, (isize, isize, isize)>::new();
-        for dy in -3_isize..=3 {
-            for dx in -3_isize..=3 {
+        for dy in -parent_search_radius..=parent_search_radius {
+            for dx in -parent_search_radius..=parent_search_radius {
                 let distance_squared = dx * dx + dy * dy;
-                if distance_squared == 0 || distance_squared > 9 {
+                if distance_squared == 0 || distance_squared > parent_search_radius_squared {
                     continue;
                 }
                 let px = x as isize + dx;
@@ -1338,24 +1364,19 @@ fn boundary_sleeve_assignment(
                 }
             }
         }
-        for &owner in owners.keys() {
+        for (&owner, &(distance_squared, _, _)) in &owners {
             *support.entry(owner).or_default() += 1;
+            // Radius four is a recovery allowance for a two-tone boundary
+            // split by an intermediate quantisation band. A third face only
+            // proves a real junction when it is present in the original,
+            // conservative native antialias neighbourhood.
+            if distance_squared <= 9 {
+                *junction_support.entry(owner).or_default() += 1;
+            }
         }
         nearby.push(owners);
     }
 
-    let mut min_x = width;
-    let mut min_y = height;
-    let mut max_x = 0_usize;
-    let mut max_y = 0_usize;
-    for &index in component {
-        let x = index % width;
-        let y = index / width;
-        min_x = min_x.min(x);
-        min_y = min_y.min(y);
-        max_x = max_x.max(x);
-        max_y = max_y.max(y);
-    }
     let one_pixel_run = min_x == max_x || min_y == max_y;
     let required_both = if one_pixel_run {
         (component.len() * 2).div_ceil(3)
@@ -1401,7 +1422,11 @@ fn boundary_sleeve_assignment(
             // Broad support from any third durable face makes this a real
             // junction rather than a two-sided boundary sleeve.
             if candidates.iter().any(|&(owner, amount)| {
-                owner != first && owner != second && amount * 4 > component.len()
+                let junction_amount = junction_support.get(&owner).copied().unwrap_or(0);
+                owner != first
+                    && owner != second
+                    && amount * 4 > component.len()
+                    && junction_amount * 4 > component.len()
             }) {
                 continue;
             }
@@ -1622,69 +1647,55 @@ fn correct_antialias_partition(
             (candidate.1, candidate.0)
         }
     };
-    // A shallow raster edge can alternate between a four-pixel overshoot run
-    // and one parent-face pixel. Those runs do not touch, so ordinary
-    // component adjacency leaves a repeated row of rectangular Paint faces.
-    // Bridge only a sequence of at least three identical four-pixel sleeves,
-    // across exactly one parent-owned gap. This identifies raster sampling
-    // phase without broadening adjacency for isolated marks or corner-touching
-    // details such as the car mirror.
+    let sleeve_pairs_compatible = |first: (u32, u32), second: (u32, u32)| {
+        first.0 == second.0 || first.0 == second.1 || first.1 == second.0 || first.1 == second.1
+    };
+    // A shallow raster edge can alternate between a one-to-four-pixel
+    // overshoot run and a short parent-owned gap. Those runs do not touch, so
+    // ordinary component adjacency leaves a repeated row of rectangular
+    // Paint faces. Bridge nearby candidates whose two-sided explanations
+    // share a durable parent; multiple quantized antialias tones can make the
+    // other parent change along one boundary. Requiring a sequence of at
+    // least three below identifies raster sampling phase without broadening
+    // adjacency for isolated marks or corner-touching authored details.
     let mut gap_adjacency = vec![HashSet::<u32>::new(); count];
-    const GAP_OFFSETS: [(isize, isize); 12] = [
-        (-2, -1),
-        (-2, 0),
-        (-2, 1),
-        (-1, -2),
-        (-1, 2),
-        (0, -2),
-        (0, 2),
-        (1, -2),
-        (1, 2),
-        (2, -1),
-        (2, 0),
-        (2, 1),
-    ];
+    const GAP_RADIUS: isize = 7;
+    const GAP_RADIUS_SQUARED: isize = GAP_RADIUS * GAP_RADIUS;
+    const GAP_COMPONENT_MAX_AREA: usize = 4;
     for label in 0..count {
         let Some(candidate) = sleeve_candidates[label].as_ref() else {
             continue;
         };
-        if components[label].len() != 4 {
+        if components[label].len() > GAP_COMPONENT_MAX_AREA {
             continue;
         }
         let pair = sleeve_pair(candidate);
         for &index in &components[label] {
             let x = index % image.width;
             let y = index / image.width;
-            for (dx, dy) in GAP_OFFSETS {
-                let px = x as isize + dx;
-                let py = y as isize + dy;
-                if px < 0 || py < 0 || px >= image.width as isize || py >= image.height as isize {
-                    continue;
-                }
-                let neighbour = labels[py as usize * image.width + px as usize] as usize;
-                if neighbour <= label
-                    || components[neighbour].len() != 4
-                    || touching_adjacency[label].contains(&(neighbour as u32))
-                    || sleeve_candidates[neighbour].as_ref().map(sleeve_pair) != Some(pair)
-                {
-                    continue;
-                }
-                let gap_is_parent_owned = if dx.abs() == 2 {
-                    let middle_x = (x as isize + dx.signum()) as usize;
-                    let start_y = y.min(py as usize);
-                    let end_y = y.max(py as usize);
-                    (start_y..=end_y).all(|middle_y| {
-                        matches!(labels[middle_y * image.width + middle_x], owner if owner == pair.0 || owner == pair.1)
-                    })
-                } else {
-                    let middle_y = (y as isize + dy.signum()) as usize;
-                    let start_x = x.min(px as usize);
-                    let end_x = x.max(px as usize);
-                    (start_x..=end_x).all(|middle_x| {
-                        matches!(labels[middle_y * image.width + middle_x], owner if owner == pair.0 || owner == pair.1)
-                    })
-                };
-                if gap_is_parent_owned {
+            for dy in -GAP_RADIUS..=GAP_RADIUS {
+                for dx in -GAP_RADIUS..=GAP_RADIUS {
+                    let distance_squared = dx * dx + dy * dy;
+                    if distance_squared <= 1 || distance_squared > GAP_RADIUS_SQUARED {
+                        continue;
+                    }
+                    let px = x as isize + dx;
+                    let py = y as isize + dy;
+                    if px < 0 || py < 0 || px >= image.width as isize || py >= image.height as isize
+                    {
+                        continue;
+                    }
+                    let neighbour = labels[py as usize * image.width + px as usize] as usize;
+                    let neighbour_pair = sleeve_candidates[neighbour].as_ref().map(sleeve_pair);
+                    if neighbour <= label
+                        || components[neighbour].len() > GAP_COMPONENT_MAX_AREA
+                        || touching_adjacency[label].contains(&(neighbour as u32))
+                        || !neighbour_pair
+                            .map(|neighbour_pair| sleeve_pairs_compatible(pair, neighbour_pair))
+                            .unwrap_or(false)
+                    {
+                        continue;
+                    }
                     gap_adjacency[label].insert(neighbour as u32);
                     gap_adjacency[neighbour].insert(label as u32);
                 }
@@ -1719,6 +1730,7 @@ fn correct_antialias_partition(
         }
     }
     let mut sleeve_accepted = vec![false; count];
+    let mut sleeve_whole_owner = vec![None::<u32>; count];
     let mut sleeve_visited = vec![false; count];
     for start in 0..count {
         if sleeve_candidates[start].is_none() {
@@ -1730,7 +1742,6 @@ fn correct_antialias_partition(
         let mut queue = VecDeque::from([start]);
         let mut group = Vec::new();
         let mut area = 0_usize;
-        let group_pair = sleeve_pair(sleeve_candidates[start].as_ref().unwrap());
         sleeve_visited[start] = true;
         while let Some(label) = queue.pop_front() {
             let expected_pair = sleeve_pair(sleeve_candidates[label].as_ref().unwrap());
@@ -1744,16 +1755,21 @@ fn correct_antialias_partition(
                 let Some(neighbour_candidate) = sleeve_candidates[neighbour].as_ref() else {
                     continue;
                 };
-                if sleeve_pair(neighbour_candidate) != expected_pair {
+                if !sleeve_pairs_compatible(sleeve_pair(neighbour_candidate), expected_pair) {
                     continue;
                 }
                 sleeve_visited[neighbour] = true;
                 queue.push_back(neighbour);
             }
         }
-        let minimum_parent_lightness = parent_lab[group_pair.0 as usize]
-            .l
-            .min(parent_lab[group_pair.1 as usize].l);
+        let minimum_parent_lightness = group
+            .iter()
+            .flat_map(|&label| {
+                let pair = sleeve_pair(sleeve_candidates[label].as_ref().unwrap());
+                [pair.0, pair.1]
+            })
+            .map(|parent| parent_lab[parent as usize].l)
+            .fold(f32::INFINITY, f32::min);
         // A real dark outline is often quantized into several adjacent
         // coreless labels. Protect each source-supported or genuinely
         // near-black label, but do not let a short protected tail preserve a
@@ -1771,10 +1787,34 @@ fn correct_antialias_partition(
                 source_lab[index].l < 25.0 && source_lab[index].l + 6.0 < minimum_parent_lightness
             })
             .count();
+        let group_near_black = group
+            .iter()
+            .flat_map(|&label| components[label].iter())
+            .filter(|&&index| source_lab[index].l < 25.0)
+            .count();
         let mut accepted_labels = Vec::new();
+        let mut repeated_grey_chain = false;
         if area > 4 {
             if group_dark_boundary_support * 16 <= area && group_dark_extremum * 4 < area * 3 {
                 accepted_labels.extend(group.iter().copied());
+            } else if area >= 8
+                && group.len() >= 3
+                && group_dark_boundary_support * 2 <= area
+                && group_near_black * 4 <= area
+                && group_dark_extremum * 4 < area * 3
+            {
+                // Dark-boundary support also covers the grey antialias side
+                // of a black contour. A repeated non-black micro-chain is
+                // raster coverage, not another authored outline.
+                repeated_grey_chain = true;
+                accepted_labels.extend(group.iter().copied().filter(|&label| {
+                    let component = &components[label];
+                    let near_black = component
+                        .iter()
+                        .filter(|&&index| source_lab[index].l < 25.0)
+                        .count();
+                    near_black * 2 < component.len()
+                }));
             } else if area >= 24
                 && group.len() >= 3
                 && group_dark_boundary_support > 0
@@ -1802,6 +1842,35 @@ fn correct_antialias_partition(
                         && dark_extremum * 4 < component.len() * 3
                     {
                         accepted_labels.push(label);
+                    }
+                }
+            }
+        }
+        if repeated_grey_chain {
+            let group_pixels: Vec<usize> = group
+                .iter()
+                .flat_map(|&label| components[label].iter().copied())
+                .collect();
+            let source = median_lab(&source_lab, &group_pixels);
+            // The darkest candidate is not necessarily the contour: a dark
+            // coloured face can lie across a black boundary and would leak
+            // into the opposite side as isolated dots. Select the durable
+            // face whose colour best explains the original micro-chain.
+            let source_matched_parent = group
+                .iter()
+                .flat_map(|&label| {
+                    let pair = sleeve_pair(sleeve_candidates[label].as_ref().unwrap());
+                    [pair.0, pair.1]
+                })
+                .min_by(|&first, &second| {
+                    delta_e2000(source, parent_lab[first as usize])
+                        .total_cmp(&delta_e2000(source, parent_lab[second as usize]))
+                        .then(first.cmp(&second))
+                });
+            if let Some(owner) = source_matched_parent {
+                for &label in &accepted_labels {
+                    if components[label].len() <= GAP_COMPONENT_MAX_AREA {
+                        sleeve_whole_owner[label] = Some(owner);
                     }
                 }
             }
@@ -2215,11 +2284,13 @@ fn correct_antialias_partition(
         if sleeve_accepted[label] {
             if let Some((first, second, first_assignment)) = &sleeve_candidates[label] {
                 for (offset, &index) in component.iter().enumerate() {
-                    corrected[index] = if first_assignment[offset] {
-                        *first
-                    } else {
-                        *second
-                    };
+                    corrected[index] = sleeve_whole_owner[label].unwrap_or_else(|| {
+                        if first_assignment[offset] {
+                            *first
+                        } else {
+                            *second
+                        }
+                    });
                     antialias[index] = true;
                     paint_samples[index] = false;
                 }
@@ -3267,17 +3338,20 @@ pub fn regularize_boundaries(
         source_edge.iter().filter(|&&value| value).count();
 }
 
-/// Return unsupported dark one-pixel Paint shoulders to a neighbouring face.
+/// Return unsupported one-pixel Paint shoulders to a neighbouring face.
 /// A component-local ownership proposal is validated before it is committed,
 /// so genuine line endpoints never require a mutation followed by rollback.
-/// Pixels already transferred to the structural centre-line owner are never
+/// The decision uses source fit and topology rather than hue or lightness;
+/// pixels already transferred to the structural centre-line owner are never
 /// changed.
 pub fn refine_thin_paint_ownership(
     source: &Raster,
     segmentation: &mut Segmentation,
     protected: &[bool],
-) {
+    structural_line: &[bool],
+) -> Vec<bool> {
     assert_eq!(protected.len(), segmentation.labels.len());
+    assert_eq!(structural_line.len(), segmentation.labels.len());
     let original = segmentation.labels.clone();
     let count = segmentation.regions.len();
     let pixels = component_pixels(&original, count);
@@ -3303,7 +3377,291 @@ pub fn refine_thin_paint_ownership(
             )
         })
         .collect();
+    // A source-supported medial line is better represented by the structural
+    // Bézier graph than by a collection of one-pixel Paint faces. Remove only
+    // coreless components whose own pixels overwhelmingly belong to that
+    // graph, and return their underpaint to adjacent area faces. The residual
+    // selector later emits the missing centre-line with a fitted width and
+    // continuous cap. This is based on topology and line evidence, not on a
+    // dark-colour or material-specific rule.
+    let underpaint_proposal = |component: &[usize]| {
+        let mut proposal = vec![u32::MAX; component.len()];
+        let mut component_position = HashMap::<usize, usize>::with_capacity(component.len());
+        for (position, &index) in component.iter().enumerate() {
+            component_position.insert(index, position);
+        }
+        loop {
+            let previous = proposal.clone();
+            let mut changed = 0_usize;
+            for (position, &index) in component.iter().enumerate() {
+                if previous[position] != u32::MAX {
+                    continue;
+                }
+                let x = index % segmentation.width;
+                let y = index / segmentation.width;
+                let mut best = None::<(f32, u32)>;
+                for neighbour in [
+                    (x > 0).then(|| index - 1),
+                    (x + 1 < segmentation.width).then(|| index + 1),
+                    (y > 0).then(|| index - segmentation.width),
+                    (y + 1 < segmentation.height).then(|| index + segmentation.width),
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    let owner =
+                        if let Some(&neighbour_position) = component_position.get(&neighbour) {
+                            previous[neighbour_position]
+                        } else {
+                            let owner = original[neighbour];
+                            if has_interior[owner as usize] {
+                                owner
+                            } else {
+                                u32::MAX
+                            }
+                        };
+                    if owner == u32::MAX {
+                        continue;
+                    }
+                    let error = delta_e2000(source_lab[index], prototypes[owner as usize]);
+                    if best
+                        .map(|current| {
+                            error < current.0 || (error == current.0 && owner < current.1)
+                        })
+                        .unwrap_or(true)
+                    {
+                        best = Some((error, owner));
+                    }
+                }
+                if let Some((_, owner)) = best {
+                    proposal[position] = owner;
+                    changed += 1;
+                }
+            }
+            if changed == 0 {
+                break;
+            }
+        }
+        if proposal.iter().all(|&owner| owner != u32::MAX) {
+            Some(proposal)
+        } else {
+            None
+        }
+    };
+    let structural_seed: Vec<bool> = (0..count)
+        .map(|label| {
+            let component = &pixels[label];
+            component.len() >= 4
+                && !has_interior[label]
+                && !component.iter().any(|&index| protected[index])
+                && component
+                    .iter()
+                    .filter(|&&index| structural_line[index])
+                    .count()
+                    * 10
+                    >= component.len() * 9
+        })
+        .collect();
+    let mut structural_assignment = vec![None::<Vec<u32>>; count];
+    for label in 0..count {
+        if structural_seed[label] {
+            structural_assignment[label] = underpaint_proposal(&pixels[label]);
+        }
+    }
+    // Boundary regularization can disconnect the individual raster phases of
+    // a previously recognised antialias sleeve. Each phase then becomes a
+    // separate Paint face, whose SVG overlap exposes the raster staircase.
+    // Detect the phenomenon from topology rather than colour semantics: a
+    // repeated family of coreless micro-faces must follow a narrow corridor,
+    // touch the same durable boundary neighbourhood, and repeatedly straddle
+    // perceptually distinct durable faces. Independent dots inside one face
+    // therefore remain authored Paint, regardless of their hue or lightness.
+    let mut phase_candidate = vec![false; count];
+    let mut phase_contacts = vec![HashMap::<u32, usize>::new(); count];
+    for label in 0..count {
+        let component = &pixels[label];
+        if component.is_empty()
+            || component.len() > 6
+            || has_interior[label]
+            || component.iter().any(|&index| protected[index])
+        {
+            continue;
+        }
+        for &index in component {
+            let x = index % segmentation.width;
+            let y = index / segmentation.width;
+            for neighbour in [
+                (x > 0).then(|| index - 1),
+                (x + 1 < segmentation.width).then(|| index + 1),
+                (y > 0).then(|| index - segmentation.width),
+                (y + 1 < segmentation.height).then(|| index + segmentation.width),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                let owner = original[neighbour] as usize;
+                if owner == label || !has_interior[owner] {
+                    continue;
+                }
+                *phase_contacts[label].entry(owner as u32).or_default() += 1;
+            }
+        }
+        phase_candidate[label] = !phase_contacts[label].is_empty();
+    }
+    let mut phase_adjacency = vec![HashSet::<u32>::new(); count];
+    const PHASE_GAP_RADIUS: isize = 7;
+    const PHASE_GAP_RADIUS_SQUARED: isize = PHASE_GAP_RADIUS * PHASE_GAP_RADIUS;
+    for label in 0..count {
+        if !phase_candidate[label] {
+            continue;
+        }
+        for &index in &pixels[label] {
+            let x = index % segmentation.width;
+            let y = index / segmentation.width;
+            for dy in -PHASE_GAP_RADIUS..=PHASE_GAP_RADIUS {
+                for dx in -PHASE_GAP_RADIUS..=PHASE_GAP_RADIUS {
+                    let distance_squared = dx * dx + dy * dy;
+                    if distance_squared <= 1 || distance_squared > PHASE_GAP_RADIUS_SQUARED {
+                        continue;
+                    }
+                    let px = x as isize + dx;
+                    let py = y as isize + dy;
+                    if px < 0
+                        || py < 0
+                        || px >= segmentation.width as isize
+                        || py >= segmentation.height as isize
+                    {
+                        continue;
+                    }
+                    let neighbour =
+                        original[py as usize * segmentation.width + px as usize] as usize;
+                    if neighbour <= label
+                        || !phase_candidate[neighbour]
+                        || delta_e2000(prototypes[label], prototypes[neighbour]) > 3.0
+                        || !phase_contacts[label]
+                            .keys()
+                            .any(|owner| phase_contacts[neighbour].contains_key(owner))
+                    {
+                        continue;
+                    }
+                    phase_adjacency[label].insert(neighbour as u32);
+                    phase_adjacency[neighbour].insert(label as u32);
+                }
+            }
+        }
+    }
+    let mut phase_owner = vec![None::<u32>; count];
+    let mut phase_visited = vec![false; count];
+    for start in 0..count {
+        if !phase_candidate[start] || phase_visited[start] {
+            continue;
+        }
+        let mut queue = VecDeque::from([start]);
+        let mut group = Vec::new();
+        let mut area = 0_usize;
+        phase_visited[start] = true;
+        while let Some(label) = queue.pop_front() {
+            group.push(label);
+            area += pixels[label].len();
+            for &neighbour in &phase_adjacency[label] {
+                let neighbour = neighbour as usize;
+                if !phase_visited[neighbour] {
+                    phase_visited[neighbour] = true;
+                    queue.push_back(neighbour);
+                }
+            }
+        }
+        if group.len() < 4 || area > 64 {
+            continue;
+        }
+
+        let centroids: Vec<(f64, f64)> = group
+            .iter()
+            .map(|&label| {
+                let area = pixels[label].len() as f64;
+                (
+                    pixels[label]
+                        .iter()
+                        .map(|index| (index % segmentation.width) as f64)
+                        .sum::<f64>()
+                        / area,
+                    pixels[label]
+                        .iter()
+                        .map(|index| (index / segmentation.width) as f64)
+                        .sum::<f64>()
+                        / area,
+                )
+            })
+            .collect();
+        let mean_x = centroids.iter().map(|point| point.0).sum::<f64>() / centroids.len() as f64;
+        let mean_y = centroids.iter().map(|point| point.1).sum::<f64>() / centroids.len() as f64;
+        let covariance_xx = centroids
+            .iter()
+            .map(|point| (point.0 - mean_x).powi(2))
+            .sum::<f64>()
+            / centroids.len() as f64;
+        let covariance_yy = centroids
+            .iter()
+            .map(|point| (point.1 - mean_y).powi(2))
+            .sum::<f64>()
+            / centroids.len() as f64;
+        let covariance_xy = centroids
+            .iter()
+            .map(|point| (point.0 - mean_x) * (point.1 - mean_y))
+            .sum::<f64>()
+            / centroids.len() as f64;
+        let trace = covariance_xx + covariance_yy;
+        let discriminant =
+            ((covariance_xx - covariance_yy).powi(2) + 4.0 * covariance_xy.powi(2)).sqrt();
+        let major_variance = 0.5 * (trace + discriminant);
+        let minor_variance = 0.5 * (trace - discriminant);
+        if major_variance < 4.0 || minor_variance > 0.25 * major_variance + 0.25 {
+            continue;
+        }
+
+        // On a diagonal antialiased boundary, one micro-face is often
+        // screened from a parent by the next AA phase. Requiring every tiny
+        // component to touch both durable parents leaves a dotted staircase.
+        // Establish the two-sided boundary from the whole collinear family,
+        // while requiring each parent to recur across the family so a single
+        // incidental contact cannot erase an authored run inside one face.
+        let mut contact_components = HashMap::<u32, usize>::new();
+        for &label in &group {
+            for &owner in phase_contacts[label].keys() {
+                *contact_components.entry(owner).or_default() += 1;
+            }
+        }
+        let minimum_parent_support = group.len().div_ceil(4).max(2);
+        let durable_parents = contact_components
+            .iter()
+            .filter_map(|(&owner, &support)| (support >= minimum_parent_support).then_some(owner))
+            .collect::<Vec<_>>();
+        let two_sided = durable_parents.iter().enumerate().any(|(index, &first)| {
+            durable_parents.iter().skip(index + 1).any(|&second| {
+                delta_e2000(prototypes[first as usize], prototypes[second as usize]) >= 4.6
+            })
+        });
+        if !two_sided {
+            continue;
+        }
+
+        for label in group {
+            phase_owner[label] = phase_contacts[label]
+                .iter()
+                .min_by(|(first, first_contact), (second, second_contact)| {
+                    delta_e2000(prototypes[label], prototypes[**first as usize])
+                        .total_cmp(&delta_e2000(
+                            prototypes[label],
+                            prototypes[**second as usize],
+                        ))
+                        .then_with(|| second_contact.cmp(first_contact))
+                        .then_with(|| first.cmp(second))
+                })
+                .map(|(&owner, _)| owner);
+        }
+    }
     let mut output = original.clone();
+    let mut structural_ownership = vec![false; original.len()];
     let mut examined = 0;
     let mut protected_components = 0;
     let mut refined = 0;
@@ -3312,7 +3670,26 @@ pub fn refine_thin_paint_ownership(
     let mut visited = vec![false; original.len()];
     let mut component_position = vec![u32::MAX; original.len()];
     for label in 0..count {
-        if prototypes[label].l > 25.0 || pixels[label].is_empty() {
+        if let Some(assignments) = structural_assignment[label].take() {
+            for (&index, owner) in pixels[label].iter().zip(assignments) {
+                output[index] = owner;
+                segmentation.paint_samples[index] = false;
+                structural_ownership[index] = true;
+            }
+            refined += 1;
+            reassigned += pixels[label].len();
+            continue;
+        }
+        if let Some(owner) = phase_owner[label] {
+            for &index in &pixels[label] {
+                output[index] = owner;
+                segmentation.paint_samples[index] = false;
+            }
+            refined += 1;
+            reassigned += pixels[label].len();
+            continue;
+        }
+        if pixels[label].is_empty() {
             continue;
         }
         for &start in &pixels[label] {
@@ -3424,11 +3801,50 @@ pub fn refine_thin_paint_ownership(
                 .iter()
                 .filter_map(|&owner| (owner != label as u32).then_some(owner))
                 .collect();
-            if retained && changed_owners.len() < 2 {
+            if retained && changed_owners.len() >= 2 {
+                if let Some(complete) = underpaint_proposal(&component) {
+                    let mut owners = complete.clone();
+                    owners.sort_unstable();
+                    owners.dedup();
+                    let retained_are_mixtures =
+                        proposal
+                            .iter()
+                            .enumerate()
+                            .all(|(position, &current_owner)| {
+                                current_owner != label as u32
+                                    || owners.iter().enumerate().any(|(first_index, &first)| {
+                                        owners.iter().skip(first_index + 1).any(|&second| {
+                                            let (alpha, _, error) = pair_mixture(
+                                                source.pixels[component[position]],
+                                                source.pixels[component[position]],
+                                                prototype_rgb[first as usize],
+                                                prototype_rgb[second as usize],
+                                            );
+                                            error <= 1.5 && (0.02..=0.98).contains(&alpha)
+                                        })
+                                    })
+                            });
+                    // Every transferred pixel supplies source evidence for a
+                    // durable neighbour, and every independently reached
+                    // owner supplies one continuity vote. Once those votes
+                    // outnumber the residual pixels, the coreless island has
+                    // no stable topology of its own. Keep the proposal atomic
+                    // instead of emitting the leftover as a hard SVG bump.
+                    let residual = component.len() - changes;
+                    let competing_support = changes + changed_owners.len();
+                    let unstable_residual = competing_support > residual;
+                    if retained_are_mixtures || unstable_residual {
+                        proposal = complete;
+                        changes = component.len();
+                    }
+                }
+            }
+            if proposal.contains(&(label as u32)) {
                 preflight_rejected += 1;
             } else {
                 for (&index, owner) in component.iter().zip(proposal) {
                     output[index] = owner;
+                    segmentation.paint_samples[index] = false;
                 }
                 reassigned += changes;
                 refined += 1;
@@ -3453,6 +3869,7 @@ pub fn refine_thin_paint_ownership(
     segmentation.summary.thin_paint_preflight_rejected = preflight_rejected;
     segmentation.summary.thin_paint_reassigned_pixels = reassigned;
     segmentation.summary.thin_paint_removed_regions = count.saturating_sub(new_count);
+    structural_ownership
 }
 
 pub fn region_mean_raster(image: &Raster, segmentation: &Segmentation) -> Raster {
@@ -3555,6 +3972,64 @@ mod tests {
         assert_eq!(correction.split_regions, 1);
         assert_ne!(correction.labels[3], correction.labels[4]);
         assert!(correction.paint_samples[3..=4].iter().all(|&value| !value));
+    }
+
+    #[test]
+    fn expanded_parent_recovery_does_not_promote_distant_third_face() {
+        let assignment_with_third_face_at = |third_y: usize| {
+            let width = 18;
+            let height = 12;
+            let colours = [
+                [0.91, 0.90, 0.89],
+                [0.96, 0.34, 0.30],
+                [0.82, 0.18, 0.16],
+                [0.58, 0.05, 0.04],
+            ];
+            let mut labels = vec![0_u32; width * height];
+            for y in 6..third_y {
+                for x in 0..width {
+                    labels[y * width + x] = 1;
+                }
+            }
+            for y in third_y..height {
+                for x in 0..width {
+                    labels[y * width + x] = 3;
+                }
+            }
+            let mut component = Vec::new();
+            for y in 4..=5 {
+                for x in 4..14 {
+                    let index = y * width + x;
+                    labels[index] = 2;
+                    component.push(index);
+                }
+            }
+            let image = Raster::new(
+                width,
+                height,
+                labels
+                    .iter()
+                    .map(|&label| colours[label as usize])
+                    .collect(),
+            );
+            let mut roles = classify(&image);
+            roles.visible_ridge_centres.fill(false);
+            let parent_lab = colours.map(rgb_to_lab);
+            boundary_sleeve_assignment(
+                &component,
+                &labels,
+                2,
+                &[true, true, false, true],
+                &parent_lab,
+                &roles,
+                width,
+                height,
+            )
+        };
+
+        let distant = assignment_with_third_face_at(9).unwrap();
+        assert_eq!((distant.0, distant.1), (0, 1));
+        assert!(assignment_with_third_face_at(8).is_none());
     }
 
     #[test]
@@ -3938,6 +4413,50 @@ mod tests {
     }
 
     #[test]
+    fn repeated_subpixel_sleeves_choose_source_matched_parent() {
+        let width = 28;
+        let height = 12;
+        let first = [0.78, 0.91, 0.95];
+        let second = [0.90, 0.22, 0.21];
+        let mut image = Raster::blank(width, height, first);
+        let mut labels = vec![0_u32; width * height];
+        for y in 6..height {
+            for x in 0..width {
+                let index = y * width + x;
+                image.pixels[index] = second;
+                labels[index] = 5;
+            }
+        }
+        let runs = [(2, 1), (8, 2), (14, 3), (20, 4)];
+        for (group, &(start_x, length)) in runs.iter().enumerate() {
+            for x in start_x..start_x + length {
+                let index = 6 * width + x;
+                image.pixels[index] = [0.86, 0.98, 1.0];
+                labels[index] = 1 + group as u32;
+            }
+        }
+
+        let mut roles = classify(&image);
+        for &(start_x, length) in &runs {
+            for x in start_x..start_x + length {
+                roles.visible_ridge_centres[6 * width + x] = false;
+            }
+            roles.dark_boundary[6 * width + start_x] = true;
+        }
+
+        let correction = correct_antialias_partition(&image, &labels, 6, &roles);
+
+        for &(start_x, length) in &runs {
+            for x in start_x..start_x + length {
+                let index = 6 * width + x;
+                assert_eq!(correction.labels[index], 0);
+                assert!(!correction.paint_samples[index]);
+            }
+        }
+        assert_eq!(correction.split_regions, 4);
+    }
+
+    #[test]
     fn thin_same_material_microface_returns_to_durable_owner() {
         let width = 9;
         let height = 9;
@@ -4201,9 +4720,375 @@ mod tests {
             regions,
             summary: SegmentationSummary::default(),
         };
-        refine_thin_paint_ownership(&source, &mut segmentation, &vec![false; width * height]);
+        let _ = refine_thin_paint_ownership(
+            &source,
+            &mut segmentation,
+            &vec![false; width * height],
+            &vec![false; width * height],
+        );
         assert_eq!(segmentation.labels, original);
         assert_eq!(segmentation.summary.thin_paint_preflight_rejected, 1);
+        assert_eq!(segmentation.summary.thin_paint_reassigned_pixels, 0);
+    }
+
+    #[test]
+    fn thin_two_sided_transition_is_reassigned_atomically() {
+        let width = 9;
+        let height = 5;
+        let first = [0.2; 3];
+        let second = [0.9; 3];
+        let transition = [0.5; 3];
+        let mut source = Raster::blank(width, height, first);
+        let mut labels = vec![0_u32; width * height];
+        for y in 0..height {
+            for x in 5..width {
+                labels[y * width + x] = 1;
+                source.pixels[y * width + x] = second;
+            }
+        }
+        for (x, colour) in [(3, first), (4, transition), (5, second)] {
+            labels[2 * width + x] = 2;
+            source.pixels[2 * width + x] = colour;
+        }
+        let canonical = Raster::new(
+            width,
+            height,
+            labels
+                .iter()
+                .map(|&label| match label {
+                    0 => first,
+                    1 => second,
+                    _ => transition,
+                })
+                .collect(),
+        );
+        let regions = region_stats(&source, &labels, 3);
+        let mut segmentation = Segmentation {
+            width,
+            height,
+            labels,
+            paint_keys: vec![0, 1, 2],
+            paint_samples: vec![true; width * height],
+            canonical,
+            regions,
+            summary: SegmentationSummary::default(),
+        };
+
+        let _ = refine_thin_paint_ownership(
+            &source,
+            &mut segmentation,
+            &vec![false; width * height],
+            &vec![false; width * height],
+        );
+
+        for x in 3..=5 {
+            let index = 2 * width + x;
+            assert_ne!(segmentation.labels[index], 2);
+            assert!(!segmentation.paint_samples[index]);
+        }
+        assert_eq!(segmentation.regions.len(), 2);
+        assert_eq!(segmentation.summary.thin_paint_preflight_rejected, 0);
+        assert_eq!(segmentation.summary.thin_paint_reassigned_pixels, 3);
+    }
+
+    #[test]
+    fn unstable_coreless_residual_is_not_left_as_a_hard_face() {
+        let width = 9;
+        let height = 7;
+        let upper = [0.18, 0.20, 0.23];
+        let lower = [0.72, 0.18, 0.14];
+        let overshoot = [1.0, 0.36, 0.25];
+        let mut source = Raster::blank(width, height, upper);
+        let mut labels = vec![0_u32; width * height];
+        for y in 4..height {
+            for x in 0..width {
+                let index = y * width + x;
+                labels[index] = 1;
+                source.pixels[index] = lower;
+            }
+        }
+        for x in 2..=6 {
+            let index = 3 * width + x;
+            labels[index] = 2;
+            source.pixels[index] = match x {
+                2 | 3 => upper,
+                5 | 6 => lower,
+                _ => overshoot,
+            };
+        }
+        let canonical = Raster::new(
+            width,
+            height,
+            labels
+                .iter()
+                .map(|&label| match label {
+                    0 => upper,
+                    1 => lower,
+                    _ => overshoot,
+                })
+                .collect(),
+        );
+        let regions = region_stats(&source, &labels, 3);
+        let mut segmentation = Segmentation {
+            width,
+            height,
+            labels,
+            paint_keys: vec![0, 1, 2],
+            paint_samples: vec![true; width * height],
+            canonical,
+            regions,
+            summary: SegmentationSummary::default(),
+        };
+
+        let _ = refine_thin_paint_ownership(
+            &source,
+            &mut segmentation,
+            &vec![false; width * height],
+            &vec![false; width * height],
+        );
+
+        for x in 2..=6 {
+            let index = 3 * width + x;
+            assert_ne!(segmentation.labels[index], 2);
+            assert!(!segmentation.paint_samples[index]);
+        }
+        assert_eq!(segmentation.regions.len(), 2);
+        assert_eq!(segmentation.summary.thin_paint_preflight_rejected, 0);
+        assert_eq!(segmentation.summary.thin_paint_reassigned_pixels, 5);
+    }
+
+    #[test]
+    fn repeated_boundary_phases_are_rejoined_without_hue_or_lightness_rules() {
+        let width = 32;
+        let height = 14;
+        let carrier = [0.30, 0.55, 0.72];
+        let opposite = [0.88, 0.35, 0.12];
+        let phase = [0.32, 0.57, 0.74];
+        let mut source = Raster::blank(width, height, carrier);
+        let mut labels = vec![0_u32; width * height];
+        for y in 7..height {
+            for x in 0..width {
+                let index = y * width + x;
+                source.pixels[index] = opposite;
+                labels[index] = 5;
+            }
+        }
+        for group in 0..4 {
+            let start_x = 2 + 7 * group;
+            for x in start_x..start_x + 6 {
+                let index = 7 * width + x;
+                source.pixels[index] = phase;
+                labels[index] = 1 + group as u32;
+            }
+        }
+        let canonical = Raster::new(
+            width,
+            height,
+            labels
+                .iter()
+                .map(|&label| match label {
+                    0 => carrier,
+                    5 => opposite,
+                    _ => phase,
+                })
+                .collect(),
+        );
+        let regions = region_stats(&source, &labels, 6);
+        let mut segmentation = Segmentation {
+            width,
+            height,
+            labels,
+            paint_keys: (0..6).collect(),
+            paint_samples: vec![true; width * height],
+            canonical,
+            regions,
+            summary: SegmentationSummary::default(),
+        };
+
+        let _ = refine_thin_paint_ownership(
+            &source,
+            &mut segmentation,
+            &vec![false; width * height],
+            &vec![false; width * height],
+        );
+
+        let durable_carrier = segmentation.labels[6 * width];
+        for group in 0..4 {
+            let start_x = 2 + 7 * group;
+            for x in start_x..start_x + 6 {
+                let index = 7 * width + x;
+                assert_eq!(segmentation.labels[index], durable_carrier);
+                assert!(!segmentation.paint_samples[index]);
+            }
+        }
+        assert_eq!(segmentation.summary.thin_paint_refined, 4);
+        assert_eq!(segmentation.summary.thin_paint_reassigned_pixels, 24);
+    }
+
+    #[test]
+    fn diagonal_phase_family_uses_repeated_parent_contacts_collectively() {
+        let width = 24;
+        let height = 14;
+        let first = [0.18, 0.22, 0.26];
+        let second = [0.72, 0.76, 0.80];
+        let phase = [0.66, 0.70, 0.74];
+        let mut source = Raster::blank(width, height, second);
+        let mut labels = vec![5_u32; width * height];
+        for y in 0..7 {
+            for x in 0..10 {
+                let index = y * width + x;
+                source.pixels[index] = first;
+                labels[index] = 0;
+            }
+        }
+        for (label, x) in (1_u32..=4).zip([4_usize, 7, 10, 13]) {
+            let index = 7 * width + x;
+            source.pixels[index] = phase;
+            labels[index] = label;
+        }
+        let canonical = Raster::new(
+            width,
+            height,
+            labels
+                .iter()
+                .map(|&label| match label {
+                    0 => first,
+                    5 => second,
+                    _ => phase,
+                })
+                .collect(),
+        );
+        let regions = region_stats(&source, &labels, 6);
+        let mut segmentation = Segmentation {
+            width,
+            height,
+            labels,
+            paint_keys: (0..6).collect(),
+            paint_samples: vec![true; width * height],
+            canonical,
+            regions,
+            summary: SegmentationSummary::default(),
+        };
+
+        let _ = refine_thin_paint_ownership(
+            &source,
+            &mut segmentation,
+            &vec![false; width * height],
+            &vec![false; width * height],
+        );
+
+        let second_owner = segmentation.labels[8 * width + 12];
+        for x in [4_usize, 7, 10, 13] {
+            let index = 7 * width + x;
+            assert_eq!(segmentation.labels[index], second_owner);
+            assert!(!segmentation.paint_samples[index]);
+        }
+        assert_eq!(segmentation.summary.thin_paint_refined, 4);
+        assert_eq!(segmentation.summary.thin_paint_reassigned_pixels, 4);
+    }
+
+    #[test]
+    fn source_supported_thin_face_is_returned_to_structural_line_graph() {
+        let width = 15;
+        let height = 9;
+        let face = [0.75, 0.42, 0.18];
+        let line = [0.16, 0.30, 0.68];
+        let mut source = Raster::blank(width, height, face);
+        let mut labels = vec![0_u32; width * height];
+        let mut structural_line = vec![false; width * height];
+        for x in 4..=10 {
+            let index = 4 * width + x;
+            source.pixels[index] = line;
+            labels[index] = 1;
+            structural_line[index] = true;
+        }
+        let canonical = Raster::new(
+            width,
+            height,
+            labels
+                .iter()
+                .map(|&label| if label == 0 { face } else { line })
+                .collect(),
+        );
+        let regions = region_stats(&source, &labels, 2);
+        let mut segmentation = Segmentation {
+            width,
+            height,
+            labels,
+            paint_keys: vec![0, 1],
+            paint_samples: vec![true; width * height],
+            canonical,
+            regions,
+            summary: SegmentationSummary::default(),
+        };
+
+        let structural_ownership = refine_thin_paint_ownership(
+            &source,
+            &mut segmentation,
+            &vec![false; width * height],
+            &structural_line,
+        );
+
+        for x in 4..=10 {
+            let index = 4 * width + x;
+            assert_eq!(segmentation.labels[index], 0);
+            assert!(!segmentation.paint_samples[index]);
+            assert!(structural_ownership[index]);
+        }
+        assert_eq!(segmentation.summary.thin_paint_refined, 1);
+        assert_eq!(segmentation.summary.thin_paint_reassigned_pixels, 7);
+    }
+
+    #[test]
+    fn repeated_microdots_inside_one_face_remain_authored_paint() {
+        let width = 32;
+        let height = 14;
+        let carrier = [0.74, 0.45, 0.67];
+        let dot = [0.20, 0.78, 0.42];
+        let mut source = Raster::blank(width, height, carrier);
+        let mut labels = vec![0_u32; width * height];
+        for group in 0..4 {
+            let start_x = 2 + 7 * group;
+            for x in start_x..start_x + 6 {
+                let index = 7 * width + x;
+                source.pixels[index] = dot;
+                labels[index] = 1 + group as u32;
+            }
+        }
+        let canonical = Raster::new(
+            width,
+            height,
+            labels
+                .iter()
+                .map(|&label| if label == 0 { carrier } else { dot })
+                .collect(),
+        );
+        let regions = region_stats(&source, &labels, 5);
+        let mut segmentation = Segmentation {
+            width,
+            height,
+            labels,
+            paint_keys: (0..5).collect(),
+            paint_samples: vec![true; width * height],
+            canonical,
+            regions,
+            summary: SegmentationSummary::default(),
+        };
+
+        let _ = refine_thin_paint_ownership(
+            &source,
+            &mut segmentation,
+            &vec![false; width * height],
+            &vec![false; width * height],
+        );
+
+        for group in 0..4 {
+            let start_x = 2 + 7 * group;
+            for x in start_x..start_x + 6 {
+                assert_ne!(segmentation.labels[7 * width + x], 0);
+            }
+        }
+        assert_eq!(segmentation.summary.thin_paint_refined, 0);
         assert_eq!(segmentation.summary.thin_paint_reassigned_pixels, 0);
     }
 }
