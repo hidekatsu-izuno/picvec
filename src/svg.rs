@@ -32,6 +32,26 @@ pub struct SvgSummary {
     pub bytes: usize,
 }
 
+impl SvgSummary {
+    pub(crate) fn add_elements_from(&mut self, other: &Self) {
+        self.path_elements += other.path_elements;
+        self.rect_elements += other.rect_elements;
+        self.circle_elements += other.circle_elements;
+        self.ellipse_elements += other.ellipse_elements;
+        self.line_elements += other.line_elements;
+        self.linear_gradients += other.linear_gradients;
+        self.radial_gradients += other.radial_gradients;
+        self.structural_strokes += other.structural_strokes;
+        self.gradient_stops += other.gradient_stops;
+        self.linear_cubics_to_lines += other.linear_cubics_to_lines;
+        self.redundant_segments_removed += other.redundant_segments_removed;
+        self.arc_segments += other.arc_segments;
+        self.merged_arc_segments += other.merged_arc_segments;
+        self.paint_paths_merged += other.paint_paths_merged;
+        self.paint_batches += other.paint_batches;
+    }
+}
+
 #[derive(Clone, Debug)]
 struct PaintElement {
     geometry: OptimizedElement,

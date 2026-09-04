@@ -4,6 +4,7 @@
 //! Python vectorizer or an external SVG renderer. Preview rendering for
 //! ownership validation is performed in memory by the embedded `resvg` crate.
 
+pub mod adaptive;
 pub mod color;
 pub mod config;
 pub mod edge;

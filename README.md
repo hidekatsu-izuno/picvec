@@ -45,6 +45,13 @@ Useful controls:
 --quantization-light-delta-e <DE>
 --gradient-merge-error <DE>
 --solid-color-max-delta-e <DE>
+--no-adaptive-refinement
+--adaptive-tile-dimension <PX>
+--adaptive-max-patches <N>
+--adaptive-svg-budget-mib <MIB>
+--adaptive-min-perceptual-gain <DE>
+--adaptive-min-predicted-rate <RATE>
+--adaptive-complexity-penalty <RATE>
 --threads <N>                 # 0: detected physical cores
 --quality-metrics             # diagnostics feature: full-SVG DeltaE00/SSIM report
 --verbose                     # diagnostics feature: JSON report on stderr
@@ -54,6 +61,17 @@ Useful controls:
 be accepted immediately as a solid fill. Lower values retain more subtle
 shading as gradients; higher values favour simpler SVG output. The default is
 1.5.
+
+Large inputs use source-resolution adaptive refinement by default. The base
+SVG is rendered and compared with the original in balanced source-space
+regions. A region is rerun through the same vector model at a finer scale only
+when its mean/tail DeltaE00 and missing-edge improvement justify its predicted
+partition cost and measured added SVG bytes. This rate-distortion rule is
+content-independent: compact clip-art features can receive more detail while
+expensive photographic texture is normally left at the base level. Accepted
+regions are fitted from the original pixels with a halo and clipped back into
+the base SVG. The byte budget and thresholds above control the quality/size
+tradeoff; `--no-adaptive-refinement` restores single-resolution processing.
 
 Input dimensions and total area are checked from the image header before
 decoding (32,768 pixels per axis and 32 megapixels by default), and decoder
@@ -109,7 +127,7 @@ separate SVG rasterization step currently uses `rsvg-convert`.
 
 ## Pipeline
 
-1. Check the input size, choose a suitable working resolution, and resize the
+1. Check the input size, choose a suitable base resolution, and resize the
    raster when needed.
 2. Detect colour regions, boundaries, shading, and thin structural lines.
    Correct antialias pixels and merge only neighbouring regions that can share
@@ -121,5 +139,8 @@ separate SVG rasterization step currently uses `rsvg-convert`.
    when it is safe to do so.
 5. Render the Paint layer once with embedded `resvg`, then add structural lines
    that are still missing from that preview.
-6. Add a small overlap between Paint regions to hide renderer seams and write
+6. For a downscaled input, compare the base render with source-resolution
+   regions. Refit only regions that improve the common perceptual-error/SVG-rate
+   objective, using original pixels and a clipped overlap halo.
+7. Add a small overlap between Paint regions to hide renderer seams and write
    the final editable SVG atomically to the requested path.

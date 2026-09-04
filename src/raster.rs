@@ -112,6 +112,37 @@ impl Raster {
         Self::from_dynamic(&DynamicImage::ImageRgb8(resized))
     }
 
+    pub fn crop(&self, x: usize, y: usize, width: usize, height: usize) -> Self {
+        assert!(x <= self.width && y <= self.height);
+        let width = width.min(self.width - x);
+        let height = height.min(self.height - y);
+        let mut pixels = Vec::with_capacity(width * height);
+        for row in y..y + height {
+            let start = row * self.width + x;
+            pixels.extend_from_slice(&self.pixels[start..start + width]);
+        }
+        Self::new(width, height, pixels)
+    }
+
+    /// Bilinear sampling in pixel-centre coordinates. Coordinates outside the
+    /// image are clamped so source/refinement mappings share identical edge
+    /// behaviour.
+    pub fn sample_bilinear(&self, x: f32, y: f32) -> [f32; 3] {
+        let x = x.clamp(0.0, self.width.saturating_sub(1) as f32);
+        let y = y.clamp(0.0, self.height.saturating_sub(1) as f32);
+        let x0 = x.floor() as usize;
+        let y0 = y.floor() as usize;
+        let x1 = (x0 + 1).min(self.width - 1);
+        let y1 = (y0 + 1).min(self.height - 1);
+        let tx = x - x0 as f32;
+        let ty = y - y0 as f32;
+        let top = [0, 1, 2]
+            .map(|channel| self.get(x0, y0)[channel] * (1.0 - tx) + self.get(x1, y0)[channel] * tx);
+        let bottom = [0, 1, 2]
+            .map(|channel| self.get(x0, y1)[channel] * (1.0 - tx) + self.get(x1, y1)[channel] * tx);
+        [0, 1, 2].map(|channel| top[channel] * (1.0 - ty) + bottom[channel] * ty)
+    }
+
     pub fn from_rgb8(path: &Path) -> Result<Self> {
         Self::load(path, 32_768, 32_000_000, 512 * 1024 * 1024)
     }
@@ -149,5 +180,26 @@ mod tests {
         assert!(Raster::load(&path, 16, 100, 64 * 1024 * 1024).is_err());
         let loaded = Raster::load(&path, 16, 1_000, 64 * 1024 * 1024).unwrap();
         assert_eq!((loaded.width, loaded.height), (16, 8));
+    }
+
+    #[test]
+    fn crop_and_bilinear_sampling_preserve_source_coordinates() {
+        let raster = Raster::new(
+            3,
+            2,
+            vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [1.0, 1.0, 0.0],
+                [1.0, 1.0, 1.0],
+            ],
+        );
+        let crop = raster.crop(1, 0, 2, 2);
+        assert_eq!((crop.width, crop.height), (2, 2));
+        assert_eq!(crop.get(0, 0), [1.0, 0.0, 0.0]);
+        assert_eq!(crop.get(1, 1), [1.0, 1.0, 1.0]);
+        assert_eq!(raster.sample_bilinear(0.5, 0.0), [0.5, 0.0, 0.0]);
     }
 }

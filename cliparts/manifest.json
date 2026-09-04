@@ -1,0 +1,2275 @@
+{
+  "version": 1,
+  "canvas": {
+    "width": 96,
+    "height": 96,
+    "viewBox": "0 0 96 96",
+    "transparent": true
+  },
+  "palette": {
+    "ink": "#587082",
+    "paper": "#F0F8FA",
+    "blue": "#2DA7E8",
+    "blueSoft": "#D8F5FB",
+    "green": "#31C98A",
+    "greenSoft": "#DBF8EC",
+    "orange": "#FF9F59",
+    "orangeSoft": "#FFF0D8",
+    "red": "#FF5F73",
+    "redSoft": "#FFE4E8",
+    "gold": "#FFD34E",
+    "goldSoft": "#FFF5CF",
+    "slate": "#8495A2",
+    "slateSoft": "#EAF2F5"
+  },
+  "style": {
+    "treatment": "cute pastel clipart",
+    "fills": "subtle multi-stop gradients",
+    "outlines": "no border strokes on filled shapes; semantic linework only",
+    "background": "transparent without decorative marks",
+    "occupancy": "balanced subject bounds with preserved aspect ratio",
+    "shadow": false
+  },
+  "naming": "lowercase kebab-case, vendor-neutral semantic nouns",
+  "aliases": {
+    "development/package": "software-package",
+    "programming/source-code": "source-code",
+    "common-symbols/home": "home"
+  },
+  "categories": [
+    {
+      "id": "people",
+      "items": [
+        "user",
+        "group",
+        "team",
+        "organization",
+        "company",
+        "department",
+        "customer",
+        "partner",
+        "guest",
+        "administrator",
+        "operator",
+        "developer",
+        "designer",
+        "manager",
+        "teacher",
+        "student"
+      ]
+    },
+    {
+      "id": "office-business",
+      "items": [
+        "office",
+        "building",
+        "factory",
+        "store",
+        "warehouse",
+        "meeting",
+        "presentation",
+        "training",
+        "calendar",
+        "clock",
+        "target",
+        "idea",
+        "flag",
+        "trophy",
+        "award",
+        "money"
+      ]
+    },
+    {
+      "id": "documents",
+      "items": [
+        "document",
+        "text",
+        "book",
+        "manual",
+        "notebook",
+        "folder",
+        "binder",
+        "clipboard",
+        "contract",
+        "invoice",
+        "receipt",
+        "report",
+        "template",
+        "form",
+        "label",
+        "tag"
+      ]
+    },
+    {
+      "id": "file-formats",
+      "items": [
+        "pdf",
+        "spreadsheet",
+        "presentation-file",
+        "markdown",
+        "text-file",
+        "csv",
+        "tsv",
+        "json",
+        "xml",
+        "yaml",
+        "html",
+        "image-file",
+        "video-file",
+        "audio-file",
+        "archive-file",
+        "binary-file",
+        "configuration-file",
+        "log-file",
+        "source-code",
+        "database-dump"
+      ]
+    },
+    {
+      "id": "devices",
+      "items": [
+        "desktop",
+        "laptop",
+        "tablet",
+        "smartphone",
+        "watch",
+        "display",
+        "printer",
+        "scanner",
+        "camera",
+        "microphone",
+        "speaker",
+        "terminal",
+        "sensor",
+        "iot-device",
+        "robot",
+        "robot-arm"
+      ]
+    },
+    {
+      "id": "computing",
+      "items": [
+        "server",
+        "server-rack",
+        "mainframe",
+        "workstation",
+        "virtual-machine",
+        "container",
+        "container-cluster",
+        "application",
+        "web-application",
+        "mobile-application",
+        "desktop-application",
+        "service",
+        "api",
+        "batch",
+        "scheduler",
+        "workflow"
+      ]
+    },
+    {
+      "id": "network",
+      "items": [
+        "internet",
+        "cloud",
+        "private-cloud",
+        "network",
+        "router",
+        "switch",
+        "gateway",
+        "firewall",
+        "proxy",
+        "load-balancer",
+        "vpn",
+        "wifi",
+        "dns",
+        "satellite",
+        "antenna",
+        "edge"
+      ]
+    },
+    {
+      "id": "storage-data",
+      "items": [
+        "database",
+        "table",
+        "record",
+        "dataset",
+        "storage",
+        "object-storage",
+        "file-storage",
+        "block-storage",
+        "shared-storage",
+        "folder-storage",
+        "backup",
+        "archive",
+        "snapshot",
+        "cache",
+        "data-lake",
+        "data-warehouse"
+      ]
+    },
+    {
+      "id": "communication",
+      "items": [
+        "mail",
+        "mailbox",
+        "chat",
+        "message",
+        "notification",
+        "phone",
+        "video-call",
+        "conference",
+        "upload",
+        "download",
+        "sync",
+        "broadcast",
+        "publish",
+        "subscribe",
+        "request",
+        "response"
+      ]
+    },
+    {
+      "id": "development",
+      "items": [
+        "repository",
+        "branch",
+        "merge",
+        "pipeline",
+        "build",
+        "test",
+        "release",
+        "debug",
+        "bug",
+        "software-package",
+        "library",
+        "plugin",
+        "script",
+        "configuration",
+        "terminal-window",
+        "tool"
+      ]
+    },
+    {
+      "id": "programming",
+      "items": [
+        "source-code",
+        "class",
+        "module",
+        "package-source",
+        "function",
+        "variable",
+        "constant",
+        "sql",
+        "shell",
+        "java",
+        "javascript",
+        "typescript",
+        "python",
+        "c",
+        "cobol",
+        "generic-language"
+      ]
+    },
+    {
+      "id": "security",
+      "items": [
+        "security",
+        "lock",
+        "unlock",
+        "key",
+        "password",
+        "certificate",
+        "identity",
+        "permission",
+        "token",
+        "shield",
+        "encryption",
+        "signature",
+        "audit",
+        "privacy",
+        "risk",
+        "warning"
+      ]
+    },
+    {
+      "id": "ai",
+      "items": [
+        "ai",
+        "llm",
+        "agent",
+        "brain",
+        "knowledge",
+        "memory",
+        "prompt",
+        "conversation",
+        "reasoning",
+        "search",
+        "embedding",
+        "vector",
+        "training",
+        "prediction",
+        "analytics",
+        "dashboard"
+      ]
+    },
+    {
+      "id": "charts-data",
+      "items": [
+        "table-chart",
+        "bar-chart",
+        "line-chart",
+        "pie-chart",
+        "scatter-chart",
+        "dashboard-chart",
+        "statistics",
+        "trend-up",
+        "trend-down",
+        "kpi",
+        "report-chart",
+        "monitor",
+        "log",
+        "metrics",
+        "timeline",
+        "map"
+      ]
+    },
+    {
+      "id": "physical-objects",
+      "items": [
+        "box",
+        "package",
+        "cart",
+        "truck",
+        "car",
+        "airplane",
+        "ship",
+        "train",
+        "house",
+        "home",
+        "keycard",
+        "usb-memory",
+        "hard-disk",
+        "optical-disc",
+        "battery",
+        "lightbulb",
+        "magnifier",
+        "camera-photo",
+        "envelope",
+        "gift"
+      ]
+    },
+    {
+      "id": "common-symbols",
+      "items": [
+        "check",
+        "cross",
+        "warning-sign",
+        "question",
+        "information",
+        "plus",
+        "minus",
+        "refresh",
+        "search",
+        "settings",
+        "home",
+        "bookmark",
+        "star",
+        "heart",
+        "location",
+        "pin",
+        "link",
+        "unlink",
+        "filter",
+        "zoom",
+        "stop",
+        "play",
+        "pause",
+        "forward"
+      ]
+    }
+  ],
+  "assets": [
+    {
+      "id": "administrator",
+      "categories": [
+        "people"
+      ],
+      "svg": "svg/administrator.svg"
+    },
+    {
+      "id": "agent",
+      "categories": [
+        "ai"
+      ],
+      "svg": "svg/agent.svg"
+    },
+    {
+      "id": "ai",
+      "categories": [
+        "ai"
+      ],
+      "svg": "svg/ai.svg"
+    },
+    {
+      "id": "airplane",
+      "categories": [
+        "physical-objects"
+      ],
+      "svg": "svg/airplane.svg"
+    },
+    {
+      "id": "analytics",
+      "categories": [
+        "ai"
+      ],
+      "svg": "svg/analytics.svg"
+    },
+    {
+      "id": "antenna",
+      "categories": [
+        "network"
+      ],
+      "svg": "svg/antenna.svg"
+    },
+    {
+      "id": "api",
+      "categories": [
+        "computing"
+      ],
+      "svg": "svg/api.svg"
+    },
+    {
+      "id": "application",
+      "categories": [
+        "computing"
+      ],
+      "svg": "svg/application.svg"
+    },
+    {
+      "id": "archive",
+      "categories": [
+        "storage-data"
+      ],
+      "svg": "svg/archive.svg"
+    },
+    {
+      "id": "archive-file",
+      "categories": [
+        "file-formats"
+      ],
+      "svg": "svg/archive-file.svg"
+    },
+    {
+      "id": "audio-file",
+      "categories": [
+        "file-formats"
+      ],
+      "svg": "svg/audio-file.svg"
+    },
+    {
+      "id": "audit",
+      "categories": [
+        "security"
+      ],
+      "svg": "svg/audit.svg"
+    },
+    {
+      "id": "award",
+      "categories": [
+        "office-business"
+      ],
+      "svg": "svg/award.svg"
+    },
+    {
+      "id": "backup",
+      "categories": [
+        "storage-data"
+      ],
+      "svg": "svg/backup.svg"
+    },
+    {
+      "id": "bar-chart",
+      "categories": [
+        "charts-data"
+      ],
+      "svg": "svg/bar-chart.svg"
+    },
+    {
+      "id": "batch",
+      "categories": [
+        "computing"
+      ],
+      "svg": "svg/batch.svg"
+    },
+    {
+      "id": "battery",
+      "categories": [
+        "physical-objects"
+      ],
+      "svg": "svg/battery.svg"
+    },
+    {
+      "id": "binary-file",
+      "categories": [
+        "file-formats"
+      ],
+      "svg": "svg/binary-file.svg"
+    },
+    {
+      "id": "binder",
+      "categories": [
+        "documents"
+      ],
+      "svg": "svg/binder.svg"
+    },
+    {
+      "id": "block-storage",
+      "categories": [
+        "storage-data"
+      ],
+      "svg": "svg/block-storage.svg"
+    },
+    {
+      "id": "book",
+      "categories": [
+        "documents"
+      ],
+      "svg": "svg/book.svg"
+    },
+    {
+      "id": "bookmark",
+      "categories": [
+        "common-symbols"
+      ],
+      "svg": "svg/bookmark.svg"
+    },
+    {
+      "id": "box",
+      "categories": [
+        "physical-objects"
+      ],
+      "svg": "svg/box.svg"
+    },
+    {
+      "id": "brain",
+      "categories": [
+        "ai"
+      ],
+      "svg": "svg/brain.svg"
+    },
+    {
+      "id": "branch",
+      "categories": [
+        "development"
+      ],
+      "svg": "svg/branch.svg"
+    },
+    {
+      "id": "broadcast",
+      "categories": [
+        "communication"
+      ],
+      "svg": "svg/broadcast.svg"
+    },
+    {
+      "id": "bug",
+      "categories": [
+        "development"
+      ],
+      "svg": "svg/bug.svg"
+    },
+    {
+      "id": "build",
+      "categories": [
+        "development"
+      ],
+      "svg": "svg/build.svg"
+    },
+    {
+      "id": "building",
+      "categories": [
+        "office-business"
+      ],
+      "svg": "svg/building.svg"
+    },
+    {
+      "id": "c",
+      "categories": [
+        "programming"
+      ],
+      "svg": "svg/c.svg"
+    },
+    {
+      "id": "cache",
+      "categories": [
+        "storage-data"
+      ],
+      "svg": "svg/cache.svg"
+    },
+    {
+      "id": "calendar",
+      "categories": [
+        "office-business"
+      ],
+      "svg": "svg/calendar.svg"
+    },
+    {
+      "id": "camera",
+      "categories": [
+        "devices"
+      ],
+      "svg": "svg/camera.svg"
+    },
+    {
+      "id": "camera-photo",
+      "categories": [
+        "physical-objects"
+      ],
+      "svg": "svg/camera-photo.svg"
+    },
+    {
+      "id": "car",
+      "categories": [
+        "physical-objects"
+      ],
+      "svg": "svg/car.svg"
+    },
+    {
+      "id": "cart",
+      "categories": [
+        "physical-objects"
+      ],
+      "svg": "svg/cart.svg"
+    },
+    {
+      "id": "certificate",
+      "categories": [
+        "security"
+      ],
+      "svg": "svg/certificate.svg"
+    },
+    {
+      "id": "chat",
+      "categories": [
+        "communication"
+      ],
+      "svg": "svg/chat.svg"
+    },
+    {
+      "id": "check",
+      "categories": [
+        "common-symbols"
+      ],
+      "svg": "svg/check.svg"
+    },
+    {
+      "id": "class",
+      "categories": [
+        "programming"
+      ],
+      "svg": "svg/class.svg"
+    },
+    {
+      "id": "clipboard",
+      "categories": [
+        "documents"
+      ],
+      "svg": "svg/clipboard.svg"
+    },
+    {
+      "id": "clock",
+      "categories": [
+        "office-business"
+      ],
+      "svg": "svg/clock.svg"
+    },
+    {
+      "id": "cloud",
+      "categories": [
+        "network"
+      ],
+      "svg": "svg/cloud.svg"
+    },
+    {
+      "id": "cobol",
+      "categories": [
+        "programming"
+      ],
+      "svg": "svg/cobol.svg"
+    },
+    {
+      "id": "company",
+      "categories": [
+        "people"
+      ],
+      "svg": "svg/company.svg"
+    },
+    {
+      "id": "conference",
+      "categories": [
+        "communication"
+      ],
+      "svg": "svg/conference.svg"
+    },
+    {
+      "id": "configuration",
+      "categories": [
+        "development"
+      ],
+      "svg": "svg/configuration.svg"
+    },
+    {
+      "id": "configuration-file",
+      "categories": [
+        "file-formats"
+      ],
+      "svg": "svg/configuration-file.svg"
+    },
+    {
+      "id": "constant",
+      "categories": [
+        "programming"
+      ],
+      "svg": "svg/constant.svg"
+    },
+    {
+      "id": "container",
+      "categories": [
+        "computing"
+      ],
+      "svg": "svg/container.svg"
+    },
+    {
+      "id": "container-cluster",
+      "categories": [
+        "computing"
+      ],
+      "svg": "svg/container-cluster.svg"
+    },
+    {
+      "id": "contract",
+      "categories": [
+        "documents"
+      ],
+      "svg": "svg/contract.svg"
+    },
+    {
+      "id": "conversation",
+      "categories": [
+        "ai"
+      ],
+      "svg": "svg/conversation.svg"
+    },
+    {
+      "id": "cross",
+      "categories": [
+        "common-symbols"
+      ],
+      "svg": "svg/cross.svg"
+    },
+    {
+      "id": "csv",
+      "categories": [
+        "file-formats"
+      ],
+      "svg": "svg/csv.svg"
+    },
+    {
+      "id": "customer",
+      "categories": [
+        "people"
+      ],
+      "svg": "svg/customer.svg"
+    },
+    {
+      "id": "dashboard",
+      "categories": [
+        "ai"
+      ],
+      "svg": "svg/dashboard.svg"
+    },
+    {
+      "id": "dashboard-chart",
+      "categories": [
+        "charts-data"
+      ],
+      "svg": "svg/dashboard-chart.svg"
+    },
+    {
+      "id": "data-lake",
+      "categories": [
+        "storage-data"
+      ],
+      "svg": "svg/data-lake.svg"
+    },
+    {
+      "id": "data-warehouse",
+      "categories": [
+        "storage-data"
+      ],
+      "svg": "svg/data-warehouse.svg"
+    },
+    {
+      "id": "database",
+      "categories": [
+        "storage-data"
+      ],
+      "svg": "svg/database.svg"
+    },
+    {
+      "id": "database-dump",
+      "categories": [
+        "file-formats"
+      ],
+      "svg": "svg/database-dump.svg"
+    },
+    {
+      "id": "dataset",
+      "categories": [
+        "storage-data"
+      ],
+      "svg": "svg/dataset.svg"
+    },
+    {
+      "id": "debug",
+      "categories": [
+        "development"
+      ],
+      "svg": "svg/debug.svg"
+    },
+    {
+      "id": "department",
+      "categories": [
+        "people"
+      ],
+      "svg": "svg/department.svg"
+    },
+    {
+      "id": "designer",
+      "categories": [
+        "people"
+      ],
+      "svg": "svg/designer.svg"
+    },
+    {
+      "id": "desktop",
+      "categories": [
+        "devices"
+      ],
+      "svg": "svg/desktop.svg"
+    },
+    {
+      "id": "desktop-application",
+      "categories": [
+        "computing"
+      ],
+      "svg": "svg/desktop-application.svg"
+    },
+    {
+      "id": "developer",
+      "categories": [
+        "people"
+      ],
+      "svg": "svg/developer.svg"
+    },
+    {
+      "id": "display",
+      "categories": [
+        "devices"
+      ],
+      "svg": "svg/display.svg"
+    },
+    {
+      "id": "dns",
+      "categories": [
+        "network"
+      ],
+      "svg": "svg/dns.svg"
+    },
+    {
+      "id": "document",
+      "categories": [
+        "documents"
+      ],
+      "svg": "svg/document.svg"
+    },
+    {
+      "id": "download",
+      "categories": [
+        "communication"
+      ],
+      "svg": "svg/download.svg"
+    },
+    {
+      "id": "edge",
+      "categories": [
+        "network"
+      ],
+      "svg": "svg/edge.svg"
+    },
+    {
+      "id": "embedding",
+      "categories": [
+        "ai"
+      ],
+      "svg": "svg/embedding.svg"
+    },
+    {
+      "id": "encryption",
+      "categories": [
+        "security"
+      ],
+      "svg": "svg/encryption.svg"
+    },
+    {
+      "id": "envelope",
+      "categories": [
+        "physical-objects"
+      ],
+      "svg": "svg/envelope.svg"
+    },
+    {
+      "id": "factory",
+      "categories": [
+        "office-business"
+      ],
+      "svg": "svg/factory.svg"
+    },
+    {
+      "id": "file-storage",
+      "categories": [
+        "storage-data"
+      ],
+      "svg": "svg/file-storage.svg"
+    },
+    {
+      "id": "filter",
+      "categories": [
+        "common-symbols"
+      ],
+      "svg": "svg/filter.svg"
+    },
+    {
+      "id": "firewall",
+      "categories": [
+        "network"
+      ],
+      "svg": "svg/firewall.svg"
+    },
+    {
+      "id": "flag",
+      "categories": [
+        "office-business"
+      ],
+      "svg": "svg/flag.svg"
+    },
+    {
+      "id": "folder",
+      "categories": [
+        "documents"
+      ],
+      "svg": "svg/folder.svg"
+    },
+    {
+      "id": "folder-storage",
+      "categories": [
+        "storage-data"
+      ],
+      "svg": "svg/folder-storage.svg"
+    },
+    {
+      "id": "form",
+      "categories": [
+        "documents"
+      ],
+      "svg": "svg/form.svg"
+    },
+    {
+      "id": "forward",
+      "categories": [
+        "common-symbols"
+      ],
+      "svg": "svg/forward.svg"
+    },
+    {
+      "id": "function",
+      "categories": [
+        "programming"
+      ],
+      "svg": "svg/function.svg"
+    },
+    {
+      "id": "gateway",
+      "categories": [
+        "network"
+      ],
+      "svg": "svg/gateway.svg"
+    },
+    {
+      "id": "generic-language",
+      "categories": [
+        "programming"
+      ],
+      "svg": "svg/generic-language.svg"
+    },
+    {
+      "id": "gift",
+      "categories": [
+        "physical-objects"
+      ],
+      "svg": "svg/gift.svg"
+    },
+    {
+      "id": "group",
+      "categories": [
+        "people"
+      ],
+      "svg": "svg/group.svg"
+    },
+    {
+      "id": "guest",
+      "categories": [
+        "people"
+      ],
+      "svg": "svg/guest.svg"
+    },
+    {
+      "id": "hard-disk",
+      "categories": [
+        "physical-objects"
+      ],
+      "svg": "svg/hard-disk.svg"
+    },
+    {
+      "id": "heart",
+      "categories": [
+        "common-symbols"
+      ],
+      "svg": "svg/heart.svg"
+    },
+    {
+      "id": "home",
+      "categories": [
+        "physical-objects",
+        "common-symbols"
+      ],
+      "svg": "svg/home.svg"
+    },
+    {
+      "id": "house",
+      "categories": [
+        "physical-objects"
+      ],
+      "svg": "svg/house.svg"
+    },
+    {
+      "id": "html",
+      "categories": [
+        "file-formats"
+      ],
+      "svg": "svg/html.svg"
+    },
+    {
+      "id": "idea",
+      "categories": [
+        "office-business"
+      ],
+      "svg": "svg/idea.svg"
+    },
+    {
+      "id": "identity",
+      "categories": [
+        "security"
+      ],
+      "svg": "svg/identity.svg"
+    },
+    {
+      "id": "image-file",
+      "categories": [
+        "file-formats"
+      ],
+      "svg": "svg/image-file.svg"
+    },
+    {
+      "id": "information",
+      "categories": [
+        "common-symbols"
+      ],
+      "svg": "svg/information.svg"
+    },
+    {
+      "id": "internet",
+      "categories": [
+        "network"
+      ],
+      "svg": "svg/internet.svg"
+    },
+    {
+      "id": "invoice",
+      "categories": [
+        "documents"
+      ],
+      "svg": "svg/invoice.svg"
+    },
+    {
+      "id": "iot-device",
+      "categories": [
+        "devices"
+      ],
+      "svg": "svg/iot-device.svg"
+    },
+    {
+      "id": "java",
+      "categories": [
+        "programming"
+      ],
+      "svg": "svg/java.svg"
+    },
+    {
+      "id": "javascript",
+      "categories": [
+        "programming"
+      ],
+      "svg": "svg/javascript.svg"
+    },
+    {
+      "id": "json",
+      "categories": [
+        "file-formats"
+      ],
+      "svg": "svg/json.svg"
+    },
+    {
+      "id": "key",
+      "categories": [
+        "security"
+      ],
+      "svg": "svg/key.svg"
+    },
+    {
+      "id": "keycard",
+      "categories": [
+        "physical-objects"
+      ],
+      "svg": "svg/keycard.svg"
+    },
+    {
+      "id": "knowledge",
+      "categories": [
+        "ai"
+      ],
+      "svg": "svg/knowledge.svg"
+    },
+    {
+      "id": "kpi",
+      "categories": [
+        "charts-data"
+      ],
+      "svg": "svg/kpi.svg"
+    },
+    {
+      "id": "label",
+      "categories": [
+        "documents"
+      ],
+      "svg": "svg/label.svg"
+    },
+    {
+      "id": "laptop",
+      "categories": [
+        "devices"
+      ],
+      "svg": "svg/laptop.svg"
+    },
+    {
+      "id": "library",
+      "categories": [
+        "development"
+      ],
+      "svg": "svg/library.svg"
+    },
+    {
+      "id": "lightbulb",
+      "categories": [
+        "physical-objects"
+      ],
+      "svg": "svg/lightbulb.svg"
+    },
+    {
+      "id": "line-chart",
+      "categories": [
+        "charts-data"
+      ],
+      "svg": "svg/line-chart.svg"
+    },
+    {
+      "id": "link",
+      "categories": [
+        "common-symbols"
+      ],
+      "svg": "svg/link.svg"
+    },
+    {
+      "id": "llm",
+      "categories": [
+        "ai"
+      ],
+      "svg": "svg/llm.svg"
+    },
+    {
+      "id": "load-balancer",
+      "categories": [
+        "network"
+      ],
+      "svg": "svg/load-balancer.svg"
+    },
+    {
+      "id": "location",
+      "categories": [
+        "common-symbols"
+      ],
+      "svg": "svg/location.svg"
+    },
+    {
+      "id": "lock",
+      "categories": [
+        "security"
+      ],
+      "svg": "svg/lock.svg"
+    },
+    {
+      "id": "log",
+      "categories": [
+        "charts-data"
+      ],
+      "svg": "svg/log.svg"
+    },
+    {
+      "id": "log-file",
+      "categories": [
+        "file-formats"
+      ],
+      "svg": "svg/log-file.svg"
+    },
+    {
+      "id": "magnifier",
+      "categories": [
+        "physical-objects"
+      ],
+      "svg": "svg/magnifier.svg"
+    },
+    {
+      "id": "mail",
+      "categories": [
+        "communication"
+      ],
+      "svg": "svg/mail.svg"
+    },
+    {
+      "id": "mailbox",
+      "categories": [
+        "communication"
+      ],
+      "svg": "svg/mailbox.svg"
+    },
+    {
+      "id": "mainframe",
+      "categories": [
+        "computing"
+      ],
+      "svg": "svg/mainframe.svg"
+    },
+    {
+      "id": "manager",
+      "categories": [
+        "people"
+      ],
+      "svg": "svg/manager.svg"
+    },
+    {
+      "id": "manual",
+      "categories": [
+        "documents"
+      ],
+      "svg": "svg/manual.svg"
+    },
+    {
+      "id": "map",
+      "categories": [
+        "charts-data"
+      ],
+      "svg": "svg/map.svg"
+    },
+    {
+      "id": "markdown",
+      "categories": [
+        "file-formats"
+      ],
+      "svg": "svg/markdown.svg"
+    },
+    {
+      "id": "meeting",
+      "categories": [
+        "office-business"
+      ],
+      "svg": "svg/meeting.svg"
+    },
+    {
+      "id": "memory",
+      "categories": [
+        "ai"
+      ],
+      "svg": "svg/memory.svg"
+    },
+    {
+      "id": "merge",
+      "categories": [
+        "development"
+      ],
+      "svg": "svg/merge.svg"
+    },
+    {
+      "id": "message",
+      "categories": [
+        "communication"
+      ],
+      "svg": "svg/message.svg"
+    },
+    {
+      "id": "metrics",
+      "categories": [
+        "charts-data"
+      ],
+      "svg": "svg/metrics.svg"
+    },
+    {
+      "id": "microphone",
+      "categories": [
+        "devices"
+      ],
+      "svg": "svg/microphone.svg"
+    },
+    {
+      "id": "minus",
+      "categories": [
+        "common-symbols"
+      ],
+      "svg": "svg/minus.svg"
+    },
+    {
+      "id": "mobile-application",
+      "categories": [
+        "computing"
+      ],
+      "svg": "svg/mobile-application.svg"
+    },
+    {
+      "id": "module",
+      "categories": [
+        "programming"
+      ],
+      "svg": "svg/module.svg"
+    },
+    {
+      "id": "money",
+      "categories": [
+        "office-business"
+      ],
+      "svg": "svg/money.svg"
+    },
+    {
+      "id": "monitor",
+      "categories": [
+        "charts-data"
+      ],
+      "svg": "svg/monitor.svg"
+    },
+    {
+      "id": "network",
+      "categories": [
+        "network"
+      ],
+      "svg": "svg/network.svg"
+    },
+    {
+      "id": "notebook",
+      "categories": [
+        "documents"
+      ],
+      "svg": "svg/notebook.svg"
+    },
+    {
+      "id": "notification",
+      "categories": [
+        "communication"
+      ],
+      "svg": "svg/notification.svg"
+    },
+    {
+      "id": "object-storage",
+      "categories": [
+        "storage-data"
+      ],
+      "svg": "svg/object-storage.svg"
+    },
+    {
+      "id": "office",
+      "categories": [
+        "office-business"
+      ],
+      "svg": "svg/office.svg"
+    },
+    {
+      "id": "operator",
+      "categories": [
+        "people"
+      ],
+      "svg": "svg/operator.svg"
+    },
+    {
+      "id": "optical-disc",
+      "categories": [
+        "physical-objects"
+      ],
+      "svg": "svg/optical-disc.svg"
+    },
+    {
+      "id": "organization",
+      "categories": [
+        "people"
+      ],
+      "svg": "svg/organization.svg"
+    },
+    {
+      "id": "package",
+      "categories": [
+        "physical-objects"
+      ],
+      "svg": "svg/package.svg"
+    },
+    {
+      "id": "package-source",
+      "categories": [
+        "programming"
+      ],
+      "svg": "svg/package-source.svg"
+    },
+    {
+      "id": "partner",
+      "categories": [
+        "people"
+      ],
+      "svg": "svg/partner.svg"
+    },
+    {
+      "id": "password",
+      "categories": [
+        "security"
+      ],
+      "svg": "svg/password.svg"
+    },
+    {
+      "id": "pause",
+      "categories": [
+        "common-symbols"
+      ],
+      "svg": "svg/pause.svg"
+    },
+    {
+      "id": "pdf",
+      "categories": [
+        "file-formats"
+      ],
+      "svg": "svg/pdf.svg"
+    },
+    {
+      "id": "permission",
+      "categories": [
+        "security"
+      ],
+      "svg": "svg/permission.svg"
+    },
+    {
+      "id": "phone",
+      "categories": [
+        "communication"
+      ],
+      "svg": "svg/phone.svg"
+    },
+    {
+      "id": "pie-chart",
+      "categories": [
+        "charts-data"
+      ],
+      "svg": "svg/pie-chart.svg"
+    },
+    {
+      "id": "pin",
+      "categories": [
+        "common-symbols"
+      ],
+      "svg": "svg/pin.svg"
+    },
+    {
+      "id": "pipeline",
+      "categories": [
+        "development"
+      ],
+      "svg": "svg/pipeline.svg"
+    },
+    {
+      "id": "play",
+      "categories": [
+        "common-symbols"
+      ],
+      "svg": "svg/play.svg"
+    },
+    {
+      "id": "plugin",
+      "categories": [
+        "development"
+      ],
+      "svg": "svg/plugin.svg"
+    },
+    {
+      "id": "plus",
+      "categories": [
+        "common-symbols"
+      ],
+      "svg": "svg/plus.svg"
+    },
+    {
+      "id": "prediction",
+      "categories": [
+        "ai"
+      ],
+      "svg": "svg/prediction.svg"
+    },
+    {
+      "id": "presentation",
+      "categories": [
+        "office-business"
+      ],
+      "svg": "svg/presentation.svg"
+    },
+    {
+      "id": "presentation-file",
+      "categories": [
+        "file-formats"
+      ],
+      "svg": "svg/presentation-file.svg"
+    },
+    {
+      "id": "printer",
+      "categories": [
+        "devices"
+      ],
+      "svg": "svg/printer.svg"
+    },
+    {
+      "id": "privacy",
+      "categories": [
+        "security"
+      ],
+      "svg": "svg/privacy.svg"
+    },
+    {
+      "id": "private-cloud",
+      "categories": [
+        "network"
+      ],
+      "svg": "svg/private-cloud.svg"
+    },
+    {
+      "id": "prompt",
+      "categories": [
+        "ai"
+      ],
+      "svg": "svg/prompt.svg"
+    },
+    {
+      "id": "proxy",
+      "categories": [
+        "network"
+      ],
+      "svg": "svg/proxy.svg"
+    },
+    {
+      "id": "publish",
+      "categories": [
+        "communication"
+      ],
+      "svg": "svg/publish.svg"
+    },
+    {
+      "id": "python",
+      "categories": [
+        "programming"
+      ],
+      "svg": "svg/python.svg"
+    },
+    {
+      "id": "question",
+      "categories": [
+        "common-symbols"
+      ],
+      "svg": "svg/question.svg"
+    },
+    {
+      "id": "reasoning",
+      "categories": [
+        "ai"
+      ],
+      "svg": "svg/reasoning.svg"
+    },
+    {
+      "id": "receipt",
+      "categories": [
+        "documents"
+      ],
+      "svg": "svg/receipt.svg"
+    },
+    {
+      "id": "record",
+      "categories": [
+        "storage-data"
+      ],
+      "svg": "svg/record.svg"
+    },
+    {
+      "id": "refresh",
+      "categories": [
+        "common-symbols"
+      ],
+      "svg": "svg/refresh.svg"
+    },
+    {
+      "id": "release",
+      "categories": [
+        "development"
+      ],
+      "svg": "svg/release.svg"
+    },
+    {
+      "id": "report",
+      "categories": [
+        "documents"
+      ],
+      "svg": "svg/report.svg"
+    },
+    {
+      "id": "report-chart",
+      "categories": [
+        "charts-data"
+      ],
+      "svg": "svg/report-chart.svg"
+    },
+    {
+      "id": "repository",
+      "categories": [
+        "development"
+      ],
+      "svg": "svg/repository.svg"
+    },
+    {
+      "id": "request",
+      "categories": [
+        "communication"
+      ],
+      "svg": "svg/request.svg"
+    },
+    {
+      "id": "response",
+      "categories": [
+        "communication"
+      ],
+      "svg": "svg/response.svg"
+    },
+    {
+      "id": "risk",
+      "categories": [
+        "security"
+      ],
+      "svg": "svg/risk.svg"
+    },
+    {
+      "id": "robot",
+      "categories": [
+        "devices"
+      ],
+      "svg": "svg/robot.svg"
+    },
+    {
+      "id": "robot-arm",
+      "categories": [
+        "devices"
+      ],
+      "svg": "svg/robot-arm.svg"
+    },
+    {
+      "id": "router",
+      "categories": [
+        "network"
+      ],
+      "svg": "svg/router.svg"
+    },
+    {
+      "id": "satellite",
+      "categories": [
+        "network"
+      ],
+      "svg": "svg/satellite.svg"
+    },
+    {
+      "id": "scanner",
+      "categories": [
+        "devices"
+      ],
+      "svg": "svg/scanner.svg"
+    },
+    {
+      "id": "scatter-chart",
+      "categories": [
+        "charts-data"
+      ],
+      "svg": "svg/scatter-chart.svg"
+    },
+    {
+      "id": "scheduler",
+      "categories": [
+        "computing"
+      ],
+      "svg": "svg/scheduler.svg"
+    },
+    {
+      "id": "script",
+      "categories": [
+        "development"
+      ],
+      "svg": "svg/script.svg"
+    },
+    {
+      "id": "search",
+      "categories": [
+        "ai",
+        "common-symbols"
+      ],
+      "svg": "svg/search.svg"
+    },
+    {
+      "id": "security",
+      "categories": [
+        "security"
+      ],
+      "svg": "svg/security.svg"
+    },
+    {
+      "id": "sensor",
+      "categories": [
+        "devices"
+      ],
+      "svg": "svg/sensor.svg"
+    },
+    {
+      "id": "server",
+      "categories": [
+        "computing"
+      ],
+      "svg": "svg/server.svg"
+    },
+    {
+      "id": "server-rack",
+      "categories": [
+        "computing"
+      ],
+      "svg": "svg/server-rack.svg"
+    },
+    {
+      "id": "service",
+      "categories": [
+        "computing"
+      ],
+      "svg": "svg/service.svg"
+    },
+    {
+      "id": "settings",
+      "categories": [
+        "common-symbols"
+      ],
+      "svg": "svg/settings.svg"
+    },
+    {
+      "id": "shared-storage",
+      "categories": [
+        "storage-data"
+      ],
+      "svg": "svg/shared-storage.svg"
+    },
+    {
+      "id": "shell",
+      "categories": [
+        "programming"
+      ],
+      "svg": "svg/shell.svg"
+    },
+    {
+      "id": "shield",
+      "categories": [
+        "security"
+      ],
+      "svg": "svg/shield.svg"
+    },
+    {
+      "id": "ship",
+      "categories": [
+        "physical-objects"
+      ],
+      "svg": "svg/ship.svg"
+    },
+    {
+      "id": "signature",
+      "categories": [
+        "security"
+      ],
+      "svg": "svg/signature.svg"
+    },
+    {
+      "id": "smartphone",
+      "categories": [
+        "devices"
+      ],
+      "svg": "svg/smartphone.svg"
+    },
+    {
+      "id": "snapshot",
+      "categories": [
+        "storage-data"
+      ],
+      "svg": "svg/snapshot.svg"
+    },
+    {
+      "id": "software-package",
+      "categories": [
+        "development"
+      ],
+      "svg": "svg/software-package.svg"
+    },
+    {
+      "id": "source-code",
+      "categories": [
+        "file-formats",
+        "programming"
+      ],
+      "svg": "svg/source-code.svg"
+    },
+    {
+      "id": "speaker",
+      "categories": [
+        "devices"
+      ],
+      "svg": "svg/speaker.svg"
+    },
+    {
+      "id": "spreadsheet",
+      "categories": [
+        "file-formats"
+      ],
+      "svg": "svg/spreadsheet.svg"
+    },
+    {
+      "id": "sql",
+      "categories": [
+        "programming"
+      ],
+      "svg": "svg/sql.svg"
+    },
+    {
+      "id": "star",
+      "categories": [
+        "common-symbols"
+      ],
+      "svg": "svg/star.svg"
+    },
+    {
+      "id": "statistics",
+      "categories": [
+        "charts-data"
+      ],
+      "svg": "svg/statistics.svg"
+    },
+    {
+      "id": "stop",
+      "categories": [
+        "common-symbols"
+      ],
+      "svg": "svg/stop.svg"
+    },
+    {
+      "id": "storage",
+      "categories": [
+        "storage-data"
+      ],
+      "svg": "svg/storage.svg"
+    },
+    {
+      "id": "store",
+      "categories": [
+        "office-business"
+      ],
+      "svg": "svg/store.svg"
+    },
+    {
+      "id": "student",
+      "categories": [
+        "people"
+      ],
+      "svg": "svg/student.svg"
+    },
+    {
+      "id": "subscribe",
+      "categories": [
+        "communication"
+      ],
+      "svg": "svg/subscribe.svg"
+    },
+    {
+      "id": "switch",
+      "categories": [
+        "network"
+      ],
+      "svg": "svg/switch.svg"
+    },
+    {
+      "id": "sync",
+      "categories": [
+        "communication"
+      ],
+      "svg": "svg/sync.svg"
+    },
+    {
+      "id": "table",
+      "categories": [
+        "storage-data"
+      ],
+      "svg": "svg/table.svg"
+    },
+    {
+      "id": "table-chart",
+      "categories": [
+        "charts-data"
+      ],
+      "svg": "svg/table-chart.svg"
+    },
+    {
+      "id": "tablet",
+      "categories": [
+        "devices"
+      ],
+      "svg": "svg/tablet.svg"
+    },
+    {
+      "id": "tag",
+      "categories": [
+        "documents"
+      ],
+      "svg": "svg/tag.svg"
+    },
+    {
+      "id": "target",
+      "categories": [
+        "office-business"
+      ],
+      "svg": "svg/target.svg"
+    },
+    {
+      "id": "teacher",
+      "categories": [
+        "people"
+      ],
+      "svg": "svg/teacher.svg"
+    },
+    {
+      "id": "team",
+      "categories": [
+        "people"
+      ],
+      "svg": "svg/team.svg"
+    },
+    {
+      "id": "template",
+      "categories": [
+        "documents"
+      ],
+      "svg": "svg/template.svg"
+    },
+    {
+      "id": "terminal",
+      "categories": [
+        "devices"
+      ],
+      "svg": "svg/terminal.svg"
+    },
+    {
+      "id": "terminal-window",
+      "categories": [
+        "development"
+      ],
+      "svg": "svg/terminal-window.svg"
+    },
+    {
+      "id": "test",
+      "categories": [
+        "development"
+      ],
+      "svg": "svg/test.svg"
+    },
+    {
+      "id": "text",
+      "categories": [
+        "documents"
+      ],
+      "svg": "svg/text.svg"
+    },
+    {
+      "id": "text-file",
+      "categories": [
+        "file-formats"
+      ],
+      "svg": "svg/text-file.svg"
+    },
+    {
+      "id": "timeline",
+      "categories": [
+        "charts-data"
+      ],
+      "svg": "svg/timeline.svg"
+    },
+    {
+      "id": "token",
+      "categories": [
+        "security"
+      ],
+      "svg": "svg/token.svg"
+    },
+    {
+      "id": "tool",
+      "categories": [
+        "development"
+      ],
+      "svg": "svg/tool.svg"
+    },
+    {
+      "id": "train",
+      "categories": [
+        "physical-objects"
+      ],
+      "svg": "svg/train.svg"
+    },
+    {
+      "id": "training",
+      "categories": [
+        "office-business",
+        "ai"
+      ],
+      "svg": "svg/training.svg"
+    },
+    {
+      "id": "trend-down",
+      "categories": [
+        "charts-data"
+      ],
+      "svg": "svg/trend-down.svg"
+    },
+    {
+      "id": "trend-up",
+      "categories": [
+        "charts-data"
+      ],
+      "svg": "svg/trend-up.svg"
+    },
+    {
+      "id": "trophy",
+      "categories": [
+        "office-business"
+      ],
+      "svg": "svg/trophy.svg"
+    },
+    {
+      "id": "truck",
+      "categories": [
+        "physical-objects"
+      ],
+      "svg": "svg/truck.svg"
+    },
+    {
+      "id": "tsv",
+      "categories": [
+        "file-formats"
+      ],
+      "svg": "svg/tsv.svg"
+    },
+    {
+      "id": "typescript",
+      "categories": [
+        "programming"
+      ],
+      "svg": "svg/typescript.svg"
+    },
+    {
+      "id": "unlink",
+      "categories": [
+        "common-symbols"
+      ],
+      "svg": "svg/unlink.svg"
+    },
+    {
+      "id": "unlock",
+      "categories": [
+        "security"
+      ],
+      "svg": "svg/unlock.svg"
+    },
+    {
+      "id": "upload",
+      "categories": [
+        "communication"
+      ],
+      "svg": "svg/upload.svg"
+    },
+    {
+      "id": "usb-memory",
+      "categories": [
+        "physical-objects"
+      ],
+      "svg": "svg/usb-memory.svg"
+    },
+    {
+      "id": "user",
+      "categories": [
+        "people"
+      ],
+      "svg": "svg/user.svg"
+    },
+    {
+      "id": "variable",
+      "categories": [
+        "programming"
+      ],
+      "svg": "svg/variable.svg"
+    },
+    {
+      "id": "vector",
+      "categories": [
+        "ai"
+      ],
+      "svg": "svg/vector.svg"
+    },
+    {
+      "id": "video-call",
+      "categories": [
+        "communication"
+      ],
+      "svg": "svg/video-call.svg"
+    },
+    {
+      "id": "video-file",
+      "categories": [
+        "file-formats"
+      ],
+      "svg": "svg/video-file.svg"
+    },
+    {
+      "id": "virtual-machine",
+      "categories": [
+        "computing"
+      ],
+      "svg": "svg/virtual-machine.svg"
+    },
+    {
+      "id": "vpn",
+      "categories": [
+        "network"
+      ],
+      "svg": "svg/vpn.svg"
+    },
+    {
+      "id": "warehouse",
+      "categories": [
+        "office-business"
+      ],
+      "svg": "svg/warehouse.svg"
+    },
+    {
+      "id": "warning",
+      "categories": [
+        "security"
+      ],
+      "svg": "svg/warning.svg"
+    },
+    {
+      "id": "warning-sign",
+      "categories": [
+        "common-symbols"
+      ],
+      "svg": "svg/warning-sign.svg"
+    },
+    {
+      "id": "watch",
+      "categories": [
+        "devices"
+      ],
+      "svg": "svg/watch.svg"
+    },
+    {
+      "id": "web-application",
+      "categories": [
+        "computing"
+      ],
+      "svg": "svg/web-application.svg"
+    },
+    {
+      "id": "wifi",
+      "categories": [
+        "network"
+      ],
+      "svg": "svg/wifi.svg"
+    },
+    {
+      "id": "workflow",
+      "categories": [
+        "computing"
+      ],
+      "svg": "svg/workflow.svg"
+    },
+    {
+      "id": "workstation",
+      "categories": [
+        "computing"
+      ],
+      "svg": "svg/workstation.svg"
+    },
+    {
+      "id": "xml",
+      "categories": [
+        "file-formats"
+      ],
+      "svg": "svg/xml.svg"
+    },
+    {
+      "id": "yaml",
+      "categories": [
+        "file-formats"
+      ],
+      "svg": "svg/yaml.svg"
+    },
+    {
+      "id": "zoom",
+      "categories": [
+        "common-symbols"
+      ],
+      "svg": "svg/zoom.svg"
+    }
+  ]
+}

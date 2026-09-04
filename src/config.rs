@@ -14,6 +14,27 @@ pub struct Config {
     pub auto_dimension: bool,
     pub auto_minimum_dimension: u32,
     pub auto_maximum_dimension: u32,
+    /// Refine source regions whose perceptual error reduction justifies the
+    /// additional editable SVG representation cost.
+    pub adaptive_refinement: bool,
+    /// Largest source-space side of a refinement core. Larger images are
+    /// partitioned into balanced regions whose sides fit this bound.
+    pub adaptive_tile_dimension: u32,
+    /// Maximum number of source regions evaluated by the full vector model.
+    pub adaptive_max_patches: usize,
+    /// Maximum additional serialized SVG bytes accepted for refinements.
+    pub adaptive_svg_budget_bytes: usize,
+    /// Minimum local DeltaE00 reduction before a refined region is useful.
+    pub adaptive_min_perceptual_gain: f32,
+    /// Minimum coarse perceptual-gain/model-cost ratio required before the
+    /// expensive source-resolution candidate is evaluated.
+    pub adaptive_min_predicted_rate: f32,
+    /// DeltaE00 charged per added SVG byte/source-pixel. This is the common
+    /// rate-distortion control for both flat artwork and photographic detail.
+    pub adaptive_complexity_penalty: f32,
+    /// Source/base linear scale below which a second resolution adds too
+    /// little information to justify another vectorization pass.
+    pub adaptive_min_source_scale: f32,
     pub smoothing_radius: u32,
     pub smoothing_spatial_sigma: f64,
     pub smoothing_dark_delta_e: f32,
@@ -62,6 +83,14 @@ impl Default for Config {
             auto_dimension: true,
             auto_minimum_dimension: 768,
             auto_maximum_dimension: 1600,
+            adaptive_refinement: true,
+            adaptive_tile_dimension: 1400,
+            adaptive_max_patches: 16,
+            adaptive_svg_budget_bytes: 24 * 1024 * 1024,
+            adaptive_min_perceptual_gain: 0.75,
+            adaptive_min_predicted_rate: 2.5,
+            adaptive_complexity_penalty: 1.0,
+            adaptive_min_source_scale: 1.5,
             smoothing_radius: 4,
             smoothing_spatial_sigma: 1.15,
             smoothing_dark_delta_e: 1.8,
@@ -125,6 +154,35 @@ impl Config {
         require(
             self.auto_maximum_dimension >= 64,
             "auto_maximum_dimension must be at least 64",
+        )?;
+        require(
+            self.adaptive_tile_dimension >= 64,
+            "adaptive_tile_dimension must be at least 64",
+        )?;
+        require(
+            self.adaptive_max_patches >= 1,
+            "adaptive_max_patches must be at least 1",
+        )?;
+        require(
+            self.adaptive_svg_budget_bytes >= 1024,
+            "adaptive_svg_budget_bytes must be at least 1024",
+        )?;
+        require(
+            self.adaptive_min_perceptual_gain.is_finite()
+                && self.adaptive_min_perceptual_gain >= 0.0,
+            "adaptive_min_perceptual_gain must be finite and non-negative",
+        )?;
+        require(
+            self.adaptive_min_predicted_rate.is_finite() && self.adaptive_min_predicted_rate >= 0.0,
+            "adaptive_min_predicted_rate must be finite and non-negative",
+        )?;
+        require(
+            self.adaptive_complexity_penalty.is_finite() && self.adaptive_complexity_penalty >= 0.0,
+            "adaptive_complexity_penalty must be finite and non-negative",
+        )?;
+        require(
+            self.adaptive_min_source_scale.is_finite() && self.adaptive_min_source_scale >= 1.0,
+            "adaptive_min_source_scale must be finite and at least one",
         )?;
         require(
             self.smoothing_spatial_sigma.is_finite() && self.smoothing_spatial_sigma > 0.0,
@@ -256,6 +314,12 @@ mod tests {
 
         let config = Config {
             solid_color_max_delta_e: f32::INFINITY,
+            ..Config::default()
+        };
+        assert!(config.validate().is_err());
+
+        let config = Config {
+            adaptive_min_predicted_rate: f32::NAN,
             ..Config::default()
         };
         assert!(config.validate().is_err());

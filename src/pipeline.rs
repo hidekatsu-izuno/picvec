@@ -2,6 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use rayon::prelude::*;
 use serde::Serialize;
 use tempfile::{Builder as TemporaryFileBuilder, NamedTempFile};
 
@@ -9,6 +10,10 @@ use std::collections::HashMap;
 #[cfg(target_os = "linux")]
 use std::collections::HashSet;
 
+use crate::adaptive::{
+    compose_refinements, perceptual_score, plan_candidates, AdaptiveRefinementSummary,
+    EmbeddedRefinement, SourceRect,
+};
 use crate::color::{rgb_to_lab, Lab};
 use crate::config::Config;
 use crate::edge::{classify, dilate, dilate_square, perceptual_smooth, EdgeSummary};
@@ -27,7 +32,7 @@ use crate::segment::{
     Segmentation, SegmentationSummary,
 };
 use crate::structural::{analyse as analyse_structural, StructuralInk, StructuralSummary};
-use crate::svg::{serialize as serialize_svg, write as write_svg, SvgSummary};
+use crate::svg::{serialize as serialize_svg, SvgSummary};
 use crate::union_find::UnionFind;
 use crate::{Error, Result};
 
@@ -55,6 +60,7 @@ pub struct Summary {
     pub elapsed_seconds: f64,
     pub execution_threads: usize,
     pub complexity: ComplexityProbe,
+    pub adaptive_refinement: AdaptiveRefinementSummary,
     pub hierarchical_topology: HierarchicalTopologySummary,
     pub edge_roles: EdgeSummary,
     pub segmentation: SegmentationSummary,
@@ -360,6 +366,10 @@ fn render_svg_preview(
         paint_overlap,
         final_geometry,
     );
+    render_svg_document(&document, width, height)
+}
+
+fn render_svg_document(document: &str, width: usize, height: usize) -> Result<Raster> {
     let tree = resvg::usvg::Tree::from_data(document.as_bytes(), &resvg::usvg::Options::default())
         .map_err(|error| -> Error {
             format!("could not parse the generated SVG preview: {error}").into()
@@ -452,6 +462,257 @@ fn execution_thread_count(config: &Config) -> usize {
     physical_core_count().unwrap_or(logical).min(logical).max(1)
 }
 
+struct EvaluatedRefinement {
+    embedded: EmbeddedRefinement,
+    svg: SvgSummary,
+    baseline_mean: f32,
+    refined_mean: f32,
+    rate: f32,
+}
+
+enum RefinementOutcome {
+    NotFiner,
+    QualityRejected,
+    ComplexityRejected,
+    Accepted(Box<EvaluatedRefinement>),
+}
+
+/// Apply a single rate-distortion model to every input.  No photo/illustration
+/// classifier is involved: a region is refined only when the same vectorizer
+/// explains source-resolution evidence sufficiently better per added SVG
+/// byte.  High-frequency photographic texture therefore competes on exactly
+/// the same terms as a small, cheaply representable icon feature.
+fn adaptively_refine(
+    input: &Path,
+    input_dimensions: (usize, usize),
+    core: &mut CoreVectorization,
+    config: &Config,
+) -> Result<AdaptiveRefinementSummary> {
+    let (input_width, input_height) = input_dimensions;
+    let source_scale = (input_width as f32 / core.processing_reference.width.max(1) as f32)
+        .max(input_height as f32 / core.processing_reference.height.max(1) as f32);
+    let mut summary = AdaptiveRefinementSummary {
+        enabled: config.adaptive_refinement,
+        source_scale,
+        ..AdaptiveRefinementSummary::default()
+    };
+    if !config.adaptive_refinement || source_scale < config.adaptive_min_source_scale {
+        return Ok(summary);
+    }
+
+    // Reload only after the base pipeline releases its transient Lab, edge,
+    // and fitting buffers. Keeping the original f32 raster alive throughout
+    // those stages would unnecessarily add hundreds of MiB for large inputs.
+    let source = Raster::load(
+        input,
+        config.maximum_input_dimension,
+        config.maximum_input_pixels,
+        config.maximum_decode_bytes,
+    )?;
+    let base_render = render_svg_document(
+        &core.document,
+        core.processing_reference.width,
+        core.processing_reference.height,
+    )?;
+    let whole = SourceRect {
+        x: 0,
+        y: 0,
+        width: input_width,
+        height: input_height,
+    };
+    let baseline_whole = perceptual_score(&source, whole, &base_render, whole);
+    summary.baseline_mean_delta_e = baseline_whole.mean_delta_e;
+    summary.refined_mean_delta_e = baseline_whole.mean_delta_e;
+
+    let mut candidates = plan_candidates(
+        &source,
+        &base_render,
+        &core.labels,
+        config.adaptive_tile_dimension as usize,
+        config.adaptive_max_patches,
+        config.adaptive_min_perceptual_gain,
+    );
+    summary.proposed_regions = candidates.len();
+    #[cfg(feature = "diagnostics")]
+    if config.retain_diagnostics {
+        for candidate in &candidates {
+            eprintln!(
+                "picvec adaptive candidate {} {} {} {}: error={:.4} model_cost={:.4} priority={:.4}",
+                candidate.core.x,
+                candidate.core.y,
+                candidate.core.width,
+                candidate.core.height,
+                candidate.baseline.combined,
+                candidate.model_cost,
+                candidate.priority,
+            );
+        }
+    }
+    // The coarse error/model-cost ratio is an optimistic rate bound. Regions
+    // below it cannot beat the full candidate's stricter measured SVG-byte
+    // charge often enough to justify running another complete pipeline. The
+    // same bound retains compact icon features and rejects costly stochastic
+    // photo texture without identifying either content type.
+    let predicted_rate_threshold =
+        config.adaptive_min_predicted_rate * config.adaptive_complexity_penalty.sqrt();
+    candidates.retain(|candidate| candidate.priority >= predicted_rate_threshold);
+    summary.prefiltered_for_complexity = summary.proposed_regions - candidates.len();
+    summary.candidate_regions = candidates.len();
+    if candidates.is_empty() {
+        return Ok(summary);
+    }
+
+    let mut child_config = config.clone();
+    child_config.adaptive_refinement = false;
+    child_config.compute_quality_metrics = false;
+    child_config.retain_diagnostics = false;
+    let base_scale = 1.0 / source_scale;
+    let mut evaluated = Vec::<EvaluatedRefinement>::new();
+    // Bound concurrency independently of the Rayon worker count. Each local
+    // pipeline owns several dense rasters, so launching every leaf at once
+    // would exchange elapsed time for an avoidable multi-GiB memory spike.
+    for batch in candidates.chunks(4) {
+        let outcomes = batch
+            .par_iter()
+            .map(|candidate| -> Result<RefinementOutcome> {
+                let margin = (candidate.core.width.min(candidate.core.height) / 64).clamp(8, 24);
+                let expanded = candidate.core.expanded(margin, input_width, input_height);
+                let crop = source.crop(expanded.x, expanded.y, expanded.width, expanded.height);
+                let probe = if child_config.auto_dimension {
+                    estimate_dimension(&crop, &child_config)
+                } else {
+                    ComplexityProbe {
+                        selected_dimension: child_config
+                            .maximum_dimension
+                            .min(crop.width.max(crop.height) as u32),
+                        ..ComplexityProbe::default()
+                    }
+                };
+                let processing = crop.resize_max(probe.selected_dimension.max(64));
+                let local_scale = (processing.width as f32 / expanded.width.max(1) as f32)
+                    .min(processing.height as f32 / expanded.height.max(1) as f32);
+                if local_scale <= 1.1 * base_scale {
+                    return Ok(RefinementOutcome::NotFiner);
+                }
+                let child = vectorize_processing(processing, &child_config)?;
+                let child_render = render_svg_document(
+                    &child.document,
+                    child.processing_reference.width,
+                    child.processing_reference.height,
+                )?;
+                let refined = perceptual_score(&source, candidate.core, &child_render, expanded);
+                let combined_gain = candidate.baseline.combined - refined.combined;
+                if combined_gain < config.adaptive_min_perceptual_gain
+                    || refined.p90_delta_e > candidate.baseline.p90_delta_e + 0.25
+                    || refined.missing_edge_fraction
+                        > candidate.baseline.missing_edge_fraction + 0.025
+                {
+                    return Ok(RefinementOutcome::QualityRejected);
+                }
+                let bytes_per_source_pixel =
+                    child.svg.bytes as f32 / candidate.core.area().max(1) as f32;
+                let complexity_charge = config.adaptive_complexity_penalty
+                    * candidate.model_cost.sqrt()
+                    * bytes_per_source_pixel;
+                if combined_gain < complexity_charge {
+                    return Ok(RefinementOutcome::ComplexityRejected);
+                }
+                let child_svg_bytes = child.svg.bytes.max(1);
+                Ok(RefinementOutcome::Accepted(Box::new(EvaluatedRefinement {
+                    embedded: EmbeddedRefinement {
+                        core: candidate.core,
+                        expanded,
+                        document: child.document,
+                        processing_width: child.processing_reference.width,
+                        processing_height: child.processing_reference.height,
+                    },
+                    svg: child.svg,
+                    baseline_mean: candidate.baseline.mean_delta_e,
+                    refined_mean: refined.mean_delta_e,
+                    rate: combined_gain * candidate.core.area() as f32 / child_svg_bytes as f32,
+                })))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        for outcome in outcomes {
+            match outcome {
+                RefinementOutcome::NotFiner => summary.rejected_for_quality += 1,
+                RefinementOutcome::QualityRejected => {
+                    summary.evaluated_regions += 1;
+                    summary.rejected_for_quality += 1;
+                }
+                RefinementOutcome::ComplexityRejected => {
+                    summary.evaluated_regions += 1;
+                    summary.rejected_for_complexity += 1;
+                }
+                RefinementOutcome::Accepted(refinement) => {
+                    summary.evaluated_regions += 1;
+                    evaluated.push(*refinement);
+                }
+            }
+        }
+    }
+
+    // A global byte budget converts the local ordering into a deterministic
+    // best-first refinement pass.  Candidate generation order cannot change
+    // which equal-cost regions win.
+    evaluated.sort_by(|left, right| {
+        right
+            .rate
+            .total_cmp(&left.rate)
+            .then_with(|| left.embedded.core.y.cmp(&right.embedded.core.y))
+            .then_with(|| left.embedded.core.x.cmp(&right.embedded.core.x))
+    });
+    let mut accepted = Vec::<EmbeddedRefinement>::new();
+    for refinement in evaluated {
+        if summary.added_svg_bytes.saturating_add(refinement.svg.bytes)
+            > config.adaptive_svg_budget_bytes
+        {
+            summary.rejected_for_complexity += 1;
+            continue;
+        }
+        let area_weight = refinement.embedded.core.area() as f32 / whole.area().max(1) as f32;
+        summary.estimated_global_delta_e_reduction +=
+            (refinement.baseline_mean - refinement.refined_mean).max(0.0) * area_weight;
+        summary.added_svg_bytes += refinement.svg.bytes;
+        core.svg.add_elements_from(&refinement.svg);
+        accepted.push(refinement.embedded);
+    }
+    summary.accepted_regions = accepted.len();
+    summary.refined_mean_delta_e =
+        (summary.baseline_mean_delta_e - summary.estimated_global_delta_e_reduction).max(0.0);
+    if accepted.is_empty() {
+        return Ok(summary);
+    }
+    core.document = compose_refinements(
+        &core.document,
+        (
+            core.processing_reference.width,
+            core.processing_reference.height,
+        ),
+        input_dimensions,
+        &accepted,
+    )?;
+    core.svg.bytes = core.document.len();
+    // Parse the composed document even when report-only quality metrics are
+    // disabled. This turns any namespace/viewBox integration defect into an
+    // atomic conversion failure instead of writing a malformed SVG.
+    let final_render = render_svg_document(
+        &core.document,
+        core.processing_reference.width,
+        core.processing_reference.height,
+    )?;
+    #[cfg(feature = "diagnostics")]
+    if config.compute_quality_metrics {
+        core.quality = Some(crate::metrics::compare(
+            &core.processing_reference,
+            &final_render,
+        ));
+    }
+    #[cfg(not(feature = "diagnostics"))]
+    let _ = final_render;
+    Ok(summary)
+}
+
 fn vectorize_inner(
     input: &Path,
     output: &Path,
@@ -460,7 +721,6 @@ fn vectorize_inner(
 ) -> Result<Summary> {
     fs::create_dir_all(output_parent(output))?;
     let started = Instant::now();
-    let mut checkpoint = started;
     let input_image = Raster::load(
         input,
         config.maximum_input_dimension,
@@ -481,6 +741,62 @@ fn vectorize_inner(
     };
     let processing = input_image.resize_max(complexity.selected_dimension.max(64));
     drop(input_image);
+    let processing_width = processing.width;
+    let processing_height = processing.height;
+    let mut core = vectorize_processing(processing, config)?;
+    let adaptive_refinement =
+        adaptively_refine(input, (input_width, input_height), &mut core, config)?;
+    let temporary = temporary_svg(output, "output")?;
+    fs::write(temporary.path(), core.document.as_bytes())?;
+    temporary
+        .persist(output)
+        .map_err(|error| -> Error { error.error.into() })?;
+    Ok(Summary {
+        input_width,
+        input_height,
+        processing_width,
+        processing_height,
+        output: output.to_path_buf(),
+        elapsed_seconds: started.elapsed().as_secs_f64(),
+        execution_threads,
+        complexity,
+        adaptive_refinement,
+        hierarchical_topology: core.hierarchical_topology,
+        edge_roles: core.edge_roles,
+        segmentation: core.segmentation,
+        structural: core.structural,
+        ownership: core.ownership,
+        gradients: core.gradients,
+        geometry: core.geometry,
+        optimization: core.optimization,
+        svg: core.svg,
+        quality: core.quality,
+    })
+}
+
+struct CoreVectorization {
+    document: String,
+    processing_reference: Raster,
+    labels: Vec<u32>,
+    hierarchical_topology: HierarchicalTopologySummary,
+    edge_roles: EdgeSummary,
+    segmentation: SegmentationSummary,
+    structural: StructuralSummary,
+    ownership: BoundaryOwnershipSummary,
+    gradients: GradientSummary,
+    geometry: GeometrySummary,
+    optimization: OptimizationSummary,
+    svg: SvgSummary,
+    quality: Option<QualityMetrics>,
+}
+
+/// Run the complete vector model for an already selected processing raster.
+/// Keeping this independent of file I/O lets adaptive refinement run the same
+/// model on source-resolution regions instead of maintaining a second,
+/// content-specific vectorizer.
+fn vectorize_processing(processing: Raster, config: &Config) -> Result<CoreVectorization> {
+    let started = Instant::now();
+    let mut checkpoint = started;
     save_pipeline_diagnostic("source", &processing);
     report_progress(config, "load-resize", started, &mut checkpoint);
     let mut roles = classify(&processing);
@@ -751,9 +1067,7 @@ fn vectorize_inner(
     let ownership_summary = ownership.summary.clone();
     let paint_overlap = ownership.paint_overlap;
     let structural = ownership.structural;
-    let temporary = temporary_svg(output, "output")?;
-    let svg_report = write_svg(
-        temporary.path(),
+    let (document, svg_report) = serialize_svg(
         processing.width,
         processing.height,
         &geometry,
@@ -761,20 +1075,12 @@ fn vectorize_inner(
         &structural,
         paint_overlap,
         true,
-    )?;
+    );
     report_progress(config, "final-svg", started, &mut checkpoint);
-    temporary
-        .persist(output)
-        .map_err(|error| -> Error { error.error.into() })?;
-    Ok(Summary {
-        input_width,
-        input_height,
-        processing_width: processing.width,
-        processing_height: processing.height,
-        output: output.to_path_buf(),
-        elapsed_seconds: started.elapsed().as_secs_f64(),
-        execution_threads,
-        complexity,
+    Ok(CoreVectorization {
+        document,
+        processing_reference: processing,
+        labels: segmentation.labels,
         hierarchical_topology: topology.summary,
         edge_roles: roles.summary,
         segmentation: segmentation.summary,
@@ -923,6 +1229,9 @@ mod tests {
         )
         .unwrap();
         assert!(summary.quality.is_none());
+        assert!(summary.adaptive_refinement.enabled);
+        assert_eq!(summary.adaptive_refinement.accepted_regions, 0);
+        assert_eq!(summary.adaptive_refinement.source_scale, 1.0);
         let files: HashSet<_> = fs::read_dir(&directory)
             .unwrap()
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())

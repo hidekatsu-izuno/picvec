@@ -28,6 +28,27 @@ struct Arguments {
     max_decode_mib: u64,
     #[arg(long, default_value_t = 4)]
     smoothing_radius: u32,
+    /// Disable source-resolution rate-distortion refinement.
+    #[arg(long)]
+    no_adaptive_refinement: bool,
+    /// Largest source-space side of one adaptive refinement region.
+    #[arg(long, default_value_t = 1400)]
+    adaptive_tile_dimension: u32,
+    /// Maximum source regions evaluated at higher resolution.
+    #[arg(long, default_value_t = 16)]
+    adaptive_max_patches: usize,
+    /// Maximum additional SVG size accepted for adaptive regions, in MiB.
+    #[arg(long, default_value_t = 24)]
+    adaptive_svg_budget_mib: usize,
+    /// Minimum local DeltaE00 reduction required from a refinement.
+    #[arg(long, default_value_t = 0.75)]
+    adaptive_min_perceptual_gain: f32,
+    /// Minimum predicted perceptual gain per local model cost.
+    #[arg(long, default_value_t = 2.5)]
+    adaptive_min_predicted_rate: f32,
+    /// SVG rate penalty charged per byte/source-pixel.
+    #[arg(long, default_value_t = 1.0)]
+    adaptive_complexity_penalty: f32,
     #[arg(long, default_value_t = 24)]
     segmentation_min_size: u32,
     #[arg(long, default_value_t = 2.5)]
@@ -75,6 +96,10 @@ fn run() -> picvec::Result<()> {
         .max_input_megapixels
         .checked_mul(1_000_000)
         .ok_or("max_input_megapixels is too large")?;
+    let adaptive_svg_budget_bytes = arguments
+        .adaptive_svg_budget_mib
+        .checked_mul(1024 * 1024)
+        .ok_or("adaptive_svg_budget_mib is too large")?;
     let defaults = Config::default();
     #[cfg(feature = "diagnostics")]
     let (compute_quality_metrics, retain_diagnostics) =
@@ -89,6 +114,13 @@ fn run() -> picvec::Result<()> {
         auto_dimension: true,
         auto_minimum_dimension: defaults.auto_minimum_dimension.min(maximum),
         auto_maximum_dimension: maximum,
+        adaptive_refinement: !arguments.no_adaptive_refinement,
+        adaptive_tile_dimension: arguments.adaptive_tile_dimension,
+        adaptive_max_patches: arguments.adaptive_max_patches,
+        adaptive_svg_budget_bytes,
+        adaptive_min_perceptual_gain: arguments.adaptive_min_perceptual_gain,
+        adaptive_min_predicted_rate: arguments.adaptive_min_predicted_rate,
+        adaptive_complexity_penalty: arguments.adaptive_complexity_penalty,
         smoothing_radius: arguments.smoothing_radius,
         segmentation_min_size: arguments.segmentation_min_size,
         quantization_dark_delta_e: arguments.quantization_dark_delta_e,
