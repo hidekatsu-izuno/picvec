@@ -73,6 +73,7 @@ pub struct AdaptiveRefinementSummary {
     pub candidate_regions: usize,
     pub prefiltered_for_complexity: usize,
     pub evaluated_regions: usize,
+    pub parallel_jobs: usize,
     pub accepted_regions: usize,
     pub rejected_for_quality: usize,
     pub rejected_for_complexity: usize,
@@ -350,7 +351,7 @@ pub(crate) fn compose_refinements(
         ));
     }
     layer.push_str("</g>");
-    let mut document = String::with_capacity(base_document.len() + layer.len());
+    let mut document = String::with_capacity(close + layer.len() + 6);
     document.push_str(&base_document[..close]);
     document.push_str(&layer);
     document.push_str(&base_document[close..]);

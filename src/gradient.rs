@@ -5,7 +5,8 @@ use rayon::prelude::*;
 use serde::Serialize;
 
 use crate::color::{
-    delta_e2000, delta_e2000_pairs, delta_e76, rgb_to_lab, skimage_lab_values_to_rgb, Lab,
+    delta_e2000, delta_e2000_pairs, delta_e2000_to_many, delta_e76, rgb_to_lab,
+    skimage_lab_values_to_rgb, Lab,
 };
 use crate::config::Config;
 use crate::edge::{
@@ -708,6 +709,25 @@ fn paint_error_against_labs(
     );
     let rendered_labs = lab_pixels(&rendered);
     let errors = delta_e2000_pairs(&references, &rendered_labs);
+    ErrorStats {
+        mean: numpy_sum_f32(&errors) / errors.len() as f32,
+        percentile: percentile(errors, 0.90),
+    }
+}
+
+fn constant_paint_error_against_labs(
+    source_labs: &[Lab],
+    samples: &[usize],
+    rendered_lab: Lab,
+) -> ErrorStats {
+    if samples.is_empty() {
+        return ErrorStats {
+            mean: 0.0,
+            percentile: 0.0,
+        };
+    }
+    let references: Vec<Lab> = samples.iter().map(|&index| source_labs[index]).collect();
+    let errors = delta_e2000_to_many(&references, rendered_lab);
     ErrorStats {
         mean: numpy_sum_f32(&errors) / errors.len() as f32,
         percentile: percentile(errors, 0.90),
@@ -1562,6 +1582,7 @@ fn fit_region(
     indices: &[usize],
     paint_indices: &[usize],
     canonical_solid: [f32; 3],
+    canonical_solid_lab: Lab,
     directional_only: bool,
     sample_budget: usize,
     use_primary_gate: bool,
@@ -1606,6 +1627,7 @@ fn fit_region(
         indices.len(),
         region_bounds,
         canonical_solid,
+        canonical_solid_lab,
         directional_only,
         run_full_fit,
         config,
@@ -1656,6 +1678,7 @@ fn fit_region_samples(
     area: usize,
     region_bounds: Bounds,
     canonical_solid: [f32; 3],
+    canonical_solid_lab: Lab,
     directional_only: bool,
     run_full_fit: bool,
     config: &Config,
@@ -1665,7 +1688,7 @@ fn fit_region_samples(
     // mean here makes every nominally solid face a different colour before
     // gradient selection even starts.
     let solid_color = canonical_solid;
-    let solid_error = paint_error_against_labs(source_labs, samples, |_| solid_color);
+    let solid_error = constant_paint_error_against_labs(source_labs, samples, canonical_solid_lab);
     if !run_full_fit {
         return (Paint::Solid { color: solid_color }, solid_error.mean);
     }
@@ -5235,6 +5258,45 @@ pub fn fit_all(
     strong_branches: &crate::ridge::StrongRidgeBranches,
     config: &Config,
 ) -> (Vec<Paint>, GradientSummary) {
+    fit_all_internal(
+        source,
+        boundary_source,
+        segmentation,
+        Some(topology),
+        strong_branches,
+        config,
+    )
+}
+
+/// The pipeline has already compacted every Paint owner at this point, so
+/// every region receives the full sample budget. Deferring the hierarchy
+/// until after the final Paint merges avoids building the same exact tree
+/// twice without changing any fit decision.
+pub(crate) fn fit_all_without_topology(
+    source: &Raster,
+    boundary_source: &Raster,
+    segmentation: &Segmentation,
+    strong_branches: &crate::ridge::StrongRidgeBranches,
+    config: &Config,
+) -> (Vec<Paint>, GradientSummary) {
+    fit_all_internal(
+        source,
+        boundary_source,
+        segmentation,
+        None,
+        strong_branches,
+        config,
+    )
+}
+
+fn fit_all_internal(
+    source: &Raster,
+    boundary_source: &Raster,
+    segmentation: &Segmentation,
+    topology: Option<&HierarchicalTopology>,
+    strong_branches: &crate::ridge::StrongRidgeBranches,
+    config: &Config,
+) -> (Vec<Paint>, GradientSummary) {
     let fit_started = std::time::Instant::now();
     let source_labs = lab_pixels(source);
     let mut region_indices = vec![Vec::<usize>::new(); segmentation.regions.len()];
@@ -5255,6 +5317,23 @@ pub fn fit_all(
     let region_density = segmentation.regions.len() as f32
         / (segmentation.width * segmentation.height).max(1) as f32;
     let use_primary_gate = region_density >= config.paint_primary_min_region_density;
+    let canonical_solids = region_indices
+        .iter()
+        .map(|indices| {
+            indices
+                .first()
+                .map(|&index| segmentation.canonical.pixels[index])
+                .unwrap_or([0.0; 3])
+        })
+        .collect::<Vec<_>>();
+    // Solid candidates repeat one canonical colour across every Paint
+    // sample. Convert each region colour once rather than materialising and
+    // converting thousands of identical RGB pixels inside every fit.
+    let canonical_solid_labs = lab_pixels(&Raster::new(
+        canonical_solids.len(),
+        1,
+        canonical_solids.clone(),
+    ));
     let fitted: Vec<(Paint, f32, bool)> = region_indices
         .par_iter()
         .zip(region_paint_indices.par_iter())
@@ -5293,19 +5372,16 @@ pub fn fit_all(
             } else {
                 paint_indices
             };
-            let canonical_solid = indices
-                .first()
-                .map(|&index| segmentation.canonical.pixels[index])
-                .unwrap_or([0.0; 3]);
             fit_region(
                 label,
                 source,
                 &source_labs,
                 indices,
                 selected_paint_indices,
-                canonical_solid,
+                canonical_solids[label],
+                canonical_solid_labs[label],
                 strong_dark,
-                topology.paint_sample_budget(label, 8192),
+                topology.map_or(8192, |value| value.paint_sample_budget(label, 8192)),
                 use_primary_gate,
                 config,
             )
@@ -5485,6 +5561,32 @@ fn save_paint_details(path: &str, paints: &[Paint]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cached_solid_lab_preserves_paint_error_exactly() {
+        let source = Raster::new(
+            17,
+            1,
+            (0..17)
+                .map(|index| {
+                    let amount = index as f32 / 16.0;
+                    [
+                        0.08 + 0.81 * amount,
+                        0.74 - 0.51 * amount,
+                        0.19 + 0.37 * amount,
+                    ]
+                })
+                .collect(),
+        );
+        let source_labs = lab_pixels(&source);
+        let samples = (0..17).collect::<Vec<_>>();
+        let solid = [0.31, 0.57, 0.83];
+        let rendered_lab = lab_pixels(&Raster::new(1, 1, vec![solid]))[0];
+        let previous = paint_error_against_labs(&source_labs, &samples, |_| solid);
+        let cached = constant_paint_error_against_labs(&source_labs, &samples, rendered_lab);
+        assert_eq!(cached.mean.to_bits(), previous.mean.to_bits());
+        assert_eq!(cached.percentile.to_bits(), previous.percentile.to_bits());
+    }
 
     fn two_face_segmentation(source: &Raster) -> Segmentation {
         let labels = (0..source.height)

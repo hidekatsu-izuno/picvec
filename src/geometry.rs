@@ -1330,13 +1330,13 @@ fn regularize_short_corner_excursions(
 }
 
 fn boundary_topology(
-    segmentation: &Segmentation,
     stride: usize,
-    topology: Option<&HierarchicalTopology>,
+    directed_edges: &[Vec<GridEdge>],
+    pair_edges: &HashMap<RegionPair, Vec<EdgeKey>>,
 ) -> (VertexTangents, VertexPositions, Vec<Vec<u64>>, HashSet<u64>) {
     let mut remaining = BTreeSet::<EdgeKey>::new();
-    for edges in pair_boundary_edges(segmentation, stride, topology).into_values() {
-        remaining.extend(edges);
+    for edges in pair_edges.values() {
+        remaining.extend(edges.iter().copied());
     }
     let mut adjacency = HashMap::<u64, BTreeSet<u64>>::new();
     for &edge in &remaining {
@@ -1348,9 +1348,8 @@ fn boundary_topology(
     // that face on its right.  The exact insertion order is immaterial to
     // `_trace_region_loops`, which always starts from the lexicographically
     // smallest remaining directed edge.
-    let (directed, _) = region_boundary_edges(segmentation, stride, topology);
     let mut votes = HashMap::<(u64, EdgeKey), f64>::new();
-    for edges in &directed {
+    for edges in directed_edges {
         for points in trace_region_vertex_loops(edges, stride) {
             if points.len() < 3 {
                 continue;
@@ -4498,7 +4497,7 @@ fn fit_adaptive_boundary_geometry(
     stride: usize,
     strands: &[Vec<u64>],
     protected_vertices: &HashSet<u64>,
-    topology: Option<&HierarchicalTopology>,
+    pair_edges: &HashMap<RegionPair, Vec<EdgeKey>>,
 ) -> AdaptiveBoundaryGeometry {
     let mut edge_spans = HashMap::<EdgeKey, Vec<AdaptiveCurveSpan>>::new();
     let mut proposals = HashMap::<u64, Vec<(usize, Point)>>::new();
@@ -4513,8 +4512,8 @@ fn fit_adaptive_boundary_geometry(
     #[cfg(feature = "diagnostics")]
     let mut strand_diagnostics = Vec::<serde_json::Value>::new();
     let mut edge_pair = HashMap::<EdgeKey, RegionPair>::new();
-    for (pair, edges) in pair_boundary_edges(segmentation, stride, topology) {
-        for edge in edges {
+    for (&pair, edges) in pair_edges {
+        for &edge in edges {
             edge_pair.insert(edge, pair);
         }
     }
@@ -5478,8 +5477,7 @@ fn fit_adaptive_boundary_geometry(
         }
     }
 
-    let all_edges = pair_boundary_edges(segmentation, stride, topology);
-    let vertices: HashSet<u64> = all_edges
+    let vertices: HashSet<u64> = pair_edges
         .values()
         .flatten()
         .flat_map(|edge| [edge.0, edge.1])
@@ -5747,7 +5745,8 @@ fn shared_chain_diagnostic(
 fn build_shared_chains(
     segmentation: &Segmentation,
     stride: usize,
-    topology: Option<&HierarchicalTopology>,
+    directed_edges: &[Vec<GridEdge>],
+    pair_edges: &HashMap<RegionPair, Vec<EdgeKey>>,
 ) -> (
     Vec<SharedChain>,
     EdgeChainLookup,
@@ -5758,9 +5757,9 @@ fn build_shared_chains(
     usize,
     usize,
 ) {
-    let (_, _, strands, junctions) = boundary_topology(segmentation, stride, topology);
+    let (_, _, strands, junctions) = boundary_topology(stride, directed_edges, pair_edges);
     let adaptive =
-        fit_adaptive_boundary_geometry(segmentation, stride, &strands, &junctions, topology);
+        fit_adaptive_boundary_geometry(segmentation, stride, &strands, &junctions, pair_edges);
     let positions = adaptive.vertex_positions.clone();
     let mut chains = Vec::<SharedChain>::new();
     let mut lookup = HashMap::<EdgeKey, (usize, u64, u64)>::new();
@@ -5772,14 +5771,14 @@ fn build_shared_chains(
     let stage_diagnostics_enabled = std::env::var_os("PICVEC_GEOMETRY_STAGE_DIAGNOSTICS").is_some();
     #[cfg(feature = "diagnostics")]
     let mut stage_diagnostics = serde_json::Map::new();
-    let mut pairs: Vec<(RegionPair, Vec<EdgeKey>)> =
-        pair_boundary_edges(segmentation, stride, topology)
-            .into_iter()
-            .collect();
+    let mut pairs: Vec<(RegionPair, &[EdgeKey])> = pair_edges
+        .iter()
+        .map(|(&pair, edges)| (pair, edges.as_slice()))
+        .collect();
     pairs.sort_by_key(|value| value.0);
     let mut tasks = Vec::<(RegionPair, Vec<u64>)>::new();
     for (pair, pair_edges) in pairs {
-        let pair_edges: HashSet<EdgeKey> = pair_edges.into_iter().collect();
+        let pair_edges: HashSet<EdgeKey> = pair_edges.iter().copied().collect();
         for track in trace_edge_chains(&pair_edges, &junctions, stride) {
             if track.len() >= 2 {
                 tasks.push((pair, track));
@@ -6674,6 +6673,7 @@ fn build_internal(
     let order_ranks = paint_order_ranks(segmentation);
     let stride = segmentation.width + 1;
     let (edges, shared) = region_boundary_edges(segmentation, stride, topology);
+    let pair_edges = pair_boundary_edges(segmentation, stride, topology);
     let source_edges = edges.iter().map(Vec::len).sum();
     let (
         shared_chains,
@@ -6684,7 +6684,7 @@ fn build_internal(
         regularized_corner_excursions,
         regularized_corner_vertices,
         shared_curve_downgrades,
-    ) = build_shared_chains(segmentation, stride, topology);
+    ) = build_shared_chains(segmentation, stride, &edges, &pair_edges);
     let mut endpoint_degree = HashMap::<(i64, i64), usize>::new();
     let mut endpoint_order = Vec::<(i64, i64)>::new();
     for chain in &shared_chains {
@@ -7536,7 +7536,10 @@ mod tests {
             summary: SegmentationSummary::default(),
         };
         let stride = width + 1;
-        let (chains, lookup, _, _, _, _, _, _) = build_shared_chains(&segmentation, stride, None);
+        let (directed_edges, _) = region_boundary_edges(&segmentation, stride, None);
+        let pair_edges = pair_boundary_edges(&segmentation, stride, None);
+        let (chains, lookup, _, _, _, _, _, _) =
+            build_shared_chains(&segmentation, stride, &directed_edges, &pair_edges);
         let chain_ids: Vec<usize> = (0..height)
             .map(|y| lookup[&EdgeKey::new(vertex_id(3, y, stride), vertex_id(3, y + 1, stride))].0)
             .collect();
@@ -7601,7 +7604,10 @@ mod tests {
             summary: SegmentationSummary::default(),
         };
         let stride = width + 1;
-        let (chains, lookup, _, _, _, _, _, _) = build_shared_chains(&segmentation, stride, None);
+        let (directed_edges, _) = region_boundary_edges(&segmentation, stride, None);
+        let pair_edges = pair_boundary_edges(&segmentation, stride, None);
+        let (chains, lookup, _, _, _, _, _, _) =
+            build_shared_chains(&segmentation, stride, &directed_edges, &pair_edges);
         let upper = lookup[&EdgeKey::new(vertex_id(3, 2, stride), vertex_id(3, 3, stride))].0;
         let lower = lookup[&EdgeKey::new(vertex_id(3, 3, stride), vertex_id(3, 4, stride))].0;
         assert_ne!(upper, lower);

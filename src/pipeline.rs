@@ -19,8 +19,8 @@ use crate::config::Config;
 use crate::edge::{classify, dilate, dilate_square, perceptual_smooth, EdgeSummary};
 use crate::geometry::{build_with_topology as build_geometry, GeometrySummary};
 use crate::gradient::{
-    fit_all, merge_partition, merge_source_supported_paints, refresh_summary, GradientSummary,
-    Paint,
+    fit_all_without_topology, merge_partition, merge_source_supported_paints, refresh_summary,
+    GradientSummary, Paint,
 };
 use crate::hierarchy::{HierarchicalTopology, HierarchicalTopologySummary};
 use crate::metrics::QualityMetrics;
@@ -35,6 +35,9 @@ use crate::structural::{analyse as analyse_structural, StructuralInk, Structural
 use crate::svg::{serialize as serialize_svg, SvgSummary};
 use crate::union_find::UnionFind;
 use crate::{Error, Result};
+
+const MINIMUM_AUTOMATIC_TARGET_PIXELS: f32 = 1_200_000.0;
+const MAXIMUM_AUTOMATIC_TARGET_PIXELS: f32 = 2_000_000.0;
 
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct ComplexityProbe {
@@ -300,7 +303,8 @@ fn estimate_dimension(image: &Raster, config: &Config) -> ComplexityProbe {
     let normalized_region_density = (probe_region_density / 60_000.0).clamp(0.0, 1.0);
     let normalized_edge_density = (edge_density / 0.18).clamp(0.0, 1.0);
     let complexity = 0.65 * normalized_region_density + 0.35 * normalized_edge_density;
-    let target_pixels = 1_200_000.0 + 800_000.0 * complexity;
+    let target_pixels = MINIMUM_AUTOMATIC_TARGET_PIXELS
+        + (MAXIMUM_AUTOMATIC_TARGET_PIXELS - MINIMUM_AUTOMATIC_TARGET_PIXELS) * complexity;
     let source_pixels = (image.width * image.height).max(1) as f32;
     let estimated = image.width.max(image.height) as f32 * (target_pixels / source_pixels).sqrt();
     let (automatic_minimum, automatic_maximum) = config.automatic_dimension_bounds();
@@ -370,10 +374,7 @@ fn render_svg_preview(
 }
 
 fn render_svg_document(document: &str, width: usize, height: usize) -> Result<Raster> {
-    let tree = resvg::usvg::Tree::from_data(document.as_bytes(), &resvg::usvg::Options::default())
-        .map_err(|error| -> Error {
-            format!("could not parse the generated SVG preview: {error}").into()
-        })?;
+    let tree = parse_svg_document(document)?;
     let width = u32::try_from(width)
         .map_err(|_| -> Error { "SVG preview width exceeds the renderer limit".into() })?;
     let height = u32::try_from(height)
@@ -399,6 +400,12 @@ fn render_svg_document(document: &str, width: usize, height: usize) -> Result<Ra
         })
         .collect();
     Ok(Raster::new(width as usize, height as usize, pixels))
+}
+
+fn parse_svg_document(document: &str) -> Result<resvg::usvg::Tree> {
+    resvg::usvg::Tree::from_data(document.as_bytes(), &resvg::usvg::Options::default()).map_err(
+        |error| -> Error { format!("could not parse the generated SVG preview: {error}").into() },
+    )
 }
 
 /// Convert one raster into exactly the SVG path requested by the caller.
@@ -462,6 +469,59 @@ fn execution_thread_count(config: &Config) -> usize {
     physical_core_count().unwrap_or(logical).min(logical).max(1)
 }
 
+#[cfg(target_os = "linux")]
+fn available_memory_bytes() -> Option<usize> {
+    fs::read_to_string("/proc/meminfo")
+        .ok()?
+        .lines()
+        .find_map(|line| {
+            let mut fields = line.split_whitespace();
+            if fields.next()? != "MemAvailable:" {
+                return None;
+            }
+            fields.next()?.parse::<usize>().ok()?.checked_mul(1024)
+        })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn available_memory_bytes() -> Option<usize> {
+    None
+}
+
+fn adaptive_parallel_jobs(
+    candidates: &[crate::adaptive::RefinementCandidate],
+    image_dimensions: (usize, usize),
+    execution_threads: usize,
+) -> usize {
+    const MAXIMUM_JOBS: usize = 8;
+    const ESTIMATED_WORKING_BYTES_PER_PIXEL: usize = 320;
+    let maximum_memory_budget = usize::try_from(4_u64 * 1024 * 1024 * 1024).unwrap_or(usize::MAX);
+    let (width, height) = image_dimensions;
+    let largest_job_pixels = candidates
+        .iter()
+        .map(|candidate| {
+            let margin = (candidate.core.width.min(candidate.core.height) / 64).clamp(8, 24);
+            candidate.core.expanded(margin, width, height).area()
+        })
+        .max()
+        .unwrap_or(1);
+    let estimated_job_bytes = largest_job_pixels.saturating_mul(ESTIMATED_WORKING_BYTES_PER_PIXEL);
+    let memory_jobs = available_memory_bytes()
+        .map(|available| {
+            (available / 2)
+                .min(maximum_memory_budget)
+                .checked_div(estimated_job_bytes.max(1))
+                .unwrap_or(1)
+        })
+        .unwrap_or(4);
+    candidates
+        .len()
+        .min(execution_threads)
+        .min(MAXIMUM_JOBS)
+        .min(memory_jobs.max(1))
+        .max(1)
+}
+
 struct EvaluatedRefinement {
     embedded: EmbeddedRefinement,
     svg: SvgSummary,
@@ -483,10 +543,11 @@ enum RefinementOutcome {
 /// byte.  High-frequency photographic texture therefore competes on exactly
 /// the same terms as a small, cheaply representable icon feature.
 fn adaptively_refine(
-    input: &Path,
+    source: Option<&Raster>,
     input_dimensions: (usize, usize),
     core: &mut CoreVectorization,
     config: &Config,
+    execution_threads: usize,
 ) -> Result<AdaptiveRefinementSummary> {
     let (input_width, input_height) = input_dimensions;
     let source_scale = (input_width as f32 / core.processing_reference.width.max(1) as f32)
@@ -500,15 +561,9 @@ fn adaptively_refine(
         return Ok(summary);
     }
 
-    // Reload only after the base pipeline releases its transient Lab, edge,
-    // and fitting buffers. Keeping the original f32 raster alive throughout
-    // those stages would unnecessarily add hundreds of MiB for large inputs.
-    let source = Raster::load(
-        input,
-        config.maximum_input_dimension,
-        config.maximum_input_pixels,
-        config.maximum_decode_bytes,
-    )?;
+    let source = source.ok_or_else(|| -> Error {
+        "adaptive source raster was released before refinement".into()
+    })?;
     let base_render = render_svg_document(
         &core.document,
         core.processing_reference.width,
@@ -520,12 +575,12 @@ fn adaptively_refine(
         width: input_width,
         height: input_height,
     };
-    let baseline_whole = perceptual_score(&source, whole, &base_render, whole);
+    let baseline_whole = perceptual_score(source, whole, &base_render, whole);
     summary.baseline_mean_delta_e = baseline_whole.mean_delta_e;
     summary.refined_mean_delta_e = baseline_whole.mean_delta_e;
 
     let mut candidates = plan_candidates(
-        &source,
+        source,
         &base_render,
         &core.labels,
         config.adaptive_tile_dimension as usize,
@@ -568,10 +623,14 @@ fn adaptively_refine(
     child_config.retain_diagnostics = false;
     let base_scale = 1.0 / source_scale;
     let mut evaluated = Vec::<EvaluatedRefinement>::new();
-    // Bound concurrency independently of the Rayon worker count. Each local
-    // pipeline owns several dense rasters, so launching every leaf at once
-    // would exchange elapsed time for an avoidable multi-GiB memory spike.
-    for batch in candidates.chunks(4) {
+    // Keep enough independent jobs in flight to cover serial geometry and
+    // segmentation stages, while estimating their dense working sets before
+    // committing memory. The cap prevents a transiently high MemAvailable
+    // value from turning a large source into an unbounded allocation burst.
+    let parallel_jobs =
+        adaptive_parallel_jobs(&candidates, (input_width, input_height), execution_threads);
+    summary.parallel_jobs = parallel_jobs;
+    for batch in candidates.chunks(parallel_jobs) {
         let outcomes = batch
             .par_iter()
             .map(|candidate| -> Result<RefinementOutcome> {
@@ -579,7 +638,18 @@ fn adaptively_refine(
                 let expanded = candidate.core.expanded(margin, input_width, input_height);
                 let crop = source.crop(expanded.x, expanded.y, expanded.width, expanded.height);
                 let probe = if child_config.auto_dimension {
-                    estimate_dimension(&crop, &child_config)
+                    let (_, automatic_maximum) = child_config.automatic_dimension_bounds();
+                    if crop.width.max(crop.height) <= automatic_maximum as usize
+                        && crop.pixels.len() as f32 <= MINIMUM_AUTOMATIC_TARGET_PIXELS
+                    {
+                        ComplexityProbe {
+                            selected_dimension: crop.width.max(crop.height) as u32,
+                            target_pixels: MINIMUM_AUTOMATIC_TARGET_PIXELS,
+                            ..ComplexityProbe::default()
+                        }
+                    } else {
+                        estimate_dimension(&crop, &child_config)
+                    }
                 } else {
                     ComplexityProbe {
                         selected_dimension: child_config
@@ -600,7 +670,7 @@ fn adaptively_refine(
                     child.processing_reference.width,
                     child.processing_reference.height,
                 )?;
-                let refined = perceptual_score(&source, candidate.core, &child_render, expanded);
+                let refined = perceptual_score(source, candidate.core, &child_render, expanded);
                 let combined_gain = candidate.baseline.combined - refined.combined;
                 if combined_gain < config.adaptive_min_perceptual_gain
                     || refined.p90_delta_e > candidate.baseline.p90_delta_e + 0.25
@@ -696,20 +766,24 @@ fn adaptively_refine(
     // Parse the composed document even when report-only quality metrics are
     // disabled. This turns any namespace/viewBox integration defect into an
     // atomic conversion failure instead of writing a malformed SVG.
-    let final_render = render_svg_document(
-        &core.document,
-        core.processing_reference.width,
-        core.processing_reference.height,
-    )?;
-    #[cfg(feature = "diagnostics")]
     if config.compute_quality_metrics {
-        core.quality = Some(crate::metrics::compare(
-            &core.processing_reference,
-            &final_render,
-        ));
+        let final_render = render_svg_document(
+            &core.document,
+            core.processing_reference.width,
+            core.processing_reference.height,
+        )?;
+        #[cfg(feature = "diagnostics")]
+        {
+            core.quality = Some(crate::metrics::compare(
+                &core.processing_reference,
+                &final_render,
+            ));
+        }
+        #[cfg(not(feature = "diagnostics"))]
+        let _ = final_render;
+    } else {
+        parse_svg_document(&core.document)?;
     }
-    #[cfg(not(feature = "diagnostics"))]
-    let _ = final_render;
     Ok(summary)
 }
 
@@ -740,12 +814,21 @@ fn vectorize_inner(
         }
     };
     let processing = input_image.resize_max(complexity.selected_dimension.max(64));
-    drop(input_image);
     let processing_width = processing.width;
     let processing_height = processing.height;
+    let source_scale = (input_width as f32 / processing_width.max(1) as f32)
+        .max(input_height as f32 / processing_height.max(1) as f32);
+    let adaptive_source = (config.adaptive_refinement
+        && source_scale >= config.adaptive_min_source_scale)
+        .then_some(input_image);
     let mut core = vectorize_processing(processing, config)?;
-    let adaptive_refinement =
-        adaptively_refine(input, (input_width, input_height), &mut core, config)?;
+    let adaptive_refinement = adaptively_refine(
+        adaptive_source.as_ref(),
+        (input_width, input_height),
+        &mut core,
+        config,
+        execution_threads,
+    )?;
     let temporary = temporary_svg(output, "output")?;
     fs::write(temporary.path(), core.document.as_bytes())?;
     temporary
@@ -982,12 +1065,10 @@ fn vectorize_processing(processing: Raster, config: &Config) -> Result<CoreVecto
         started,
         &mut checkpoint,
     );
-    let mut topology = HierarchicalTopology::build(&segmentation);
-    let (mut paints, mut gradient_report) = fit_all(
+    let (mut paints, mut gradient_report) = fit_all_without_topology(
         &paint_reference,
         &processing,
         &segmentation,
-        &topology,
         &strong_branches,
         config,
     );
@@ -1019,7 +1100,7 @@ fn vectorize_processing(processing: Raster, config: &Config) -> Result<CoreVecto
     gradient_report.source_supported_paint_merges = supported_paint_merges.merges;
     gradient_report.source_supported_boundary_edges_removed =
         supported_paint_merges.boundary_edges_removed;
-    topology = HierarchicalTopology::build(&segmentation);
+    let topology = HierarchicalTopology::build(&segmentation);
     report_progress(config, "exact-paint-merge", started, &mut checkpoint);
     let (geometry, geometry_report) = build_geometry(&segmentation, &topology);
     report_progress(config, "shared-geometry", started, &mut checkpoint);

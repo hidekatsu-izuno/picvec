@@ -72,6 +72,11 @@ expensive photographic texture is normally left at the base level. Accepted
 regions are fitted from the original pixels with a halo and clipped back into
 the base SVG. The byte budget and thresholds above control the quality/size
 tradeoff; `--no-adaptive-refinement` restores single-resolution processing.
+Independent refinement regions run concurrently. The job count is bounded by
+the selected worker count and by a conservative estimate derived from the
+largest crop and currently available memory; `--verbose` reports the selected
+count as `adaptive_refinement.parallel_jobs`. Small source-native crops also
+skip the otherwise redundant automatic-resolution probe.
 
 Input dimensions and total area are checked from the image header before
 decoding (32,768 pixels per axis and 32 megapixels by default), and decoder
