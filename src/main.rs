@@ -28,6 +28,9 @@ struct Arguments {
     max_decode_mib: u64,
     #[arg(long, default_value_t = 4)]
     smoothing_radius: u32,
+    /// Remove an automatically detected red/green/blue/cyan/magenta/yellow background.
+    #[arg(long)]
+    remove_chroma_key_background: bool,
     /// Disable source-resolution rate-distortion refinement.
     #[arg(long)]
     no_adaptive_refinement: bool,
@@ -114,6 +117,7 @@ fn run() -> picvec::Result<()> {
         auto_dimension: true,
         auto_minimum_dimension: defaults.auto_minimum_dimension.min(maximum),
         auto_maximum_dimension: maximum,
+        remove_chroma_key_background: arguments.remove_chroma_key_background,
         adaptive_refinement: !arguments.no_adaptive_refinement,
         adaptive_tile_dimension: arguments.adaptive_tile_dimension,
         adaptive_max_patches: arguments.adaptive_max_patches,

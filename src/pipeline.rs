@@ -14,6 +14,7 @@ use crate::adaptive::{
     compose_refinements, perceptual_score, plan_candidates, AdaptiveRefinementSummary,
     EmbeddedRefinement, SourceRect,
 };
+use crate::chroma::{self, AlphaMatte, AlphaTransparencySummary, ChromaKeySummary};
 use crate::color::{rgb_to_lab, Lab};
 use crate::config::Config;
 use crate::edge::{classify, dilate, dilate_square, perceptual_smooth, EdgeSummary};
@@ -32,7 +33,7 @@ use crate::segment::{
     Segmentation, SegmentationSummary,
 };
 use crate::structural::{analyse as analyse_structural, StructuralInk, StructuralSummary};
-use crate::svg::{serialize as serialize_svg, SvgSummary};
+use crate::svg::{serialize_filtered as serialize_svg, SvgSummary};
 use crate::union_find::UnionFind;
 use crate::{Error, Result};
 
@@ -63,6 +64,8 @@ pub struct Summary {
     pub elapsed_seconds: f64,
     pub execution_threads: usize,
     pub complexity: ComplexityProbe,
+    pub source_alpha: AlphaTransparencySummary,
+    pub chroma_key: ChromaKeySummary,
     pub adaptive_refinement: AdaptiveRefinementSummary,
     pub hierarchical_topology: HierarchicalTopologySummary,
     pub edge_roles: EdgeSummary,
@@ -358,6 +361,8 @@ fn render_svg_preview(
     structural: &StructuralInk,
     paint_overlap: f32,
     final_geometry: bool,
+    excluded_regions: &[bool],
+    background: [f32; 3],
 ) -> Result<Raster> {
     let (width, height) = dimensions;
     let (geometry, paints) = paint_layer;
@@ -369,11 +374,17 @@ fn render_svg_preview(
         structural,
         paint_overlap,
         final_geometry,
+        excluded_regions,
     );
-    render_svg_document(&document, width, height)
+    render_svg_document_on(&document, width, height, background)
 }
 
-fn render_svg_document(document: &str, width: usize, height: usize) -> Result<Raster> {
+fn render_svg_document_on(
+    document: &str,
+    width: usize,
+    height: usize,
+    background: [f32; 3],
+) -> Result<Raster> {
     let tree = parse_svg_document(document)?;
     let width = u32::try_from(width)
         .map_err(|_| -> Error { "SVG preview width exceeds the renderer limit".into() })?;
@@ -393,9 +404,9 @@ fn render_svg_document(document: &str, width: usize, height: usize) -> Result<Ra
         .map(|pixel| {
             let inverse_alpha = (255 - pixel.alpha()) as f32 / 255.0;
             [
-                pixel.red() as f32 / 255.0 + inverse_alpha,
-                pixel.green() as f32 / 255.0 + inverse_alpha,
-                pixel.blue() as f32 / 255.0 + inverse_alpha,
+                pixel.red() as f32 / 255.0 + inverse_alpha * background[0],
+                pixel.green() as f32 / 255.0 + inverse_alpha * background[1],
+                pixel.blue() as f32 / 255.0 + inverse_alpha * background[2],
             ]
         })
         .collect();
@@ -543,7 +554,8 @@ enum RefinementOutcome {
 /// byte.  High-frequency photographic texture therefore competes on exactly
 /// the same terms as a small, cheaply representable icon feature.
 fn adaptively_refine(
-    source: Option<&Raster>,
+    vector_source: Option<&Raster>,
+    source_matte: Option<&AlphaMatte>,
     input_dimensions: (usize, usize),
     core: &mut CoreVectorization,
     config: &Config,
@@ -561,13 +573,15 @@ fn adaptively_refine(
         return Ok(summary);
     }
 
-    let source = source.ok_or_else(|| -> Error {
+    let vector_source = vector_source.ok_or_else(|| -> Error {
         "adaptive source raster was released before refinement".into()
     })?;
-    let base_render = render_svg_document(
+    let source = vector_source;
+    let base_render = render_svg_document_on(
         &core.document,
         core.processing_reference.width,
         core.processing_reference.height,
+        core.preview_background,
     )?;
     let whole = SourceRect {
         x: 0,
@@ -636,7 +650,11 @@ fn adaptively_refine(
             .map(|candidate| -> Result<RefinementOutcome> {
                 let margin = (candidate.core.width.min(candidate.core.height) / 64).clamp(8, 24);
                 let expanded = candidate.core.expanded(margin, input_width, input_height);
-                let crop = source.crop(expanded.x, expanded.y, expanded.width, expanded.height);
+                let crop =
+                    vector_source.crop(expanded.x, expanded.y, expanded.width, expanded.height);
+                let crop_matte = source_matte.map(|matte| {
+                    matte.crop(expanded.x, expanded.y, expanded.width, expanded.height)
+                });
                 let probe = if child_config.auto_dimension {
                     let (_, automatic_maximum) = child_config.automatic_dimension_bounds();
                     if crop.width.max(crop.height) <= automatic_maximum as usize
@@ -659,16 +677,25 @@ fn adaptively_refine(
                     }
                 };
                 let processing = crop.resize_max(probe.selected_dimension.max(64));
+                let processing_matte = crop_matte
+                    .as_ref()
+                    .map(|matte| matte.resized(processing.width, processing.height));
                 let local_scale = (processing.width as f32 / expanded.width.max(1) as f32)
                     .min(processing.height as f32 / expanded.height.max(1) as f32);
                 if local_scale <= 1.1 * base_scale {
                     return Ok(RefinementOutcome::NotFiner);
                 }
-                let child = vectorize_processing(processing, &child_config)?;
-                let child_render = render_svg_document(
+                let child = vectorize_processing(
+                    processing,
+                    processing_matte.as_ref(),
+                    core.preview_background,
+                    &child_config,
+                )?;
+                let child_render = render_svg_document_on(
                     &child.document,
                     child.processing_reference.width,
                     child.processing_reference.height,
+                    core.preview_background,
                 )?;
                 let refined = perceptual_score(source, candidate.core, &child_render, expanded);
                 let combined_gain = candidate.baseline.combined - refined.combined;
@@ -761,16 +788,18 @@ fn adaptively_refine(
         ),
         input_dimensions,
         &accepted,
+        source_matte.is_some(),
     )?;
     core.svg.bytes = core.document.len();
     // Parse the composed document even when report-only quality metrics are
     // disabled. This turns any namespace/viewBox integration defect into an
     // atomic conversion failure instead of writing a malformed SVG.
     if config.compute_quality_metrics {
-        let final_render = render_svg_document(
+        let final_render = render_svg_document_on(
             &core.document,
             core.processing_reference.width,
             core.processing_reference.height,
+            core.preview_background,
         )?;
         #[cfg(feature = "diagnostics")]
         {
@@ -795,40 +824,95 @@ fn vectorize_inner(
 ) -> Result<Summary> {
     fs::create_dir_all(output_parent(output))?;
     let started = Instant::now();
-    let input_image = Raster::load(
+    let (decoded, decoded_alpha) = Raster::load_with_alpha(
         input,
         config.maximum_input_dimension,
         config.maximum_input_pixels,
         config.maximum_decode_bytes,
     )?;
-    let input_width = input_image.width;
-    let input_height = input_image.height;
+    let input_width = decoded.width;
+    let input_height = decoded.height;
+    let source_has_alpha = decoded_alpha.is_some();
+    let (source, input_matte, preview_background, detected_key, alpha_backing) =
+        if let Some(alpha) = decoded_alpha {
+            let matte = AlphaMatte::new(input_width, input_height, alpha);
+            let backing = chroma::select_alpha_backing(&decoded, &matte);
+            let composed = chroma::composite_over(&decoded, &matte, backing);
+            (
+                chroma::separate_foreground(&composed, &matte, backing),
+                Some(matte),
+                backing,
+                None,
+                Some(backing),
+            )
+        } else if let Some(key) = config
+            .remove_chroma_key_background
+            .then(|| chroma::detect(&decoded))
+            .flatten()
+        {
+            let matte = chroma::pull_matte(&decoded, key);
+            let separated = chroma::separate_foreground(&decoded, &matte, key.sampled);
+            (separated, Some(matte), key.sampled, Some(key), None)
+        } else {
+            (decoded, None, [1.0; 3], None, None)
+        };
     let complexity = if config.auto_dimension {
-        estimate_dimension(&input_image, config)
+        estimate_dimension(&source, config)
     } else {
         ComplexityProbe {
             selected_dimension: config
                 .maximum_dimension
-                .min(input_image.width.max(input_image.height) as u32),
+                .min(source.width.max(source.height) as u32),
             ..ComplexityProbe::default()
         }
     };
-    let processing = input_image.resize_max(complexity.selected_dimension.max(64));
+    let processing = source.resize_max(complexity.selected_dimension.max(64));
+    let processing_matte = input_matte
+        .as_ref()
+        .map(|matte| matte.resized(processing.width, processing.height));
     let processing_width = processing.width;
     let processing_height = processing.height;
     let source_scale = (input_width as f32 / processing_width.max(1) as f32)
         .max(input_height as f32 / processing_height.max(1) as f32);
-    let adaptive_source = (config.adaptive_refinement
-        && source_scale >= config.adaptive_min_source_scale)
-        .then_some(input_image);
-    let mut core = vectorize_processing(processing, config)?;
+    let retain_adaptive_source =
+        config.adaptive_refinement && source_scale >= config.adaptive_min_source_scale;
+    let adaptive_source = retain_adaptive_source.then_some(source);
+    let adaptive_matte = if retain_adaptive_source {
+        input_matte
+    } else {
+        None
+    };
+    let mut core = vectorize_processing(
+        processing,
+        processing_matte.as_ref(),
+        preview_background,
+        config,
+    )?;
     let adaptive_refinement = adaptively_refine(
         adaptive_source.as_ref(),
+        adaptive_matte.as_ref(),
         (input_width, input_height),
         &mut core,
         config,
         execution_threads,
     )?;
+    let to_u8 =
+        |color: [f32; 3]| color.map(|channel| (channel.clamp(0.0, 1.0) * 255.0).round() as u8);
+    let source_alpha = AlphaTransparencySummary {
+        detected: source_has_alpha,
+        temporary_backing_color: alpha_backing.map(to_u8),
+        removed_regions: if source_has_alpha {
+            core.removed_background_regions
+        } else {
+            0
+        },
+    };
+    let chroma_key = detected_key
+        .map(|key| key.summary(true, core.removed_background_regions))
+        .unwrap_or(ChromaKeySummary {
+            enabled: config.remove_chroma_key_background,
+            ..ChromaKeySummary::default()
+        });
     let temporary = temporary_svg(output, "output")?;
     fs::write(temporary.path(), core.document.as_bytes())?;
     temporary
@@ -843,6 +927,8 @@ fn vectorize_inner(
         elapsed_seconds: started.elapsed().as_secs_f64(),
         execution_threads,
         complexity,
+        source_alpha,
+        chroma_key,
         adaptive_refinement,
         hierarchical_topology: core.hierarchical_topology,
         edge_roles: core.edge_roles,
@@ -861,6 +947,8 @@ struct CoreVectorization {
     document: String,
     processing_reference: Raster,
     labels: Vec<u32>,
+    removed_background_regions: usize,
+    preview_background: [f32; 3],
     hierarchical_topology: HierarchicalTopologySummary,
     edge_roles: EdgeSummary,
     segmentation: SegmentationSummary,
@@ -877,7 +965,12 @@ struct CoreVectorization {
 /// Keeping this independent of file I/O lets adaptive refinement run the same
 /// model on source-resolution regions instead of maintaining a second,
 /// content-specific vectorizer.
-fn vectorize_processing(processing: Raster, config: &Config) -> Result<CoreVectorization> {
+fn vectorize_processing(
+    processing: Raster,
+    chroma_matte: Option<&AlphaMatte>,
+    preview_background: [f32; 3],
+    config: &Config,
+) -> Result<CoreVectorization> {
     let started = Instant::now();
     let mut checkpoint = started;
     save_pipeline_diagnostic("source", &processing);
@@ -1100,6 +1193,10 @@ fn vectorize_processing(processing: Raster, config: &Config) -> Result<CoreVecto
     gradient_report.source_supported_paint_merges = supported_paint_merges.merges;
     gradient_report.source_supported_boundary_edges_removed =
         supported_paint_merges.boundary_edges_removed;
+    let excluded_regions = chroma_matte
+        .map(|matte| chroma::background_regions(&segmentation.labels, paints.len(), matte))
+        .unwrap_or_default();
+    let removed_background_regions = excluded_regions.iter().filter(|&&removed| removed).count();
     let topology = HierarchicalTopology::build(&segmentation);
     report_progress(config, "exact-paint-merge", started, &mut checkpoint);
     let (geometry, geometry_report) = build_geometry(&segmentation, &topology);
@@ -1113,6 +1210,8 @@ fn vectorize_processing(processing: Raster, config: &Config) -> Result<CoreVecto
         &StructuralInk::empty(),
         0.0,
         false,
+        &excluded_regions,
+        preview_background,
     )?;
     report_progress(config, "paint-preview", started, &mut checkpoint);
     let optimization = optimization_summary(&geometry, &paints, &geometry_report);
@@ -1123,6 +1222,11 @@ fn vectorize_processing(processing: Raster, config: &Config) -> Result<CoreVecto
         &geometry_report.paint_junctions,
         config.shared_boundary_overlap,
     );
+    if let Some(matte) = chroma_matte {
+        ownership
+            .structural
+            .retain_strokes(|stroke| matte.retains_stroke(&stroke.points));
+    }
     ownership.summary.structural_strokes = ownership.structural.strokes.len();
     report_progress(config, "structural-selection", started, &mut checkpoint);
     // The complete preview is report-only. Structural ownership is already
@@ -1134,7 +1238,9 @@ fn vectorize_processing(processing: Raster, config: &Config) -> Result<CoreVecto
             (&geometry, &paints),
             &ownership.structural,
             ownership.paint_overlap,
-            true,
+            excluded_regions.iter().all(|&excluded| !excluded),
+            &excluded_regions,
+            preview_background,
         )?;
         report_progress(config, "quality-preview", started, &mut checkpoint);
         let quality = crate::metrics::compare(&processing, &residual_render);
@@ -1155,13 +1261,16 @@ fn vectorize_processing(processing: Raster, config: &Config) -> Result<CoreVecto
         &paints,
         &structural,
         paint_overlap,
-        true,
+        excluded_regions.iter().all(|&excluded| !excluded),
+        &excluded_regions,
     );
     report_progress(config, "final-svg", started, &mut checkpoint);
     Ok(CoreVectorization {
         document,
         processing_reference: processing,
         labels: segmentation.labels,
+        removed_background_regions,
+        preview_background,
         hierarchical_topology: topology.summary,
         edge_roles: roles.summary,
         segmentation: segmentation.summary,
@@ -1310,6 +1419,8 @@ mod tests {
         )
         .unwrap();
         assert!(summary.quality.is_none());
+        assert!(!summary.source_alpha.detected);
+        assert!(!summary.chroma_key.enabled);
         assert!(summary.adaptive_refinement.enabled);
         assert_eq!(summary.adaptive_refinement.accepted_regions, 0);
         assert_eq!(summary.adaptive_refinement.source_scale, 1.0);
@@ -1326,6 +1437,191 @@ mod tests {
         assert!(document.contains("<svg"));
         assert!(!document.contains("silhouette\""));
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn chroma_key_removes_outer_and_enclosed_background_but_keeps_white_subject() {
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("input.png");
+        let output = directory.path().join("output.svg");
+        let mut raster = Raster::blank(64, 64, [0.0, 1.0, 0.0]);
+        // An opaque white foreground detail verifies that white is not
+        // confused with the keyed background.
+        for y in 3..13 {
+            for x in 3..13 {
+                raster.pixels[y * 64 + x] = [1.0; 3];
+            }
+        }
+        // Red ring around a disconnected island of keyed background.
+        for y in 14..50 {
+            for x in 14..50 {
+                raster.pixels[y * 64 + x] = [1.0, 0.0, 0.0];
+            }
+        }
+        // One-pixel 50% coverage shoulder, as produced by raster
+        // antialiasing of red over the green backing.
+        for position in 14..50 {
+            raster.pixels[14 * 64 + position] = [0.5, 0.5, 0.0];
+            raster.pixels[49 * 64 + position] = [0.5, 0.5, 0.0];
+            raster.pixels[position * 64 + 14] = [0.5, 0.5, 0.0];
+            raster.pixels[position * 64 + 49] = [0.5, 0.5, 0.0];
+        }
+        for y in 26..38 {
+            for x in 26..38 {
+                raster.pixels[y * 64 + x] = [0.0, 1.0, 0.0];
+            }
+        }
+        raster.save(&input).unwrap();
+        let summary = vectorize(
+            &input,
+            &output,
+            &Config {
+                maximum_dimension: 64,
+                auto_dimension: false,
+                remove_chroma_key_background: true,
+                adaptive_refinement: false,
+                smoothing_radius: 1,
+                segmentation_min_size: 2,
+                minimum_gradient_area: 8,
+                rayon_threads: 1,
+                ..Config::default()
+            },
+        )
+        .unwrap();
+        assert!(summary.chroma_key.enabled);
+        assert!(summary.chroma_key.detected);
+        assert_eq!(summary.chroma_key.key_color, Some([0, 255, 0]));
+        assert!(summary.chroma_key.removed_regions >= 2);
+
+        let document = fs::read_to_string(&output).unwrap();
+        for (_, suffix) in document.match_indices('#') {
+            let Some(hex) = suffix.get(1..7) else {
+                continue;
+            };
+            let Ok(color) = u32::from_str_radix(hex, 16) else {
+                continue;
+            };
+            let red = (color >> 16) & 0xff;
+            let green = (color >> 8) & 0xff;
+            let blue = color & 0xff;
+            assert!(
+                green < 200 || red >= 80 || blue >= 80,
+                "key-coloured antialias paint leaked into SVG: #{hex}"
+            );
+        }
+        let tree = parse_svg_document(&document).unwrap();
+        let mut pixmap = resvg::tiny_skia::Pixmap::new(64, 64).unwrap();
+        resvg::render(
+            &tree,
+            resvg::tiny_skia::Transform::identity(),
+            &mut pixmap.as_mut(),
+        );
+        let alpha = |x: usize, y: usize| pixmap.pixels()[y * 64 + x].alpha();
+        assert_eq!(alpha(2, 2), 0, "outer key should be transparent");
+        assert!(
+            alpha(8, 8) > 240,
+            "white foreground should remain opaque: {}",
+            alpha(8, 8)
+        );
+        assert!(alpha(18, 18) > 240, "red foreground should remain opaque");
+        assert_eq!(alpha(32, 32), 0, "enclosed key should be transparent");
+
+        let opaque_output = directory.path().join("opaque.svg");
+        let opaque_summary = vectorize(
+            &input,
+            &opaque_output,
+            &Config {
+                maximum_dimension: 64,
+                auto_dimension: false,
+                adaptive_refinement: false,
+                smoothing_radius: 1,
+                segmentation_min_size: 2,
+                minimum_gradient_area: 8,
+                rayon_threads: 1,
+                ..Config::default()
+            },
+        )
+        .unwrap();
+        assert!(!opaque_summary.source_alpha.detected);
+        assert!(!opaque_summary.chroma_key.enabled);
+        let opaque_document = fs::read_to_string(&opaque_output).unwrap();
+        let opaque_tree = parse_svg_document(&opaque_document).unwrap();
+        let mut opaque_pixmap = resvg::tiny_skia::Pixmap::new(64, 64).unwrap();
+        resvg::render(
+            &opaque_tree,
+            resvg::tiny_skia::Transform::identity(),
+            &mut opaque_pixmap.as_mut(),
+        );
+        assert!(
+            opaque_pixmap.pixels()[2 * 64 + 2].alpha() > 240,
+            "opaque chroma input must remain opaque without the option"
+        );
+    }
+
+    #[test]
+    fn source_alpha_is_removed_without_the_chroma_option() {
+        use image::{ImageBuffer, Rgba};
+
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("input.png");
+        let output = directory.path().join("output.svg");
+        let mut image = ImageBuffer::from_pixel(64, 64, Rgba([17_u8, 31, 47, 0]));
+        // Opaque black and white details must both survive regardless of the
+        // temporary saturated backing selected for RGB vectorization.
+        for y in 4..14 {
+            for x in 4..14 {
+                image.put_pixel(x, y, Rgba([255, 255, 255, 255]));
+            }
+        }
+        for y in 16..50 {
+            for x in 16..50 {
+                image.put_pixel(x, y, Rgba([0, 0, 0, 255]));
+            }
+        }
+        for y in 27..39 {
+            for x in 27..39 {
+                image.put_pixel(x, y, Rgba([17, 31, 47, 0]));
+            }
+        }
+        image.save(&input).unwrap();
+
+        let summary = vectorize(
+            &input,
+            &output,
+            &Config {
+                maximum_dimension: 64,
+                auto_dimension: false,
+                adaptive_refinement: false,
+                smoothing_radius: 1,
+                segmentation_min_size: 2,
+                minimum_gradient_area: 8,
+                rayon_threads: 1,
+                ..Config::default()
+            },
+        )
+        .unwrap();
+        assert!(summary.source_alpha.detected);
+        assert!(summary.source_alpha.temporary_backing_color.is_some());
+        assert!(summary.source_alpha.removed_regions >= 2);
+        assert!(!summary.chroma_key.enabled);
+
+        let document = fs::read_to_string(&output).unwrap();
+        let tree = parse_svg_document(&document).unwrap();
+        let mut pixmap = resvg::tiny_skia::Pixmap::new(64, 64).unwrap();
+        resvg::render(
+            &tree,
+            resvg::tiny_skia::Transform::identity(),
+            &mut pixmap.as_mut(),
+        );
+        let alpha = |x: usize, y: usize| pixmap.pixels()[y * 64 + x].alpha();
+        assert_eq!(alpha(2, 2), 0);
+        assert!(alpha(8, 8) > 240, "opaque white should remain");
+        assert!(alpha(20, 20) > 240, "opaque black should remain");
+        assert_eq!(
+            alpha(32, 32),
+            0,
+            "enclosed source alpha should remain clear"
+        );
     }
 
     #[cfg(feature = "diagnostics")]

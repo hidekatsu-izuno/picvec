@@ -16,6 +16,7 @@ include = [
     "/README.md",
     "/LICENSE",
     "/THIRD_PARTY_NOTICES.md",
+    "/docs/chroma-key-background-removal.md",
 ]
 
 [features]

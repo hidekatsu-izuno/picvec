@@ -14,6 +14,9 @@ pub struct Config {
     pub auto_dimension: bool,
     pub auto_minimum_dimension: u32,
     pub auto_maximum_dimension: u32,
+    /// Detect a saturated RGB-corner backing colour at the image perimeter
+    /// and omit every matching paint region from the SVG.
+    pub remove_chroma_key_background: bool,
     /// Refine source regions whose perceptual error reduction justifies the
     /// additional editable SVG representation cost.
     pub adaptive_refinement: bool,
@@ -83,6 +86,7 @@ impl Default for Config {
             auto_dimension: true,
             auto_minimum_dimension: 768,
             auto_maximum_dimension: 1600,
+            remove_chroma_key_background: false,
             adaptive_refinement: true,
             adaptive_tile_dimension: 1400,
             adaptive_max_patches: 16,

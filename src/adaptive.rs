@@ -311,6 +311,7 @@ pub(crate) fn compose_refinements(
     base_dimensions: (usize, usize),
     source_dimensions: (usize, usize),
     refinements: &[EmbeddedRefinement],
+    replace_base: bool,
 ) -> Result<String> {
     if refinements.is_empty() {
         return Ok(base_document.to_string());
@@ -351,8 +352,44 @@ pub(crate) fn compose_refinements(
         ));
     }
     layer.push_str("</g>");
-    let mut document = String::with_capacity(close + layer.len() + 6);
-    document.push_str(&base_document[..close]);
+    let mut document = String::with_capacity(close + layer.len() + 512);
+    if replace_base {
+        // A transparent refinement must replace, rather than merely cover,
+        // the coarse content in its core.  Mask those disjoint rectangles out
+        // of the base first; otherwise a finer, smaller silhouette would
+        // leave the coarse silhouette visible underneath it.
+        let root = base_document
+            .find("<svg")
+            .ok_or_else(|| -> Error { "base SVG has no root element".into() })?;
+        let body = base_document[root..]
+            .find('>')
+            .map(|offset| root + offset + 1)
+            .ok_or_else(|| -> Error { "base SVG has an incomplete root element".into() })?;
+        document.push_str(&base_document[..body]);
+        document.push_str("<defs><mask id=\"adaptive-base-mask\" maskUnits=\"userSpaceOnUse\" x=\"0\" y=\"0\" width=\"");
+        document.push_str(&base_width.to_string());
+        document.push_str("\" height=\"");
+        document.push_str(&base_height.to_string());
+        document.push_str("\"><rect width=\"100%\" height=\"100%\" fill=\"white\"/>");
+        for refinement in refinements {
+            let x = refinement.core.x as f32 * base_width as f32 / source_width as f32;
+            let y = refinement.core.y as f32 * base_height as f32 / source_height as f32;
+            let width = refinement.core.width as f32 * base_width as f32 / source_width as f32;
+            let height = refinement.core.height as f32 * base_height as f32 / source_height as f32;
+            document.push_str(&format!(
+                "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" fill=\"black\"/>",
+                number(x),
+                number(y),
+                number(width),
+                number(height),
+            ));
+        }
+        document.push_str("</mask></defs><g mask=\"url(#adaptive-base-mask)\">");
+        document.push_str(&base_document[body..close]);
+        document.push_str("</g>");
+    } else {
+        document.push_str(&base_document[..close]);
+    }
     document.push_str(&layer);
     document.push_str(&base_document[close..]);
     Ok(document)
@@ -435,11 +472,45 @@ mod tests {
                 processing_width: 60,
                 processing_height: 60,
             }],
+            false,
         )
         .unwrap();
         assert!(result.contains("x=\"2\" y=\"3\" width=\"4\" height=\"4\""));
         assert!(result.contains("viewBox=\"10 10 40 40\""));
         assert!(result.contains("id=\"lod-0-paint-0\""));
         assert!(result.contains("url(#lod-0-paint-0)"));
+    }
+
+    #[test]
+    fn transparent_refinement_masks_its_core_out_of_the_base() {
+        let base = "<svg width=\"10\" height=\"10\"><rect width=\"10\" height=\"10\"/></svg>";
+        let child = "<svg width=\"4\" height=\"4\"></svg>";
+        let result = compose_refinements(
+            base,
+            (10, 10),
+            (10, 10),
+            &[EmbeddedRefinement {
+                core: SourceRect {
+                    x: 2,
+                    y: 3,
+                    width: 4,
+                    height: 4,
+                },
+                expanded: SourceRect {
+                    x: 2,
+                    y: 3,
+                    width: 4,
+                    height: 4,
+                },
+                document: child.to_string(),
+                processing_width: 4,
+                processing_height: 4,
+            }],
+            true,
+        )
+        .unwrap();
+        assert!(result.contains("id=\"adaptive-base-mask\""));
+        assert!(result.contains("<rect x=\"2\" y=\"3\" width=\"4\" height=\"4\" fill=\"black\"/>"));
+        assert!(result.contains("<g mask=\"url(#adaptive-base-mask)\">"));
     }
 }

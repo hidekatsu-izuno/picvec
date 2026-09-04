@@ -39,6 +39,7 @@ Useful controls:
 --max-input-dimension <PX>
 --max-input-megapixels <MP>
 --max-decode-mib <MIB>
+--remove-chroma-key-background
 --smoothing-radius <PX>
 --segmentation-min-size <AREA>
 --quantization-dark-delta-e <DE>
@@ -61,6 +62,25 @@ Useful controls:
 be accepted immediately as a solid fill. Lower values retain more subtle
 shading as gradients; higher values favour simpler SVG output. The default is
 1.5.
+
+`--remove-chroma-key-background` detects a near-saturated red, green, blue,
+cyan, magenta, or yellow backing colour in a shallow outer band. It removes
+every matching region, including enclosed and disconnected regions, and
+uses a soft colour-difference matte for antialiased edge pixels. White and
+black are deliberately not treated as automatic key colours. Without this
+option, opaque input does not use automatic chroma-key removal.
+
+An alpha channel already present in the input is handled automatically and
+does not require this option. The converter temporarily composites its RGB
+channels over one of the six saturated key colours, vectorizes that keyed
+image, and omits the alpha-clear regions from the SVG. It does not flatten
+transparent input onto white.
+
+Constant-colour matting from a single image is inherently ambiguous when the
+foreground itself contains the key colour. Such areas can be removed with the
+backing; choose a key colour absent from the subject for reliable results.
+See [the background-removal design notes](docs/chroma-key-background-removal.md)
+for the matte model, thresholds, and research basis.
 
 Large inputs use source-resolution adaptive refinement by default. The base
 SVG is rendered and compared with the original in balanced source-space

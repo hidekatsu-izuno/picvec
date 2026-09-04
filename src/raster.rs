@@ -48,6 +48,58 @@ impl Raster {
         maximum_pixels: u64,
         maximum_decode_bytes: u64,
     ) -> Result<Self> {
+        let decoded = Self::decode_limited(
+            path,
+            maximum_dimension,
+            maximum_pixels,
+            maximum_decode_bytes,
+        )?;
+        Ok(Self::from_dynamic(&decoded))
+    }
+
+    /// Decode straight RGB and return the source alpha separately.  Keeping
+    /// alpha out of `Raster` avoids making every opaque pipeline allocation
+    /// four-channel while allowing the converter entry point to preserve
+    /// transparent PNG input without first flattening it onto white.
+    pub(crate) fn load_with_alpha(
+        path: &Path,
+        maximum_dimension: u32,
+        maximum_pixels: u64,
+        maximum_decode_bytes: u64,
+    ) -> Result<(Self, Option<Vec<f32>>)> {
+        let decoded = Self::decode_limited(
+            path,
+            maximum_dimension,
+            maximum_pixels,
+            maximum_decode_bytes,
+        )?;
+        let rgba = decoded.to_rgba8();
+        let (width, height) = rgba.dimensions();
+        let mut has_transparency = false;
+        let mut pixels = Vec::with_capacity(width as usize * height as usize);
+        let mut alpha = Vec::with_capacity(pixels.capacity());
+        for pixel in rgba.pixels() {
+            pixels.push([
+                pixel[0] as f32 / 255.0,
+                pixel[1] as f32 / 255.0,
+                pixel[2] as f32 / 255.0,
+            ]);
+            let value = pixel[3] as f32 / 255.0;
+            has_transparency |= pixel[3] != 255;
+            alpha.push(value);
+        }
+        Ok((
+            Self::new(width as usize, height as usize, pixels),
+            has_transparency.then_some(alpha),
+        ))
+    }
+
+    fn decode_limited(
+        path: &Path,
+        maximum_dimension: u32,
+        maximum_pixels: u64,
+        maximum_decode_bytes: u64,
+    ) -> Result<DynamicImage> {
         let (width, height) = ImageReader::open(path)?.into_dimensions()?;
         let pixels = u64::from(width) * u64::from(height);
         if pixels > maximum_pixels {
@@ -62,8 +114,7 @@ impl Raster {
         limits.max_image_height = Some(maximum_dimension);
         limits.max_alloc = Some(maximum_decode_bytes);
         reader.limits(limits);
-        let decoded = reader.decode()?;
-        Ok(Self::from_dynamic(&decoded))
+        Ok(reader.decode()?)
     }
 
     pub fn from_dynamic(image: &DynamicImage) -> Self {
@@ -180,6 +231,18 @@ mod tests {
         assert!(Raster::load(&path, 16, 100, 64 * 1024 * 1024).is_err());
         let loaded = Raster::load(&path, 16, 1_000, 64 * 1024 * 1024).unwrap();
         assert_eq!((loaded.width, loaded.height), (16, 8));
+    }
+
+    #[test]
+    fn alpha_aware_load_does_not_flatten_rgb_onto_white() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("alpha.png");
+        let image = image::RgbaImage::from_pixel(2, 1, image::Rgba([12, 34, 56, 0]));
+        image.save(&path).unwrap();
+        let (raster, alpha) =
+            Raster::load_with_alpha(&path, 64, 64 * 64, 64 * 1024 * 1024).unwrap();
+        assert_eq!(raster.pixels[0], [12.0 / 255.0, 34.0 / 255.0, 56.0 / 255.0]);
+        assert_eq!(alpha.unwrap(), vec![0.0, 0.0]);
     }
 
     #[test]

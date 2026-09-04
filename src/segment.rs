@@ -3042,10 +3042,10 @@ pub fn split_adaptive_paint_patches(
                             let x = index % segmentation.width;
                             let y = index / segmentation.width;
                             for neighbour in [
-                                (x > 0).then_some(index - 1),
-                                (x + 1 < segmentation.width).then_some(index + 1),
-                                (y > 0).then_some(index - segmentation.width),
-                                (y + 1 < segmentation.height).then_some(index + segmentation.width),
+                                (x > 0).then(|| index - 1),
+                                (x + 1 < segmentation.width).then(|| index + 1),
+                                (y > 0).then(|| index - segmentation.width),
+                                (y + 1 < segmentation.height).then(|| index + segmentation.width),
                             ]
                             .into_iter()
                             .flatten()

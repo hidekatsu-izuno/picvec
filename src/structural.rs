@@ -67,6 +67,34 @@ impl StructuralInk {
             summary: StructuralSummary::default(),
         }
     }
+
+    pub(crate) fn retain_strokes(&mut self, mut retain: impl FnMut(&StructuralStroke) -> bool) {
+        self.strokes.retain(|stroke| retain(stroke));
+        self.summary.stroke_count = self.strokes.len();
+        self.summary.residual_legacy_strokes = self
+            .strokes
+            .iter()
+            .filter(|stroke| stroke.role == "legacy-structural")
+            .count();
+        self.summary.visible_ridge_strokes = self
+            .strokes
+            .iter()
+            .filter(|stroke| stroke.role == "ridge")
+            .count();
+        self.summary.boundary_profile_strokes = self
+            .strokes
+            .iter()
+            .filter(|stroke| {
+                matches!(
+                    stroke.role,
+                    "ridge-on-boundary"
+                        | "bright-ridge-on-boundary"
+                        | "coloured-ridge-on-boundary"
+                        | "dark-boundary"
+                )
+            })
+            .count();
+    }
 }
 
 fn neighbour_indices(index: usize, width: usize, height: usize) -> Vec<usize> {
@@ -264,10 +292,10 @@ fn binary_propagation(seeds: &[bool], support: &[bool], width: usize, height: us
         let x = index % width;
         let y = index / width;
         let neighbours = [
-            (x > 0).then_some(index - 1),
-            (x + 1 < width).then_some(index + 1),
-            (y > 0).then_some(index - width),
-            (y + 1 < height).then_some(index + width),
+            (x > 0).then(|| index - 1),
+            (x + 1 < width).then(|| index + 1),
+            (y > 0).then(|| index - width),
+            (y + 1 < height).then(|| index + width),
         ];
         for neighbour in neighbours.into_iter().flatten() {
             if support[neighbour] && !result[neighbour] {
@@ -340,10 +368,10 @@ fn complete_same_colour_silhouette_holes(
             let x = index % local_width;
             let y = index / local_width;
             for neighbour in [
-                (x > 0).then_some(index - 1),
-                (x + 1 < local_width).then_some(index + 1),
-                (y > 0).then_some(index - local_width),
-                (y + 1 < local_height).then_some(index + local_width),
+                (x > 0).then(|| index - 1),
+                (x + 1 < local_width).then(|| index + 1),
+                (y > 0).then(|| index - local_width),
+                (y + 1 < local_height).then(|| index + local_width),
             ]
             .into_iter()
             .flatten()
@@ -640,10 +668,10 @@ fn source_structural_lines(source: &Raster) -> (Vec<bool>, Vec<bool>) {
         let mut queue: VecDeque<usize> = component.into_iter().collect();
         while let Some(index) = queue.pop_front() {
             for neighbour in [
-                (index % width > 0).then_some(index - 1),
-                (index % width + 1 < width).then_some(index + 1),
-                (index / width > 0).then_some(index - width),
-                (index / width + 1 < height).then_some(index + width),
+                (index % width > 0).then(|| index - 1),
+                (index % width + 1 < width).then(|| index + 1),
+                (index / width > 0).then(|| index - width),
+                (index / width + 1 < height).then(|| index + width),
             ]
             .into_iter()
             .flatten()

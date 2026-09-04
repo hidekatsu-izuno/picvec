@@ -5,6 +5,7 @@
 //! ownership validation is performed in memory by the embedded `resvg` crate.
 
 pub mod adaptive;
+pub mod chroma;
 pub mod color;
 pub mod config;
 pub mod edge;
@@ -23,6 +24,7 @@ pub mod structural;
 pub mod svg;
 mod union_find;
 
+pub use chroma::{AlphaTransparencySummary, ChromaKeySummary};
 pub use config::Config;
 pub use pipeline::{vectorize, Summary};
 

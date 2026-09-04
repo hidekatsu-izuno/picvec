@@ -544,10 +544,39 @@ pub(crate) fn serialize(
     paint_overlap: f32,
     final_geometry: bool,
 ) -> (String, SvgSummary) {
+    serialize_filtered(
+        width,
+        height,
+        geometries,
+        paints,
+        structural,
+        paint_overlap,
+        final_geometry,
+        &[],
+    )
+}
+
+/// Serialize while omitting selected raster regions.  Geometry is retained
+/// for all regions until this final stage so holes remain part of their
+/// surrounding foreground paths, including disconnected keyed areas.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn serialize_filtered(
+    width: usize,
+    height: usize,
+    geometries: &[RegionGeometry],
+    paints: &[Paint],
+    structural: &StructuralInk,
+    paint_overlap: f32,
+    final_geometry: bool,
+    excluded_regions: &[bool],
+) -> (String, SvgSummary) {
     let mut gradient_ids = HashMap::<String, String>::new();
     let mut definitions = String::new();
     let mut summary = SvgSummary::default();
-    for paint in paints {
+    for (region, paint) in paints.iter().enumerate() {
+        if excluded_regions.get(region).copied().unwrap_or(false) {
+            continue;
+        }
         match paint {
             Paint::Layered { base, overlays } => {
                 if let Some(key) = paint_key(base) {
@@ -584,6 +613,13 @@ pub(crate) fn serialize(
     }
     let mut paint_elements = Vec::<Option<PaintElement>>::with_capacity(geometries.len());
     for geometry in geometries {
+        if excluded_regions
+            .get(geometry.region as usize)
+            .copied()
+            .unwrap_or(false)
+        {
+            continue;
+        }
         let paint = &paints[geometry.region as usize];
         let optimized = match &geometry.primitive {
             Some(Primitive::Rect {
