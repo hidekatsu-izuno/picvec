@@ -1,5 +1,9 @@
 # Outline recovery and bounded-CPU performance
 
+Closed Paint contours now also support whole ellipses across colour fragments,
+with residual ink kept on the accepted geometry. See
+[ellipse contour fitting and validation](ellipse-contours.md).
+
 Whole-band recovery now requires a complete connected ink region, including
 consistent width and colour at every measured section. Partial outline
 networks remain filled regions whose shared contour segments are fitted to

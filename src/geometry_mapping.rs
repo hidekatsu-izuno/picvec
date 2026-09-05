@@ -76,6 +76,18 @@ pub(super) fn map(
         }
         distances.push(best.1);
     }
+    if source.first() == source.last() && curves[0].start() == curves.last()?.end() {
+        // The first vertex of a closed raster loop is only a storage seam.
+        // A one-pixel backward step there projects near the end of the same
+        // ellipse. Unwrap before isotonic pooling, otherwise that harmless
+        // step pools an entire loop across the artificial parameter break.
+        let mut previous = 0.0;
+        for distance in &mut distances {
+            *distance += ((previous - *distance) / total).round() * total;
+            previous = *distance;
+            *distance = distance.clamp(0.0, total);
+        }
+    }
     distances[0] = 0.0;
     *distances.last_mut()? = total;
     // Isotonic regression pools raster excursions instead of following them

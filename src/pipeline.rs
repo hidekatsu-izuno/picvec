@@ -1409,6 +1409,11 @@ fn vectorize_processing(
         &geometry_report.paint_junctions,
         config.shared_boundary_overlap,
     );
+    ownership.structural.retain_missing_from_ellipse_paint(
+        &paint_render,
+        &geometry_report.paint_ellipse_contours,
+        &structural_candidates.paint_ownership_mask,
+    );
     if source_alpha {
         ownership.structural.retain_source_alpha_supported_strokes(
             &processing,

@@ -14,6 +14,17 @@ mod geometry_primitives;
 #[path = "geometry_mapping.rs"]
 mod geometry_mapping;
 
+#[path = "geometry_ellipse.rs"]
+mod geometry_ellipse;
+
+pub(crate) fn align_ellipse_stroke(
+    source: &[Point],
+    contour: &[Point],
+    width: f32,
+) -> Option<(Vec<Point>, String)> {
+    geometry_ellipse::align_stroke(source, contour, width)
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Point {
     pub x: f32,
@@ -86,6 +97,11 @@ pub struct GeometrySummary {
     pub shared_loop_invalid_areas: usize,
     pub adaptive_optimal_polygons: usize,
     pub continuity_faired_masters: usize,
+    /// Whole closed contours fitted to one ellipse before shared slicing.
+    pub fitted_ellipse_contours: usize,
+    /// Accepted Paint contours remain authoritative during residual selection.
+    #[serde(skip)]
+    pub paint_ellipse_contours: Vec<Vec<Point>>,
     pub regularized_corner_excursions: usize,
     pub regularized_corner_vertices: usize,
     /// Canonical curves replaced by their shared positioned-grid polyline
@@ -272,6 +288,8 @@ struct AdaptiveBoundaryGeometry {
     regularized_excursions: usize,
     optimal_polygons: usize,
     continuity_faired_master_ids: HashSet<usize>,
+    ellipse_master_ids: HashSet<usize>,
+    ellipse_contours: Vec<Vec<Point>>,
 }
 
 type TaggedCurve = (f64, f64, usize, CurveSegment);
@@ -4622,6 +4640,9 @@ fn fit_adaptive_boundary_geometry(
     let mut optimal_polygons = 0_usize;
     let mut regularized_excursions = 0_usize;
     let mut continuity_faired_master_ids = HashSet::<usize>::new();
+    let mut ellipse_master_ids = HashSet::<usize>::new();
+    let mut ellipse_tracks = Vec::new();
+    let mut ellipse_contours = Vec::new();
     #[cfg(feature = "diagnostics")]
     let strand_diagnostics_enabled = std::env::var_os("PICVEC_STRAND_DIAGNOSTICS").is_some();
     #[cfg(feature = "diagnostics")]
@@ -5180,6 +5201,9 @@ fn fit_adaptive_boundary_geometry(
         for traced_track in traced_tracks {
             let closed_track = traced_track.first() == traced_track.last();
             if closed_track {
+                // Fit the whole geometric contour before arbitrary anchors,
+                // shading junctions and corner splitting limit its model.
+                ellipse_tracks.push(traced_track.clone());
                 // A closed material contour is especially likely to be split
                 // into many short RegionPair chains: every quantized shade
                 // inside a material changes the pair even though the visible
@@ -5617,6 +5641,66 @@ fn fit_adaptive_boundary_geometry(
             }
         }
     }
+    // Apply supported ellipses after free-curve continuity fitting so a later
+    // face cannot overwrite one side of an already fitted closed contour.
+    // Partial overlaps are left alone; every accepted model owns its complete
+    // contour and both incident faces reuse the same ordered master slices.
+    ellipse_tracks.sort_by_key(|track| std::cmp::Reverse(track.len()));
+    let mut ellipse_vertices = HashSet::new();
+    for track in ellipse_tracks {
+        if track.iter().any(|v| {
+            ellipse_vertices.contains(v)
+                || is_canvas_vertex(*v, stride, segmentation.width, segmentation.height)
+        }) {
+            continue;
+        }
+        let source: Vec<_> = track
+            .iter()
+            .map(|&v| point_from_vertex(v, stride))
+            .collect();
+        let corridor = fairing_raster_corridor();
+        let Some(curves) = geometry_ellipse::fit_closed(&source, corridor) else {
+            continue;
+        };
+        let Some(mapping) = geometry_mapping::map(&source, &curves, corridor, &mut next_master_id)
+        else {
+            continue;
+        };
+        #[cfg(feature = "diagnostics")]
+        if continuity_diagnostics_enabled {
+            continuity_diagnostics.push(serde_json::json!({
+                "kind": "ellipse",
+                "source": source.iter().map(|p| [p.x, p.y]).collect::<Vec<_>>(),
+                "segments": curves.len(),
+            }));
+        }
+        let weight = 4_000_000 + track.len();
+        ellipse_contours.push(sample_curve_sequence(&curves, 0.5));
+        for (&vertex, &point) in track.iter().zip(&mapping.positions) {
+            proposals.entry(vertex).or_default().push((weight, point));
+            validated_proposals.insert((vertex, weight));
+            ellipse_vertices.insert(vertex);
+        }
+        for (vertices, mut pieces) in track.windows(2).zip(mapping.edges) {
+            for span in &pieces {
+                ellipse_master_ids.insert(span.master_id);
+                continuity_faired_master_ids.insert(span.master_id);
+            }
+            let edge = EdgeKey::new(vertices[0], vertices[1]);
+            if vertices[0] != edge.0 {
+                pieces = pieces
+                    .into_iter()
+                    .rev()
+                    .map(|span| AdaptiveCurveSpan {
+                        start_parameter: span.end_parameter,
+                        end_parameter: span.start_parameter,
+                        ..span
+                    })
+                    .collect();
+            }
+            edge_spans.insert(edge, pieces);
+        }
+    }
     #[cfg(feature = "diagnostics")]
     if let Some(path) = std::env::var_os("PICVEC_CONTINUITY_DIAGNOSTICS") {
         if let Ok(encoded) = serde_json::to_vec(&continuity_diagnostics) {
@@ -5690,6 +5774,8 @@ fn fit_adaptive_boundary_geometry(
         regularized_excursions,
         optimal_polygons,
         continuity_faired_master_ids,
+        ellipse_master_ids,
+        ellipse_contours,
     }
 }
 
@@ -5908,11 +5994,7 @@ fn build_shared_chains(
     Vec<SharedChain>,
     EdgeChainLookup,
     VertexPositions,
-    usize,
-    usize,
-    usize,
-    usize,
-    usize,
+    GeometrySummary,
 ) {
     let (_, _, strands, junctions) = boundary_topology(stride, directed_edges, pair_edges);
     let adaptive =
@@ -6002,6 +6084,11 @@ fn build_shared_chains(
             };
             let closed = track.first() == track.last();
             let (raw, mut segments) = adaptive_chain_curves(&raw_edges, &adaptive, stride);
+            let has_ellipse = raw_edges.iter().any(|&(start, end)| {
+                adaptive.edge_spans.get(&EdgeKey::new(start, end)).is_some_and(|spans| {
+                    spans.iter().any(|span| adaptive.ellipse_master_ids.contains(&span.master_id))
+                })
+            });
             if segments.is_empty() {
                 segments = raw
                     .windows(2)
@@ -6115,7 +6202,7 @@ fn build_shared_chains(
             };
             #[cfg(feature = "diagnostics")]
             let mut smoothing_candidate_diagnostics = Vec::new();
-            if source.len() >= 16 && segments.len() > 1 {
+            if !has_ellipse && source.len() >= 16 && segments.len() > 1 {
                 let mut candidate_points: Vec<Point> = track
                     .iter()
                     .map(|&vertex| point_from_vertex(vertex, stride))
@@ -6262,7 +6349,9 @@ fn build_shared_chains(
             };
             // The direct fairing is the final model-selection stage in the
             // Python graph builder, after corridor fallback and compaction.
-            segments = bounded_fairing_direct_shared_boundary(&source, &segments, closed, false);
+            if !has_ellipse {
+                segments = bounded_fairing_direct_shared_boundary(&source, &segments, closed, false);
+            }
             if !segments.is_empty() {
                 for index in 0..segments.len().saturating_sub(1) {
                     let left = segments[index];
@@ -6366,7 +6455,9 @@ fn build_shared_chains(
                     },
                 };
             }
-            segments = geometry_primitives::regularize(&source, &segments, 1.0, None, None);
+            if !has_ellipse {
+                segments = geometry_primitives::regularize(&source, &segments, 1.0, None, None);
+            }
             let discontinuous = segments.windows(2).any(|pair| {
                 pair[0].end().distance(pair[1].start()) > 1e-3
             }) || (closed
@@ -6505,11 +6596,16 @@ fn build_shared_chains(
         chains,
         lookup,
         positions,
-        adaptive.optimal_polygons,
-        adaptive.continuity_faired_master_ids.len(),
-        adaptive.regularized_excursions,
-        adaptive.regularized_observations.len(),
-        shared_curve_downgrades,
+        GeometrySummary {
+            adaptive_optimal_polygons: adaptive.optimal_polygons,
+            continuity_faired_masters: adaptive.continuity_faired_master_ids.len(),
+            regularized_corner_excursions: adaptive.regularized_excursions,
+            regularized_corner_vertices: adaptive.regularized_observations.len(),
+            shared_curve_downgrades,
+            fitted_ellipse_contours: adaptive.ellipse_contours.len(),
+            paint_ellipse_contours: adaptive.ellipse_contours,
+            ..GeometrySummary::default()
+        },
     )
 }
 
@@ -6827,16 +6923,8 @@ fn build_internal(
     let (edges, shared) = region_boundary_edges(segmentation, stride, topology);
     let pair_edges = pair_boundary_edges(segmentation, stride, topology);
     let source_edges = edges.iter().map(Vec::len).sum();
-    let (
-        shared_chains,
-        shared_lookup,
-        positions,
-        adaptive_optimal_polygons,
-        continuity_faired_masters,
-        regularized_corner_excursions,
-        regularized_corner_vertices,
-        shared_curve_downgrades,
-    ) = build_shared_chains(segmentation, stride, &edges, &pair_edges);
+    let (shared_chains, shared_lookup, positions, shared_report) =
+        build_shared_chains(segmentation, stride, &edges, &pair_edges);
     let mut endpoint_degree = HashMap::<(i64, i64), usize>::new();
     let mut endpoint_order = Vec::<(i64, i64)>::new();
     for chain in &shared_chains {
@@ -6889,13 +6977,8 @@ fn build_internal(
         regions: count,
         source_boundary_edges: source_edges,
         shared_boundary_edges: shared / 2,
-        shared_curve_downgrades,
-        adaptive_optimal_polygons,
-        continuity_faired_masters,
-        regularized_corner_excursions,
-        regularized_corner_vertices,
         paint_junctions,
-        ..GeometrySummary::default()
+        ..shared_report
     };
     let mut geometries = Vec::with_capacity(count);
     for (region, region_edges) in edges.iter().enumerate().take(count) {
@@ -7511,6 +7594,105 @@ mod tests {
     }
 
     #[test]
+    fn shaded_ellipse_ring_reuses_whole_inner_and_outer_contours() {
+        let width = 128;
+        let colours = [[0.2, 0.4, 0.7], [0.02; 3], [0.9, 0.1, 0.1], [1.0, 0.4, 0.3]];
+        for rotation in [0.0_f32, 0.65] {
+            let (sin, cos) = rotation.sin_cos();
+            let radial = |p: Point| {
+                let x = p.x - 63.4;
+                let y = p.y - 62.8;
+                ((cos * x + sin * y) / 30.0).hypot((-sin * x + cos * y) / 40.0)
+            };
+            let labels: Vec<_> = (0..width * width)
+                .map(|i| {
+                    let p = Point {
+                        x: (i % width) as f32 + 0.5,
+                        y: (i / width) as f32 + 0.5,
+                    };
+                    let radius = radial(p);
+                    if radius > 1.0 {
+                        0
+                    } else if radius > 0.88 {
+                        1
+                    } else if p.y < 57.0 {
+                        3
+                    } else {
+                        2
+                    }
+                })
+                .collect();
+            let regions = colours
+                .iter()
+                .enumerate()
+                .map(|(label, &rgb)| {
+                    let pixels: Vec<_> = labels
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, &v)| (v == label as u32).then_some(i))
+                        .collect();
+                    RegionStats {
+                        id: label as u32,
+                        area: pixels.len(),
+                        min_x: pixels.iter().map(|i| i % width).min().unwrap(),
+                        min_y: pixels.iter().map(|i| i / width).min().unwrap(),
+                        max_x: pixels.iter().map(|i| i % width + 1).max().unwrap(),
+                        max_y: pixels.iter().map(|i| i / width + 1).max().unwrap(),
+                        mean_rgb: rgb,
+                        mean_lab: rgb_to_lab(rgb),
+                    }
+                })
+                .collect();
+            let canonical = Raster::new(
+                width,
+                width,
+                labels.iter().map(|&v| colours[v as usize]).collect(),
+            );
+            let segmentation = Segmentation {
+                width,
+                height: width,
+                labels,
+                paint_keys: vec![0, 1, 2, 3],
+                paint_samples: vec![true; width * width],
+                canonical,
+                regions,
+                summary: SegmentationSummary::default(),
+            };
+            let stride = width + 1;
+            let (edges, _) = region_boundary_edges(&segmentation, stride, None);
+            let pairs = pair_boundary_edges(&segmentation, stride, None);
+            let (chains, lookup, ..) = build_shared_chains(&segmentation, stride, &edges, &pairs);
+            let mut checked = HashSet::new();
+            for (&pair, edges) in &pairs {
+                if pair.0 != 1 && pair.1 != 1 {
+                    continue;
+                }
+                let expected = if pair.0 == 0 { 1.0 } else { 0.88 };
+                for edge in edges {
+                    let chain_id = lookup[edge].0;
+                    if !checked.insert(chain_id) {
+                        continue;
+                    }
+                    for point in sample_curve_sequence(&chains[chain_id].segments, 0.25) {
+                        assert!(
+                            (radial(point) - expected).abs() * 40.0 < 0.25,
+                            "whole ellipse lost at a shade junction: {rotation} {pair:?} {point:?}"
+                        );
+                    }
+                }
+            }
+            assert!(
+                checked.len() >= 3,
+                "inner contour must span different paint pairs"
+            );
+            let (_, summary) = build(&segmentation);
+            assert_eq!(summary.fitted_ellipse_contours, 2, "{summary:?}");
+            assert_eq!(summary.shared_loop_fallbacks, 0, "{summary:?}");
+            assert_eq!(summary.shared_curve_downgrades, 0, "{summary:?}");
+        }
+    }
+
+    #[test]
     fn fragmented_diagonal_silhouette_does_not_export_grid_steps() {
         let width = 96;
         let colours = [
@@ -8016,7 +8198,7 @@ mod tests {
         let stride = width + 1;
         let (directed_edges, _) = region_boundary_edges(&segmentation, stride, None);
         let pair_edges = pair_boundary_edges(&segmentation, stride, None);
-        let (chains, lookup, _, _, _, _, _, _) =
+        let (chains, lookup, ..) =
             build_shared_chains(&segmentation, stride, &directed_edges, &pair_edges);
         let chain_ids: Vec<usize> = (0..height)
             .map(|y| lookup[&EdgeKey::new(vertex_id(3, y, stride), vertex_id(3, y + 1, stride))].0)
@@ -8084,7 +8266,7 @@ mod tests {
         let stride = width + 1;
         let (directed_edges, _) = region_boundary_edges(&segmentation, stride, None);
         let pair_edges = pair_boundary_edges(&segmentation, stride, None);
-        let (chains, lookup, _, _, _, _, _, _) =
+        let (chains, lookup, ..) =
             build_shared_chains(&segmentation, stride, &directed_edges, &pair_edges);
         let upper = lookup[&EdgeKey::new(vertex_id(3, 2, stride), vertex_id(3, 3, stride))].0;
         let lower = lookup[&EdgeKey::new(vertex_id(3, 3, stride), vertex_id(3, 4, stride))].0;

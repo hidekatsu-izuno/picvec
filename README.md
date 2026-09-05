@@ -168,6 +168,19 @@ existing analytic-arc normalization. This removes some raster-scale waviness,
 but does not turn variable-width Paint bands or fragmented shading into a
 single uniform stroke.
 
+Closed material contours are also fitted as complete, potentially rotated
+ellipses before their colour boundaries are sliced. This lets shaded buttons
+and outlined circular details share one smooth contour across multiple Paint
+regions. Both sides reuse the same projected graph nodes and curve pieces;
+later local fitting preserves the accepted ellipse. Raster-distance, winding,
+corner and graph-order checks retain free curves when an ellipse does not fit.
+Residual strokes that merely redraw a corrected ellipse are omitted when
+their colour is already present in nearby Paint; missing or transferred ink
+and branches remain eligible. Narrow colour-correction strokes can follow the
+same ellipse with their existing width, subject to the source-error bound.
+Diagnostic reports count these contours as `geometry.fitted_ellipse_contours`.
+See [ellipse contour fitting and validation](docs/ellipse-contours.md).
+
 Full-resolution source data waiting for adaptive refinement remains packed as
 RGB8 when it came directly from the decoder and as Q0.16 RGB only when matte or
 chroma processing produced fractional channels. Working crops are expanded to

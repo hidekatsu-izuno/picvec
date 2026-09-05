@@ -36,6 +36,8 @@ pub struct StructuralSummary {
     pub boundary_profile_strokes: usize,
     pub recovered_boundary_strokes: usize,
     pub recovered_alpha_boundary_strokes: usize,
+    pub suppressed_ellipse_retraces: usize,
+    pub aligned_ellipse_strokes: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -60,6 +62,102 @@ pub struct StructuralInk {
 }
 
 impl StructuralInk {
+    /// A supported Paint ellipse deliberately replaces raster-scale outline
+    /// deviations. Do not add those same deviations back as residual ink.
+    /// Require the complete stroke to follow one contour and find its colour
+    /// in nearby Paint. Transferred ink and branches retain structural ownership.
+    pub(crate) fn retain_missing_from_ellipse_paint(
+        &mut self,
+        paint: &Raster,
+        contours: &[Vec<Point>],
+        transferred: &[bool],
+    ) {
+        if contours.is_empty() || paint.width == 0 || paint.height == 0 {
+            return;
+        }
+        let before = self.strokes.len();
+        let corridor = std::f32::consts::SQRT_2 + 0.25;
+        let mut corrections = Vec::new();
+        self.retain_strokes(|stroke| {
+            if matches!(stroke.role, "boundary-stroke" | "alpha-boundary-stroke")
+                || stroke.points.len() < 2
+                || stroke.width > 2.0 * corridor + 1.0
+            {
+                corrections.push(None);
+                return true;
+            }
+            let samples: Vec<Point> = stroke
+                .points
+                .windows(2)
+                .flat_map(|pair| {
+                    let count = pair[0].distance(pair[1]).ceil().max(1.0) as usize;
+                    (0..=count).map(move |i| {
+                        let t = i as f32 / count as f32;
+                        Point {
+                            x: pair[0].x + t * (pair[1].x - pair[0].x),
+                            y: pair[0].y + t * (pair[1].y - pair[0].y),
+                        }
+                    })
+                })
+                .collect();
+            let index = |p: Point| {
+                let x = (p.x.floor() as isize).clamp(0, paint.width as isize - 1) as usize;
+                let y = (p.y.floor() as isize).clamp(0, paint.height as isize - 1) as usize;
+                y * paint.width + x
+            };
+            if samples
+                .iter()
+                .any(|&p| transferred.get(index(p)).copied().unwrap_or(false))
+            {
+                corrections.push(None);
+                return true;
+            }
+            let distance = corridor + 0.5 * stroke.width;
+            let contour = contours.iter().find(|contour| {
+                samples
+                    .iter()
+                    .all(|&p| contour.iter().any(|&q| p.distance(q) <= distance))
+            });
+            let Some(contour) = contour else {
+                corrections.push(None);
+                return true;
+            };
+            let colour = rgb_to_lab(stroke.color);
+            // Search only within the allowed geometric displacement; a remote
+            // similarly coloured object cannot justify removing this stroke.
+            let radius = corridor.ceil() as isize;
+            let redundant = samples.iter().all(|&p| {
+                (-radius..=radius).any(|dy| {
+                    (-radius..=radius).any(|dx| {
+                        let q = Point {
+                            x: p.x + dx as f32,
+                            y: p.y + dy as f32,
+                        };
+                        p.distance(q) <= corridor + 0.5
+                            && delta_e2000(colour, rgb_to_lab(paint.pixels[index(q)])) <= 6.9
+                    })
+                })
+            });
+            if !redundant {
+                corrections.push(crate::geometry::align_ellipse_stroke(
+                    &samples,
+                    contour,
+                    stroke.width,
+                ));
+            }
+            !redundant
+        });
+        for (stroke, correction) in self.strokes.iter_mut().zip(corrections) {
+            if let Some((points, path)) = correction {
+                stroke.points = points;
+                stroke.path_data = Some(path);
+                stroke.precise_points = None;
+                self.summary.aligned_ellipse_strokes += 1;
+            }
+        }
+        self.summary.suppressed_ellipse_retraces += before - self.strokes.len();
+    }
+
     /// Alpha owns the silhouette independently of straight-colour analysis.
     /// Reject a centreline without covered source support: its finite width
     /// could otherwise overlap the fitted mask despite being entirely outside.
@@ -1468,6 +1566,8 @@ pub fn analyse(source: &Raster, roles: &mut EdgeRoles) -> (Raster, StructuralInk
         antialias_unmixed_pixels,
         silhouette_fill_count: 0,
         residual_legacy_strokes: 0,
+        suppressed_ellipse_retraces: 0,
+        aligned_ellipse_strokes: 0,
         visible_ridge_strokes: strokes
             .iter()
             .filter(|stroke| stroke.role == "ridge")
@@ -4312,6 +4412,80 @@ mod tests {
             role: "legacy-structural",
             width_samples: Vec::new(),
         }
+    }
+
+    #[test]
+    fn ellipse_paint_suppresses_only_complete_already_painted_retraces() {
+        let width = 64;
+        let paint = Raster::new(
+            width,
+            width,
+            (0..width * width)
+                .map(|i| {
+                    let radius =
+                        ((i % width) as f32 + 0.5 - 32.0).hypot((i / width) as f32 + 0.5 - 32.0);
+                    if (18.0..=22.0).contains(&radius) {
+                        [0.0; 3]
+                    } else {
+                        [1.0; 3]
+                    }
+                })
+                .collect(),
+        );
+        let circle = |radius: f32| -> Vec<Point> {
+            (0..=180)
+                .map(|i| {
+                    let a = i as f32 / 180.0 * std::f32::consts::TAU;
+                    Point {
+                        x: 32.0 + radius * a.cos(),
+                        y: 32.0 + radius * a.sin(),
+                    }
+                })
+                .collect()
+        };
+        let contours = vec![circle(22.0)];
+        let mut retrace = graph_stroke(&[]);
+        retrace.points = circle(20.0);
+        retrace.color = [0.0; 3];
+        retrace.width = 3.0;
+        let mut branch = retrace.clone();
+        branch.points.push(Point { x: 32.0, y: 32.0 });
+        let mut other_colour = retrace.clone();
+        other_colour.color = [0.0, 0.0, 1.0];
+        let mut transferred = retrace.clone();
+        transferred.role = "boundary-stroke";
+        let mut ink = StructuralInk::empty();
+        ink.strokes = vec![retrace.clone(), branch, other_colour, transferred];
+        ink.retain_missing_from_ellipse_paint(&paint, &contours, &[]);
+        assert_eq!(ink.strokes.len(), 3);
+        assert_eq!(ink.summary.suppressed_ellipse_retraces, 1);
+        assert_eq!(ink.summary.aligned_ellipse_strokes, 1);
+        assert_eq!(ink.summary.recovered_boundary_strokes, 1);
+        let coloured = ink
+            .strokes
+            .iter()
+            .find(|s| s.color == [0.0, 0.0, 1.0])
+            .unwrap();
+        assert_eq!(coloured.width, 3.0);
+        assert!(coloured.path_data.is_some());
+        for p in &coloured.points {
+            assert!(((p.x - 32.0).hypot(p.y - 32.0) - 20.5).abs() < 0.01);
+        }
+
+        ink.strokes = vec![retrace.clone()];
+        ink.retain_missing_from_ellipse_paint(
+            &Raster::blank(width, width, [1.0; 3]),
+            &contours,
+            &[],
+        );
+        assert_eq!(ink.strokes.len(), 1, "missing ink must still be restored");
+        ink.strokes = vec![retrace];
+        ink.retain_missing_from_ellipse_paint(&paint, &contours, &vec![true; width * width]);
+        assert_eq!(
+            ink.strokes.len(),
+            1,
+            "transferred source ink must retain its owner"
+        );
     }
 
     #[test]
