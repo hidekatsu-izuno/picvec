@@ -245,3 +245,76 @@ at 6,730 reference positions). Two low-coverage endpoint/fringe samples fall
 below one quarter of source alpha, compared with one previously: (1200,1165)
 and (1200,1186), the latter having source alpha 42/255. These are not new
 interior grid breaks; the low-alpha edge coverage is not pixel-exact.
+
+## Fitting straight lines and circular arcs
+
+Source-supported geometric fitting now precedes free-form cubic fitting on
+corner-delimited shared boundaries and structural centre-lines. Open lines
+retain both endpoints exactly. A circular arc's centre is fitted on the
+perpendicular bisector of its endpoint chord; a closed circle passes through
+its fixed storage anchor. Uniform arclength sampling prevents dense raster
+steps from receiving extra fitting weight. Maximum and RMS residuals, ordered
+angular travel, and explicit stroke tangent constraints reject unsupported
+fits. Short intervals, reversals, noncircular loops and ill-conditioned shallow
+arcs retain the existing fitter.
+
+A final pass also consolidates neighbouring shared curve pieces, with a
+64-piece lookahead limit. It checks the candidate against both the original
+contour and the previous geometry in both directions. Shared endpoints remain fixed, and supported corners are protected from
+rounding away. Both incident Paint faces reuse the resulting
+chain; no face independently snaps its side of a common boundary.
+
+Straight pieces now retain native SVG line commands. Previously, emitting
+rounded cubic controls could prevent a mathematically straight line from
+being recognized by the exact serializer. Circular models use cubic pieces
+of at most 45 degrees, followed by the existing 0.01-pixel analytic arc
+normalization. The closed-circle serializer now accepts 4 through 16 cubic
+pieces, subject to its existing radial and winding checks, instead of requiring
+exactly four. Alpha-mask and rim paths share the same fitter, and rim joining
+handles both line and cubic commands.
+
+The model remains conservative: it does not infer a common width for two
+independently Paint-owned boundaries, join detached source components, or
+replace a noncircular silhouette with a circle. On the database and source-code
+icons, enlarged output still contains variable-width bands and fragmented
+shading. Primitive fitting improves geometric regularity for supported spans;
+it does not complete the conversion of every painted band to an authored stroke.
+
+Regression coverage includes noisy diagonal lines, clockwise and major arcs,
+closed circles with different storage origins, SVG line/arc/circle output,
+noncircular shapes, reversals, graph tangent constraints, tiny support and
+cumulative source drift. The existing shared-partition, corner, alpha-rim and
+thin-grid rendered regressions also pass.
+
+The keyed 5016 × 5016 sheet was regenerated with four workers and default
+adaptive refinement. A rerun of the previous binary produced a byte-identical
+copy of the previously committed SVG. Both versions accepted the same 26 of
+28 evaluated whole-figure regions. Single-run results on 2026-09-05:
+
+| Measurement | Before | After |
+|---|---:|---:|
+| SVG bytes | 21,539,248 | 21,102,874 |
+| Serialized path line commands | 22,139 | 33,030 |
+| Serialized path arc commands | 4,175 | 9,053 |
+| Circle elements | 0 | 3 |
+| Sampled refined mean DeltaE00 | 2.02090 | 1.99339 |
+| Elapsed time | 194.060 s | 193.943 s |
+
+Command counts use `picvec_eval.svg_metrics.svg_complexity`, including
+paths in definitions and the retained base. They measure representation,
+not visible line quality. Timings are individual diagnostic runs with other
+validation work occurring during parts of the runs, not a speed benchmark.
+
+[Enlarged source / before / after comparison](../sample/comparison/cliparts-6x6-lines.png)
+shows the code-document frame, database rim and Wi-Fi arcs. These were rendered
+from the full sheet SVG at original source scale, with a green backing for
+comparison to the opaque source. Mean absolute RGB error (8-bit channel units)
+across the respective full 836 × 836 crops changed from 4.37147 to 4.37069,
+5.05316 to 5.05286, and 4.68800 to 4.67780. Visual improvement is modest; the
+comparison still shows the Paint-band and shading limitations described above.
+The updated SVG and comparison are stored under `sample/`.
+
+Validation: 162 Rust tests pass (one manual large-sample regression ignored),
+9 Python evaluator tests pass, Clippy passes with warnings denied, and formatting
+and diff checks pass. The Python tests use the cached evaluator environment,
+which includes NumPy and Pillow.

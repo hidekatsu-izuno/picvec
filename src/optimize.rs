@@ -726,7 +726,7 @@ fn solve_three_by_three(mut matrix: [[f64; 3]; 3], mut values: [f64; 3]) -> Opti
 
 fn fit_circle(subpath: &Subpath) -> Option<(f64, f64, f64, f64)> {
     if !subpath.closed
-        || subpath.segments.len() != 4
+        || !(4..=16).contains(&subpath.segments.len())
         || subpath
             .segments
             .iter()

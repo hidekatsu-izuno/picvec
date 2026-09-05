@@ -8,6 +8,9 @@ use crate::hierarchy::HierarchicalTopology;
 use crate::segment::Segmentation;
 use crate::union_find::UnionFind;
 
+#[path = "geometry_primitives.rs"]
+mod geometry_primitives;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Point {
     pub x: f32,
@@ -2269,7 +2272,21 @@ fn fit_smoothed_chain(
                 y: points[points.len() - 2].y - points[points.len() - 1].y,
             })
         };
-        let mut fitted = fit_cubic_recursive(points, left, right, tolerance.max(0.25).powi(2));
+        let mut fitted = geometry_primitives::fit(
+            &ordered_raw[start_index..=end_index],
+            tolerance.min(0.85),
+            if !closed && start_index == 0 {
+                start_tangent
+            } else {
+                None
+            },
+            if !closed && end_index + 1 == base.len() {
+                end_tangent
+            } else {
+                None
+            },
+        )
+        .unwrap_or_else(|| fit_cubic_recursive(points, left, right, tolerance.max(0.25).powi(2)));
         if ordered_monotone.contains(&start_index) || ordered_monotone.contains(&end_index) {
             let observations = &ordered_raw[start_index..=end_index];
             fitted = fitted
@@ -2639,22 +2656,9 @@ fn structural_curve_path_data(curves: &[CurveSegment], closed: bool) -> String {
     let mut data = format!("M {} {}", fmt(first.x), fmt(first.y));
     for &curve in curves {
         let (first, second, end) = match curve {
-            CurveSegment::Line { start, end } => {
-                let delta = Point {
-                    x: end.x - start.x,
-                    y: end.y - start.y,
-                };
-                (
-                    Point {
-                        x: start.x + delta.x / 3.0,
-                        y: start.y + delta.y / 3.0,
-                    },
-                    Point {
-                        x: start.x + 2.0 * delta.x / 3.0,
-                        y: start.y + 2.0 * delta.y / 3.0,
-                    },
-                    end,
-                )
+            CurveSegment::Line { end, .. } => {
+                data.push_str(&format!(" L {} {}", fmt(end.x), fmt(end.y)));
+                continue;
             }
             CurveSegment::Cubic {
                 first, second, end, ..
@@ -2856,6 +2860,14 @@ pub(crate) fn fitted_structural_open_path_data_with_tangents(
     }
     let raw = points.to_vec();
     let closed = raw.len() > 2 && raw.first() == raw.last();
+    if let Some(curves) = geometry_primitives::fit(
+        &raw,
+        tolerance.clamp(0.25, 0.85),
+        start_tangent,
+        end_tangent,
+    ) {
+        return structural_curve_path_data(&curves, closed);
+    }
     let length_factor = (raw.len() as f32 / 128.0).clamp(1.0, 20.0 / 3.0);
     let tolerance_factor = (raw.len() as f32 / 256.0).clamp(1.0, 3.0);
     let effective_sigma = smoothing_sigma.max(0.0) * length_factor;
@@ -2969,6 +2981,13 @@ pub(crate) fn fitted_structural_open_path_data_with_tangents(
             }
         }
     }
+    let best = geometry_primitives::regularize(
+        &raw,
+        &best,
+        tolerance.max(0.5),
+        start_tangent,
+        end_tangent,
+    );
     structural_curve_path_data(&best, false)
 }
 
@@ -6345,6 +6364,7 @@ fn build_shared_chains(
                     },
                 };
             }
+            segments = geometry_primitives::regularize(&source, &segments, 1.0, None, None);
             let discontinuous = segments.windows(2).any(|pair| {
                 pair[0].end().distance(pair[1].start()) > 1e-3
             }) || (closed
@@ -6528,7 +6548,7 @@ fn shared_region_loop(
     chains: &[SharedChain],
     lookup: &EdgeChainLookup,
     cubics: &mut usize,
-    _lines: &mut usize,
+    lines: &mut usize,
 ) -> Result<(Vec<Point>, String), SharedLoopFailure> {
     if vertices.len() < 3 {
         return Err(SharedLoopFailure::Empty);
@@ -6593,23 +6613,9 @@ fn shared_region_loop(
     let mut data = format!("M{} {}", fmt(first.x), fmt(first.y));
     for segment in all_segments {
         match segment {
-            CurveSegment::Line { start, end } => {
-                // The shared-boundary writer represents even an exactly
-                // straight span as a cubic.  Native L commands are introduced
-                // only by the final exact-normalization pass.
-                let CurveSegment::Cubic { first, second, .. } = straight_cubic(start, end) else {
-                    unreachable!()
-                };
-                data.push_str(&format!(
-                    "C{} {},{} {},{} {}",
-                    fmt(first.x),
-                    fmt(first.y),
-                    fmt(second.x),
-                    fmt(second.y),
-                    fmt(end.x),
-                    fmt(end.y)
-                ));
-                *cubics += 1;
+            CurveSegment::Line { end, .. } => {
+                data.push_str(&format!("L{} {}", fmt(end.x), fmt(end.y)));
+                *lines += 1;
             }
             CurveSegment::Cubic {
                 first, second, end, ..

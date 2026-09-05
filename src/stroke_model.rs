@@ -412,7 +412,7 @@ pub(super) fn recover_alpha_boundary(
                 && (previous.width - stroke.width).abs() < 0.25 * previous.width.max(0.5)
             {
                 let path = stroke.path_data.as_ref().unwrap();
-                if let Some(start) = path.find(" C") {
+                if let Some(start) = path.find(" C").into_iter().chain(path.find(" L")).min() {
                     previous
                         .path_data
                         .as_mut()

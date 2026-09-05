@@ -141,6 +141,16 @@ transfers in the base pass as `structural.recovered_boundary_strokes`.
 See [outline recovery and performance validation](docs/line-quality-performance.md)
 for the model's limits and comparison procedure.
 
+Long, supported boundary and centre-line intervals are fitted to straight lines
+or circular arcs before free-form cubic fitting. The fit preserves shared graph
+endpoints and explicit stroke tangents, checks the original contour in both
+directions, and retains free curves when the geometric model does not fit.
+Neighbouring curve pieces can also be consolidated under the same source-error
+bound. Straight spans retain SVG line commands; circular fits pass through the
+existing analytic-arc normalization. This removes some raster-scale waviness,
+but does not turn variable-width Paint bands or fragmented shading into a
+single uniform stroke.
+
 Full-resolution source data waiting for adaptive refinement remains packed as
 RGB8 when it came directly from the decoder and as Q0.16 RGB only when matte or
 chroma processing produced fractional channels. Working crops are expanded to
