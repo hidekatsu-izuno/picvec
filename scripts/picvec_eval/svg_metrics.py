@@ -62,6 +62,57 @@ def _local_name(tag: str) -> str:
     return tag.rsplit("}", 1)[-1]
 
 
+def _visible_stroke_paths(root: ET.Element):
+    """Resolve presentation attributes and inline styles in generated SVGs.
+
+    In particular picvec puts fill=none on the structural group, not each
+    path. Definitions and hidden subtrees must not enter a visible metric.
+    External stylesheets and use expansion are outside this evaluator's scope.
+    """
+    inherited_names = ("fill", "stroke", "stroke-width", "stroke-opacity", "visibility")
+
+    def visit(element, inherited, opacity):
+        if _local_name(element.tag) in {"defs", "mask", "clipPath", "symbol"}:
+            return
+        own = dict(element.attrib)
+        own.update(
+            (name.strip().lower(), value.strip())
+            for declaration in element.get("style", "").split(";")
+            if ":" in declaration
+            for name, value in [declaration.split(":", 1)]
+        )
+        if own.get("display", "").strip().lower() == "none":
+            return
+        presentation = dict(inherited)
+        for name in inherited_names:
+            value = own.get(name, "inherit").strip().lower()
+            if value != "inherit":
+                presentation[name] = value
+        try:
+            opacity *= float(own.get("opacity", "1"))
+            visible = opacity > 0 and float(presentation["stroke-opacity"]) > 0
+            width = re.match(r"[-+]?(?:\d*\.)?\d+", presentation["stroke-width"])
+            visible &= width is None or float(width.group()) > 0
+        except ValueError:
+            visible = opacity > 0
+        if (
+            visible
+            and presentation["visibility"] not in {"hidden", "collapse"}
+            and presentation["fill"] in {"none", "transparent"}
+            and presentation["stroke"] not in {"none", "transparent", ""}
+            and _local_name(element.tag) == "path"
+        ):
+            yield element
+        if opacity > 0:
+            for child in element:
+                yield from visit(child, presentation, opacity)
+
+    yield from visit(root, {
+        "fill": "black", "stroke": "none", "stroke-width": "1",
+        "stroke-opacity": "1", "visibility": "visible",
+    }, 1.0)
+
+
 def _path_counts(data: str) -> tuple[int, int, int, int, int, int, int, int, int]:
     """Return subpaths, segments, closes, lines, cubics, quadratics, arcs,
     endpoints, and a validity flag for one ``d`` attribute.
@@ -425,19 +476,7 @@ def svg_open_stroke_roughness(svg: str | bytes) -> dict[str, float | int]:
     open_subpaths = 0
     total_length = 0.0
 
-    def visible_stroke(element: ET.Element) -> bool:
-        fill = (element.get("fill") or "").strip().lower()
-        stroke = (element.get("stroke") or "").strip().lower()
-        style = (element.get("style") or "").lower().replace(" ", "")
-        if "fill:none" not in style and fill not in {"none", "transparent"}:
-            return False
-        if "stroke:none" in style or stroke in {"", "none", "transparent"}:
-            return False
-        return True
-
-    for element in root.iter():
-        if _local_name(element.tag) != "path" or not visible_stroke(element):
-            continue
+    for element in _visible_stroke_paths(root):
         data = element.get("d") or ""
         tokens = _TOKEN.findall(data)
         if not tokens or "".join(tokens) != re.sub(r"[\s,]+", "", data):
@@ -500,6 +539,7 @@ def svg_open_stroke_roughness(svg: str | bytes) -> dict[str, float | int]:
                 if command.upper() == "Z":
                     closed = True
                     flush()
+                    current = start.copy()
                     command = None
                     continue
             if command is None:
@@ -529,12 +569,20 @@ def svg_open_stroke_roughness(svg: str | bytes) -> dict[str, float | int]:
                     point += current
                 current = point
                 anchors.append(point)
-            elif upper == "C" and index + 5 < len(tokens):
+            elif upper in {"H", "V"} and index < len(tokens):
+                point = current.copy()
+                axis = 0 if upper == "H" else 1
+                point[axis] = float(tokens[index]) + (current[axis] if relative else 0)
+                index += 1
+                current = point
+                anchors.append(point)
+            elif upper in {"C", "S", "Q", "T", "A"} and index + _PARAMS[upper] <= len(tokens):
+                count = _PARAMS[upper]
                 point = np.asarray(
-                    (float(tokens[index + 4]), float(tokens[index + 5])),
+                    (float(tokens[index + count - 2]), float(tokens[index + count - 1])),
                     dtype=np.float64,
                 )
-                index += 6
+                index += count
                 if relative:
                     point += current
                 current = point

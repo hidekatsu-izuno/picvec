@@ -48,7 +48,7 @@ pub struct SourceEdge {
     pub points: Vec<[f64; 2]>,
     pub width: f64,
     pub role: &'static str,
-    width_samples: Vec<(f64, usize)>,
+    pub(crate) width_samples: Vec<(f64, usize)>,
 }
 
 #[derive(Clone, Debug)]
@@ -57,6 +57,8 @@ pub struct EdgeRoles {
     pub height: usize,
     pub boundary: Vec<bool>,
     pub visible_ridge_centres: Vec<bool>,
+    /// Source evidence retained before quantization can erase thin highlights.
+    pub bright_ridge_support: Vec<bool>,
     pub visible_ridge_coverage: Vec<bool>,
     pub dark_boundary: Vec<bool>,
     pub shading: Vec<bool>,
@@ -3142,6 +3144,7 @@ fn classify_normal_profile_edges(image: &Raster) -> EdgeRoles {
         height,
         boundary,
         visible_ridge_centres: ridge_centres,
+        bright_ridge_support: strong_bright,
         visible_ridge_coverage: ridge_coverage,
         dark_boundary,
         shading,

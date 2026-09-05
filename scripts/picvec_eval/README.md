@@ -205,6 +205,13 @@ roughness are additional independent terms (default weights 25% and 20%,
 respectively, before normalisation). Visible open stroke overlays (seams,
 highlights, and arches) are measured separately as `svg_open_stroke_roughness`
 (default weight 20%), so a smooth filled contour cannot hide a jagged line.
+Stroke paths inherit presentation attributes from their SVG ancestors; inline
+styles override presentation attributes. Definitions, hidden subtrees and
+zero-opacity/zero-width strokes are excluded. Optimized horizontal, vertical,
+quadratic, smooth and arc commands contribute their endpoints as well as
+line and cubic commands. External stylesheets and `use` expansion are outside
+the scope of this diagnostic.
+
 The open-stroke residual is length-normalised and does not reward simply
 deleting short lines.
 The authoritative result is `selection.valid`: raster floors are gates, and

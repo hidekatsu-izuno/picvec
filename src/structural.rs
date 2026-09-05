@@ -8,6 +8,9 @@ use crate::edge::{dilate, dilate_square, erode, lab_pixels, EdgeRoles};
 use crate::geometry::{fitted_structural_open_path_data_with_tangents, Point};
 use crate::raster::{percentile, Raster};
 
+#[path = "stroke_model.rs"]
+mod stroke_model;
+
 #[derive(Clone, Debug)]
 pub struct StructuralStroke {
     pub points: Vec<Point>,
@@ -31,6 +34,8 @@ pub struct StructuralSummary {
     pub residual_legacy_strokes: usize,
     pub visible_ridge_strokes: usize,
     pub boundary_profile_strokes: usize,
+    pub recovered_boundary_strokes: usize,
+    pub recovered_alpha_boundary_strokes: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -50,10 +55,63 @@ pub struct StructuralInk {
     visible_ridge_coverage: Vec<bool>,
     dark_boundary_coverage: Vec<bool>,
     face_barrier: Vec<bool>,
+    pub(crate) boundary_stroke_mask: Vec<bool>,
     pub summary: StructuralSummary,
 }
 
 impl StructuralInk {
+    /// Alpha owns the silhouette independently of straight-colour analysis.
+    /// Reject a centreline without covered source support: its finite width
+    /// could otherwise overlap the fitted mask despite being entirely outside.
+    pub(crate) fn retain_source_alpha_supported_strokes(
+        &mut self,
+        source: &Raster,
+        matte: &crate::chroma::AlphaMatte,
+    ) {
+        self.retain_strokes(|stroke| {
+            stroke.points.windows(2).any(|pair| {
+                let steps = pair[0].distance(pair[1]).ceil().max(1.0) as usize;
+                (0..=steps).any(|step| {
+                    let t = step as f32 / steps as f32;
+                    let x = (pair[0].x + t * (pair[1].x - pair[0].x) - 0.5)
+                        .clamp(0.0, (source.width - 1) as f32);
+                    let y = (pair[0].y + t * (pair[1].y - pair[0].y) - 0.5)
+                        .clamp(0.0, (source.height - 1) as f32);
+                    let (ix, iy) = (x as usize, y as usize);
+                    let (tx, ty) = (x - ix as f32, y - iy as f32);
+                    let coverage: f32 = [
+                        (ix, iy, (1.0 - tx) * (1.0 - ty)),
+                        ((ix + 1).min(source.width - 1), iy, tx * (1.0 - ty)),
+                        (ix, (iy + 1).min(source.height - 1), (1.0 - tx) * ty),
+                        (
+                            (ix + 1).min(source.width - 1),
+                            (iy + 1).min(source.height - 1),
+                            tx * ty,
+                        ),
+                    ]
+                    .into_iter()
+                    .map(|(px, py, weight)| weight * matte.get(py * source.width + px))
+                    .sum();
+                    coverage > 1e-4
+                })
+            })
+        });
+    }
+
+    pub(crate) fn recover_alpha_boundary(
+        &mut self,
+        source: &Raster,
+        matte: &crate::chroma::AlphaMatte,
+    ) {
+        let strokes = stroke_model::recover_alpha_boundary(source, matte);
+        self.summary.recovered_alpha_boundary_strokes = strokes
+            .iter()
+            .filter(|s| s.role == "alpha-boundary-stroke")
+            .count();
+        self.strokes.extend(strokes);
+        self.summary.stroke_count = self.strokes.len();
+    }
+
     pub fn empty() -> Self {
         Self {
             strokes: Vec::new(),
@@ -64,6 +122,7 @@ impl StructuralInk {
             visible_ridge_coverage: Vec::new(),
             dark_boundary_coverage: Vec::new(),
             face_barrier: Vec::new(),
+            boundary_stroke_mask: Vec::new(),
             summary: StructuralSummary::default(),
         }
     }
@@ -71,6 +130,16 @@ impl StructuralInk {
     pub(crate) fn retain_strokes(&mut self, mut retain: impl FnMut(&StructuralStroke) -> bool) {
         self.strokes.retain(|stroke| retain(stroke));
         self.summary.stroke_count = self.strokes.len();
+        self.summary.recovered_boundary_strokes = self
+            .strokes
+            .iter()
+            .filter(|s| s.role == "boundary-stroke")
+            .count();
+        self.summary.recovered_alpha_boundary_strokes = self
+            .strokes
+            .iter()
+            .filter(|s| s.role == "alpha-boundary-stroke")
+            .count();
         self.summary.residual_legacy_strokes = self
             .strokes
             .iter()
@@ -1204,6 +1273,7 @@ fn extend_structural_silhouette_antialias(source: &Raster, structural: &[bool]) 
 /// faces remain Paint-owned; there is intentionally no median-colour
 /// silhouette overlay that could flatten tyre or shadow gradients.
 pub fn analyse(source: &Raster, roles: &mut EdgeRoles) -> (Raster, StructuralInk) {
+    let recovered = stroke_model::recover(source, &roles.dark_boundary_graph);
     let (mut classified_lines, classified_silhouettes) = source_structural_lines(source);
     let classified_silhouettes =
         extend_structural_silhouette_antialias(source, &classified_silhouettes);
@@ -1245,7 +1315,13 @@ pub fn analyse(source: &Raster, roles: &mut EdgeRoles) -> (Raster, StructuralInk
     {
         *ridge |= shoulder;
     }
-    let underpaint_ownership = roles.visible_ridge_coverage.clone();
+    let mut underpaint_ownership = roles.visible_ridge_coverage.clone();
+    for &(index, paint) in &recovered.updates {
+        paint_reference.pixels[index] = paint;
+        underpaint_ownership[index] = true;
+        roles.face_barrier[index] = false;
+        roles.dark_boundary[index] = false;
+    }
     let mut source_graph_coverage = original_visible_ridge_coverage.clone();
     for edge in &roles.dark_boundary_graph {
         for pair in edge.points.windows(2) {
@@ -1287,12 +1363,17 @@ pub fn analyse(source: &Raster, roles: &mut EdgeRoles) -> (Raster, StructuralInk
             silhouette || (classified && !shading) || ridge
         })
         .collect();
-    let role_line_mask: Vec<bool> = classified_lines
+    let mut role_line_mask: Vec<bool> = classified_lines
         .iter()
         .zip(&shading_corridor)
         .zip(&original_visible_ridge_coverage)
         .map(|((&classified, &shading), &ridge)| (classified && !shading) || ridge)
         .collect();
+    for (index, &owned) in recovered.mask.iter().enumerate() {
+        if owned {
+            role_line_mask[index] = false;
+        }
+    }
     #[cfg(feature = "diagnostics")]
     if let Some(prefix) = std::env::var_os("PICVEC_PIPELINE_DIAGNOSTICS") {
         let raster =
@@ -1317,7 +1398,7 @@ pub fn analyse(source: &Raster, roles: &mut EdgeRoles) -> (Raster, StructuralInk
     // legacy source line is known only after the exact Paint partition has
     // rendered; constructing and then discarding an early skeleton duplicated
     // work and could never be the authoritative topology.
-    let strokes = roles
+    let mut strokes = roles
         .visible_ridge_graph
         .iter()
         .chain(&roles.dark_boundary_graph)
@@ -1366,7 +1447,11 @@ pub fn analyse(source: &Raster, roles: &mut EdgeRoles) -> (Raster, StructuralInk
             })
         })
         .collect::<Vec<_>>();
+    let recovered_boundary_strokes = recovered.strokes.len();
+    strokes.extend(recovered.strokes);
     let summary = StructuralSummary {
+        recovered_boundary_strokes,
+        recovered_alpha_boundary_strokes: 0,
         source_coverage_pixels: unclassified_source_coverage
             .iter()
             .zip(&source_graph_coverage)
@@ -1407,6 +1492,7 @@ pub fn analyse(source: &Raster, roles: &mut EdgeRoles) -> (Raster, StructuralInk
             visible_ridge_coverage: roles.visible_ridge_coverage.clone(),
             dark_boundary_coverage: roles.dark_boundary.clone(),
             face_barrier: roles.face_barrier.clone(),
+            boundary_stroke_mask: recovered.mask,
             summary,
         },
     )
@@ -3699,6 +3785,13 @@ pub fn select_missing_with_junctions(
     let mut visible_graph = Vec::new();
     let mut boundary_graph = Vec::new();
     for mut stroke in graph_candidates {
+        if stroke.role == "boundary-stroke"
+            || (!structural.boundary_stroke_mask.is_empty()
+                && mask_fraction_along(&stroke, &structural.boundary_stroke_mask, width, height)
+                    > 0.5)
+        {
+            continue;
+        }
         if matches!(stroke.role, "ridge" | "bright-ridge-on-boundary") {
             visible_graph.push(stroke);
         } else {
@@ -4036,6 +4129,17 @@ pub fn select_missing_with_junctions(
             .sum::<f32>();
         travelled >= (2.5 * edge.width.max(0.0)).max(2.0)
     });
+    selected_graph.retain(|stroke| {
+        structural.boundary_stroke_mask.is_empty()
+            || mask_fraction_along(stroke, &structural.boundary_stroke_mask, width, height) <= 0.5
+    });
+    selected_graph.extend(
+        structural
+            .strokes
+            .iter()
+            .filter(|stroke| stroke.role == "boundary-stroke")
+            .cloned(),
+    );
     let mut endpoint_counts = HashMap::<(i64, i64), usize>::new();
     for edge in &selected_graph {
         for point in [edge.points[0], edge.points[edge.points.len() - 1]] {
@@ -4044,65 +4148,69 @@ pub fn select_missing_with_junctions(
         }
     }
     let endpoint_tangents = graph_continuation_tangents(&selected_graph);
-    let mut strokes = Vec::new();
-    for (stroke_index, stroke) in selected_graph.into_iter().enumerate() {
-        let length = stroke
-            .points
-            .windows(2)
-            .map(|pair| pair[0].distance(pair[1]))
-            .sum::<f32>();
-        let minimum = if stroke.role == "legacy-structural" {
-            4.0
-        } else {
-            (1.5 * stroke.width).min(4.0).max(2.0_f32.min(4.0))
-        };
-        if length < minimum {
-            continue;
-        }
-        let width_scale = if stroke.role == "coloured-ridge-on-boundary" {
-            0.8
-        } else {
-            1.0
-        };
-        let start_key = point_key(stroke.points[0]);
-        let end_key = point_key(stroke.points[stroke.points.len() - 1]);
-        let shared_start = endpoint_counts.get(&start_key).copied().unwrap_or(0) > 1;
-        let shared_end = endpoint_counts.get(&end_key).copied().unwrap_or(0) > 1;
-        let straight =
-            straight_graph_line(&stroke.points, std::f32::consts::FRAC_1_SQRT_2, minimum);
-        let (points, path_data) = if let Some((mut start, mut end)) = straight {
-            if shared_start {
-                start = stroke.points[0];
+    // Indexed collection preserves SVG order while sharing the caller's worker limit.
+    let strokes: Vec<_> = selected_graph
+        .into_par_iter()
+        .enumerate()
+        .filter_map(|(stroke_index, stroke)| {
+            let length = stroke
+                .points
+                .windows(2)
+                .map(|pair| pair[0].distance(pair[1]))
+                .sum::<f32>();
+            let minimum = if stroke.role == "legacy-structural" {
+                4.0
+            } else {
+                (1.5 * stroke.width).min(4.0).max(2.0_f32.min(4.0))
+            };
+            if length < minimum {
+                return None;
             }
-            if shared_end {
-                end = stroke.points[stroke.points.len() - 1];
+            let width_scale = if stroke.role == "coloured-ridge-on-boundary" {
+                0.8
+            } else {
+                1.0
+            };
+            let start_key = point_key(stroke.points[0]);
+            let end_key = point_key(stroke.points[stroke.points.len() - 1]);
+            let shared_start = endpoint_counts.get(&start_key).copied().unwrap_or(0) > 1;
+            let shared_end = endpoint_counts.get(&end_key).copied().unwrap_or(0) > 1;
+            let straight =
+                straight_graph_line(&stroke.points, std::f32::consts::FRAC_1_SQRT_2, minimum);
+            let (points, path_data) = if let Some((mut start, mut end)) = straight {
+                if shared_start {
+                    start = stroke.points[0];
+                }
+                if shared_end {
+                    end = stroke.points[stroke.points.len() - 1];
+                }
+                (vec![start, end], None)
+            } else {
+                let fitting_points = refine_stroke_centerline(&stroke, &source_lab, width, height);
+                let path_data = fitted_structural_open_path_data_with_tangents(
+                    &fitting_points,
+                    0.75,
+                    0.45,
+                    endpoint_tangents.get(&(stroke_index, true)).copied(),
+                    endpoint_tangents.get(&(stroke_index, false)).copied(),
+                );
+                (stroke.points.clone(), Some(path_data))
+            };
+            if points.len() < 2 {
+                return None;
             }
-            (vec![start, end], None)
-        } else {
-            let fitting_points = refine_stroke_centerline(&stroke, &source_lab, width, height);
-            let path_data = fitted_structural_open_path_data_with_tangents(
-                &fitting_points,
-                0.75,
-                0.45,
-                endpoint_tangents.get(&(stroke_index, true)).copied(),
-                endpoint_tangents.get(&(stroke_index, false)).copied(),
-            );
-            (stroke.points.clone(), Some(path_data))
-        };
-        if points.len() < 2 {
-            continue;
-        }
-        let color = sample_graph_color(source, &stroke);
-        strokes.push(StructuralStroke {
-            points,
-            path_data,
-            precise_points: None,
-            color,
-            width: (stroke.width * width_scale).max(0.4),
-            role: stroke.role,
-            width_samples: stroke.width_samples.clone(),
-        });
-    }
+            let color = sample_graph_color(source, &stroke);
+            Some(StructuralStroke {
+                points,
+                path_data,
+                precise_points: None,
+                color,
+                width: (stroke.width * width_scale).max(0.4),
+                role: stroke.role,
+                width_samples: stroke.width_samples.clone(),
+            })
+        })
+        .collect();
     let mut summary = structural.summary.clone();
     summary.skeleton_pixels = residual_skeleton_pixels;
     summary.stroke_count = strokes.len();
@@ -4135,6 +4243,7 @@ pub fn select_missing_with_junctions(
         visible_ridge_coverage: structural.visible_ridge_coverage.clone(),
         dark_boundary_coverage: structural.dark_boundary_coverage.clone(),
         face_barrier: structural.face_barrier.clone(),
+        boundary_stroke_mask: structural.boundary_stroke_mask.clone(),
         summary,
     }
 }

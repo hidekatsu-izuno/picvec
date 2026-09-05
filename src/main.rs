@@ -38,7 +38,7 @@ struct Arguments {
     #[arg(long, default_value_t = 1400)]
     adaptive_tile_dimension: u32,
     /// Maximum source regions evaluated at higher resolution.
-    #[arg(long, default_value_t = 16)]
+    #[arg(long, default_value_t = 64)]
     adaptive_max_patches: usize,
     /// Maximum additional SVG size accepted for adaptive regions, in MiB.
     #[arg(long, default_value_t = 24)]

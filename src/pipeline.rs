@@ -9,8 +9,8 @@ use tempfile::{Builder as TemporaryFileBuilder, NamedTempFile};
 use std::collections::HashMap;
 
 use crate::adaptive::{
-    compose_refinements, perceptual_score, plan_candidates, AdaptiveRefinementSummary,
-    EmbeddedRefinement, SourceRect,
+    compose_refinements, perceptual_score, plan_candidates, refinement_boundary_matches,
+    refinements_cover_canvas, AdaptiveRefinementSummary, EmbeddedRefinement, SourceRect,
 };
 use crate::chroma::{self, AlphaMatte, AlphaTransparencySummary, ChromaKeySummary};
 use crate::color::{rgb_to_lab, Lab};
@@ -655,6 +655,7 @@ fn adaptively_refine(
 
     let mut candidates = plan_candidates(
         reference_source,
+        source_matte,
         &base_render,
         &core.labels,
         config.adaptive_tile_dimension as usize,
@@ -760,6 +761,15 @@ fn adaptively_refine(
                 )?;
                 let refined =
                     perceptual_score(reference_source, candidate.core, &child_render, expanded);
+                if !refinement_boundary_matches(
+                    &base_render,
+                    &child_render,
+                    whole,
+                    candidate.core,
+                    expanded,
+                ) {
+                    return Ok(RefinementOutcome::QualityRejected);
+                }
                 let combined_gain = candidate.baseline.combined - refined.combined;
                 if combined_gain < config.adaptive_min_perceptual_gain
                     || refined.p90_delta_e > candidate.baseline.p90_delta_e + 0.25
@@ -822,6 +832,7 @@ fn adaptively_refine(
             .then_with(|| left.embedded.core.x.cmp(&right.embedded.core.x))
     });
     let mut accepted = Vec::<EmbeddedRefinement>::new();
+    let mut refinement_svg = SvgSummary::default();
     for refinement in evaluated {
         if summary.added_svg_bytes.saturating_add(refinement.svg.bytes)
             > config.adaptive_svg_budget_bytes
@@ -833,7 +844,7 @@ fn adaptively_refine(
         summary.estimated_global_delta_e_reduction +=
             (refinement.baseline_mean - refinement.refined_mean).max(0.0) * area_weight;
         summary.added_svg_bytes += refinement.svg.bytes;
-        core.svg.add_elements_from(&refinement.svg);
+        refinement_svg.add_elements_from(&refinement.svg);
         accepted.push(refinement.embedded);
     }
     summary.accepted_regions = accepted.len();
@@ -842,6 +853,10 @@ fn adaptively_refine(
     if accepted.is_empty() {
         return Ok(summary);
     }
+    if source_matte.is_some() && refinements_cover_canvas(&accepted, input_dimensions) {
+        core.svg = SvgSummary::default();
+    }
+    core.svg.add_elements_from(&refinement_svg);
     core.document = compose_refinements(
         &core.document,
         (
@@ -899,7 +914,7 @@ fn vectorize_inner(
         if let Some(alpha) = decoded_alpha {
             let matte = AlphaMatte::from_u8(input_width, input_height, alpha);
             let backing = chroma::select_alpha_backing(&decoded, &matte);
-            let source = chroma::prepare_compact_source_alpha(&decoded, &matte, backing);
+            let source = chroma::prepare_compact_source_alpha(&decoded, &matte);
             let reference =
                 chroma::composite_source_over(&source, &matte.quantized_2bit(), backing);
             (source, reference, Some(matte), backing, None, Some(backing))
@@ -1064,7 +1079,7 @@ fn vectorize_processing(
     };
     save_pipeline_diagnostic("source-reference", &processing_reference);
     report_progress(config, "load-resize", started, &mut checkpoint);
-    let mut roles = classify(&processing_reference);
+    let mut roles = classify(&processing);
     save_mask_diagnostic(
         "edge-boundary",
         &roles.boundary,
@@ -1102,7 +1117,25 @@ fn vectorize_processing(
         processing.height,
     );
     report_progress(config, "edge-roles", started, &mut checkpoint);
-    let (paint_reference, structural_candidates) = analyse_structural(&processing, &mut roles);
+    let (mut paint_reference, mut structural_candidates) =
+        analyse_structural(&processing, &mut roles);
+    if source_alpha {
+        let matte = chroma_matte.expect("source alpha requires a matte");
+        // The alpha mask already owns thin silhouettes and coverage edges.
+        // Removing their ink into the invisible backing would expose that
+        // backing through the same mask alongside the fitted stroke.
+        let clear: Vec<_> = (0..matte.len()).map(|i| matte.get(i) <= 0.0).collect();
+        let mask_edge = dilate_square(&clear, processing.width, processing.height, 2);
+        for (i, &edge) in mask_edge.iter().enumerate() {
+            let alpha = matte.get(i);
+            if alpha > 0.0 && (edge || alpha < 1.0) {
+                paint_reference.pixels[i] = processing.pixels[i];
+                structural_candidates.paint_ownership_mask[i] = false;
+                roles.visible_ridge_coverage[i] = false;
+                roles.visible_ridge_centres[i] = false;
+            }
+        }
+    }
     save_mask_diagnostic(
         "paint-ownership",
         &structural_candidates.paint_ownership_mask,
@@ -1153,7 +1186,7 @@ fn vectorize_processing(
     let material_barrier =
         dilate_square(&roles.face_barrier, processing.width, processing.height, 1);
     for (index, &barrier) in material_barrier.iter().enumerate() {
-        if barrier {
+        if barrier && !structural_candidates.boundary_stroke_mask[index] {
             geometry_edge_reference.pixels[index] = processing.pixels[index];
         }
     }
@@ -1274,13 +1307,10 @@ fn vectorize_processing(
         refresh_summary(&mut gradient_report, &paints);
     }
 
-    // The temporary colour used to normalize exactly zero-alpha RGB may also
-    // be a legitimate visible colour. Split only after every Paint merge, so
-    // the two uses can never become one final owner, then duplicate the fitted
-    // Paint and exclude only the zero-coverage child below. Samples below the
-    // first quantized mask level deliberately remain as underpaint: a
-    // subpixel isoline can cross their pixel footprint and must not reveal the
-    // normalization colour or a raster-aligned geometry edge.
+    // Split visible and zero-coverage ownership only after Paint merging.
+    // Both children keep the fitted straight RGB, while the output can omit
+    // the fully hidden child. Nonzero samples remain underpaint beneath the
+    // interpolated alpha contour.
     let source_alpha_region_classes = if source_alpha {
         let matte = chroma_matte.expect("source alpha requires an alpha matte");
         let support = (0..matte.len())
@@ -1330,26 +1360,50 @@ fn vectorize_processing(
     report_progress(config, "shared-geometry", started, &mut checkpoint);
     // Resolve source ownership against the exact shared Paint partition.
     // Overlap is deliberately absent here: it is a seam underpaint, not an
-    // authored Paint or structural owner.
+    // authored Paint or structural owner. Native alpha is absent from this
+    // comparison: both references must describe straight RGB. A preview
+    // backdrop or alpha contour must not become a candidate ink colour.
     let paint_render = render_svg_preview(
         (processing.width, processing.height),
         (&geometry, &paints),
         &StructuralInk::empty(),
         0.0,
         false,
-        &excluded_regions,
-        alpha_mask.as_ref(),
-        preview_background,
+        if source_alpha { &[] } else { &excluded_regions },
+        if source_alpha {
+            None
+        } else {
+            alpha_mask.as_ref()
+        },
+        if source_alpha {
+            [1.0; 3]
+        } else {
+            preview_background
+        },
     )?;
     report_progress(config, "paint-preview", started, &mut checkpoint);
     let optimization = optimization_summary(&geometry, &paints, &geometry_report);
     let mut ownership = resolve_boundary_ownership(
-        &processing_reference,
+        if source_alpha {
+            &processing
+        } else {
+            &processing_reference
+        },
         &paint_render,
         &structural_candidates,
         &geometry_report.paint_junctions,
         config.shared_boundary_overlap,
     );
+    if source_alpha {
+        ownership.structural.retain_source_alpha_supported_strokes(
+            &processing,
+            chroma_matte.expect("source alpha requires a matte"),
+        );
+        ownership.structural.recover_alpha_boundary(
+            &processing,
+            chroma_matte.expect("source alpha requires a matte"),
+        );
+    }
     if let Some(matte) = chroma_matte.filter(|_| !source_alpha) {
         ownership
             .structural
@@ -1767,6 +1821,261 @@ mod tests {
             0,
             "enclosed source alpha should remain clear"
         );
+    }
+
+    #[test]
+    fn native_alpha_white_rim_is_continuous_after_rendering() {
+        use image::{ImageBuffer, Rgba};
+        let directory = tempfile::tempdir().unwrap();
+        let mut image = ImageBuffer::from_pixel(96, 96, Rgba([255_u8, 255, 255, 0]));
+        for y in 0..96 {
+            for x in 0..96 {
+                let r = (x as f32 + 0.5 - 48.0).hypot(y as f32 + 0.5 - 48.0);
+                if r < 38.0 {
+                    let grey =
+                        (255.0 * (0.3 + 0.7 * ((r - 36.5) / 1.0).clamp(0.0, 1.0))).round() as u8;
+                    image.put_pixel(x, y, Rgba([grey, grey, grey, 255]));
+                }
+            }
+        }
+        let input = directory.path().join("input.png");
+        let output = directory.path().join("output.svg");
+        image.save(&input).unwrap();
+        let summary = vectorize(
+            &input,
+            &output,
+            &Config {
+                maximum_dimension: 96,
+                auto_dimension: false,
+                adaptive_refinement: false,
+                rayon_threads: 1,
+                ..Config::default()
+            },
+        )
+        .unwrap();
+        assert!(summary.structural.recovered_alpha_boundary_strokes > 0);
+        let tree = parse_svg_document(&fs::read_to_string(output).unwrap()).unwrap();
+        let mut pixmap = resvg::tiny_skia::Pixmap::new(96, 96).unwrap();
+        resvg::render(
+            &tree,
+            resvg::tiny_skia::Transform::identity(),
+            &mut pixmap.as_mut(),
+        );
+        for degrees in 0..360 {
+            let angle = degrees as f32 * std::f32::consts::PI / 180.0;
+            let mut peak = 0.0_f32;
+            for j in 0..13 {
+                let r = 36.0 + j as f32 * 0.25;
+                let x = 47.5 + r * angle.cos();
+                let y = 47.5 + r * angle.sin();
+                let ix = x as usize;
+                let iy = y as usize;
+                let tx = x - ix as f32;
+                let ty = y - iy as f32;
+                let value: f32 = [
+                    (ix, iy, (1.0 - tx) * (1.0 - ty)),
+                    (ix + 1, iy, tx * (1.0 - ty)),
+                    (ix, iy + 1, (1.0 - tx) * ty),
+                    (ix + 1, iy + 1, tx * ty),
+                ]
+                .into_iter()
+                .map(|(x, y, w)| {
+                    let p = pixmap.pixels()[y * 96 + x];
+                    w * (f32::from(p.red()) - 0.3 * f32::from(p.alpha()))
+                })
+                .sum();
+                peak = peak.max(value);
+            }
+            assert!(peak > 30.0, "broken white rim at {degrees} degrees: {peak}");
+        }
+    }
+
+    #[test]
+    fn curved_highlight_remains_visible_beside_a_dark_seam() {
+        use image::{ImageBuffer, Rgba};
+        let directory = tempfile::tempdir().unwrap();
+        for transparent in [false, true] {
+            let mut image = ImageBuffer::from_pixel(
+                192,
+                192,
+                Rgba([255_u8, 255, 255, if transparent { 0 } else { 255 }]),
+            );
+            for y in 12..180 {
+                for x in 12..180 {
+                    let grey = 205 + (x / 8) as u8;
+                    image.put_pixel(x, y, Rgba([grey, grey, grey, 255]));
+                }
+                let centre = (96.0 + 25.0 * (y as f32 / 28.0).sin()).round() as u32;
+                for x in centre - 4..centre {
+                    image.put_pixel(x, y, Rgba([100, 100, 100, 255]));
+                }
+                for x in centre..centre + 3 {
+                    image.put_pixel(x, y, Rgba([252, 252, 252, 255]));
+                }
+            }
+            let input = directory.path().join("input.png");
+            let output = directory.path().join("output.svg");
+            image.save(&input).unwrap();
+            vectorize(
+                &input,
+                &output,
+                &Config {
+                    maximum_dimension: 192,
+                    auto_dimension: false,
+                    adaptive_refinement: false,
+                    rayon_threads: 1,
+                    ..Config::default()
+                },
+            )
+            .unwrap();
+            let tree = parse_svg_document(&fs::read_to_string(output).unwrap()).unwrap();
+            let mut pixmap = resvg::tiny_skia::Pixmap::new(192, 192).unwrap();
+            resvg::render(
+                &tree,
+                resvg::tiny_skia::Transform::identity(),
+                &mut pixmap.as_mut(),
+            );
+            for y in 20..172 {
+                let centre = (96.0 + 25.0 * (y as f32 / 28.0).sin()).round() as usize;
+                let peak = pixmap.pixels()[y * 192 + centre..y * 192 + centre + 4]
+                    .iter()
+                    .map(|p| p.red())
+                    .max()
+                    .unwrap();
+                // Require at least half the local source contrast after curve antialiasing.
+                let background = 205 + ((centre + 1) / 8) as u8;
+                assert!(
+                    f32::from(peak) >= 0.5 * f32::from(252_u16 + u16::from(background)),
+                    "lost highlight at y={y}: {peak}, transparent={transparent}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn transparent_greyscale_edges_do_not_invent_colours() {
+        use image::{ImageBuffer, Rgba};
+        let directory = tempfile::tempdir().unwrap();
+        let config = Config {
+            maximum_dimension: 96,
+            auto_dimension: false,
+            adaptive_refinement: false,
+            rayon_threads: 1,
+            ..Config::default()
+        };
+        let mut renders = Vec::new();
+        for hidden in [[255, 0, 255, 0], [0, 255, 0, 0]] {
+            let mut image = ImageBuffer::from_pixel(96, 96, Rgba(hidden));
+            for y in 0..96 {
+                for x in 0..96 {
+                    let d = ((x as f32 - 48.0).powi(2) + (y as f32 - 48.0).powi(2)).sqrt();
+                    let alpha = ((34.5 - d).clamp(0.0, 1.0) * 255.0) as u8;
+                    if alpha > 0 {
+                        let grey = if (45..49).contains(&x) {
+                            250
+                        } else {
+                            110 + x as u8
+                        };
+                        image.put_pixel(x, y, Rgba([grey, grey, grey, alpha]));
+                    }
+                }
+            }
+            let input = directory.path().join("input.png");
+            let output = directory.path().join("output.svg");
+            image.save(&input).unwrap();
+            vectorize(&input, &output, &config).unwrap();
+            let tree = parse_svg_document(&fs::read_to_string(output).unwrap()).unwrap();
+            let mut pixmap = resvg::tiny_skia::Pixmap::new(96, 96).unwrap();
+            resvg::render(
+                &tree,
+                resvg::tiny_skia::Transform::identity(),
+                &mut pixmap.as_mut(),
+            );
+            for p in pixmap.pixels() {
+                let channels = [p.red(), p.green(), p.blue()];
+                assert!(
+                    channels.iter().max().unwrap() - channels.iter().min().unwrap() <= 1,
+                    "invented colour: {p:?}"
+                );
+            }
+            renders.push(pixmap.take());
+        }
+        assert_eq!(
+            renders[0], renders[1],
+            "hidden RGB changed the visible result"
+        );
+    }
+
+    #[test]
+    fn translucent_black_grid_stays_neutral_and_connected() {
+        use image::{ImageBuffer, Rgba};
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("grid.png");
+        let output = directory.path().join("grid.svg");
+        let mut image = ImageBuffer::from_pixel(96, 96, Rgba([255_u8, 0, 255, 0]));
+        // Other Paint fits must not leak the normalization backing into the
+        // masked grid's underpaint, even when the image contains gradients.
+        for y in 12..84 {
+            for x in 6..34 {
+                let grey = (90 + 4 * x) as u8;
+                image.put_pixel(x, y, Rgba([grey, grey, grey, 255]));
+            }
+        }
+        for y in 12..40 {
+            for x in 65..88 {
+                image.put_pixel(x, y, Rgba([0, 255, 0, 255]));
+            }
+        }
+        for y in 3..93 {
+            image.put_pixel(47, y, Rgba([0, 0, 0, 210]));
+            image.put_pixel(48, y, Rgba([0, 0, 0, 204]));
+        }
+        for x in 3..93 {
+            image.put_pixel(x, 47, Rgba([0, 0, 0, 210]));
+            image.put_pixel(x, 48, Rgba([0, 0, 0, 204]));
+        }
+        image.put_pixel(47, 47, Rgba([0, 0, 0, 255]));
+        // A real break must remain a break.
+        for y in 70..76 {
+            for x in 47..49 {
+                image.put_pixel(x, y, Rgba([255, 0, 255, 0]));
+            }
+        }
+        image.save(&input).unwrap();
+        vectorize(
+            &input,
+            &output,
+            &Config {
+                maximum_dimension: 96,
+                auto_dimension: false,
+                adaptive_refinement: false,
+                rayon_threads: 1,
+                ..Config::default()
+            },
+        )
+        .unwrap();
+        let document = fs::read_to_string(output).unwrap();
+        let tree = parse_svg_document(&document).unwrap();
+        let mut pixmap = resvg::tiny_skia::Pixmap::new(96, 96).unwrap();
+        resvg::render(
+            &tree,
+            resvg::tiny_skia::Transform::identity(),
+            &mut pixmap.as_mut(),
+        );
+        for y in 6..90 {
+            if (69..77).contains(&y) {
+                continue;
+            }
+            let pixels = &pixmap.pixels()[y * 96 + 46..y * 96 + 50];
+            assert!(pixels.iter().any(|p| p.alpha() > 64), "grid gap at y={y}");
+            for p in pixels.iter().filter(|p| p.alpha() > 32) {
+                assert!(
+                    p.red().max(p.green()).max(p.blue()) <= 3,
+                    "tinted black grid at y={y}: {p:?}"
+                );
+            }
+        }
+        assert_eq!(pixmap.pixels()[73 * 96 + 47].alpha(), 0);
     }
 
     #[test]

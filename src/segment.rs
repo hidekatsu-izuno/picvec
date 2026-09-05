@@ -266,7 +266,7 @@ fn weighted_merge(first: Lab, first_weight: usize, second: Lab, second_weight: u
     }
 }
 
-fn build_palette(lab: &[Lab], config: &Config) -> (Vec<u32>, Vec<Lab>, usize) {
+fn build_palette(lab: &[Lab], protected: &[bool], config: &Config) -> (Vec<u32>, Vec<Lab>, usize) {
     let mut histogram = HashMap::<LabKey, usize>::new();
     for value in lab {
         *histogram
@@ -277,17 +277,34 @@ fn build_palette(lab: &[Lab], config: &Config) -> (Vec<u32>, Vec<Lab>, usize) {
             ))
             .or_default() += 1;
     }
+    // Global colour frequency cannot decide whether a thin highlight is
+    // dispensable. Preserve source ridge colours before small-region and
+    // antialias decisions; canonical-image ridge detection would be too late.
+    let protected_bins: HashSet<_> = lab
+        .iter()
+        .zip(protected)
+        .filter(|(_, keep)| **keep)
+        .map(|(v, _)| {
+            LabKey(
+                v.l.round_ties_even() as i16,
+                v.a.round_ties_even() as i16,
+                v.b.round_ties_even() as i16,
+            )
+        })
+        .collect();
     let histogram_cells = histogram.len();
     let mut bins: Vec<(LabKey, usize)> = histogram.into_iter().collect();
     bins.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     let mut palette = Vec::<PaletteEntry>::new();
     let mut palette_labs = Vec::<Lab>::new();
+    let mut palette_protected = Vec::<bool>::new();
     let mut distance_workspace = DeltaE2000Workspace::default();
     let maximum_palette_distance = config
         .quantization_dark_delta_e
         .max(config.quantization_light_delta_e);
     let mut assignments = HashMap::<LabKey, u32>::new();
     for (key, count) in bins {
+        let keep = protected_bins.contains(&key);
         let colour = Lab {
             l: key.0 as f32,
             a: key.1 as f32,
@@ -306,10 +323,16 @@ fn build_palette(lab: &[Lab], config: &Config) -> (Vec<u32>, Vec<Lab>, usize) {
         );
         let selected = if let Some((index, distance)) = best {
             let threshold = adaptive_tolerance((palette[index].lab.l + colour.l) * 0.5, config);
+            let threshold = if keep || palette_protected[index] {
+                threshold.min(1.5)
+            } else {
+                threshold
+            };
             if distance <= threshold {
                 let previous = palette[index].clone();
                 palette[index].lab = weighted_merge(previous.lab, previous.weight, colour, count);
                 palette[index].weight += count;
+                palette_protected[index] |= keep;
                 palette_labs[index] = palette[index].lab;
                 index
             } else {
@@ -319,6 +342,7 @@ fn build_palette(lab: &[Lab], config: &Config) -> (Vec<u32>, Vec<Lab>, usize) {
                     weight: count,
                 });
                 palette_labs.push(colour);
+                palette_protected.push(keep);
                 index
             }
         } else {
@@ -328,6 +352,7 @@ fn build_palette(lab: &[Lab], config: &Config) -> (Vec<u32>, Vec<Lab>, usize) {
                 weight: count,
             });
             palette_labs.push(colour);
+            palette_protected.push(keep);
             index
         };
         assignments.insert(key, selected as u32);
@@ -574,23 +599,6 @@ fn mixture_error(source: Lab, neighbours: &[Lab]) -> f32 {
     best
 }
 
-#[derive(Clone, Copy, Debug)]
-struct PixelBounds {
-    min_x: usize,
-    min_y: usize,
-    max_x: usize,
-    max_y: usize,
-}
-
-impl PixelBounds {
-    fn include(&mut self, x: usize, y: usize) {
-        self.min_x = self.min_x.min(x);
-        self.min_y = self.min_y.min(y);
-        self.max_x = self.max_x.max(x + 1);
-        self.max_y = self.max_y.max(y + 1);
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 fn merge_small_components(
     palette_map: &mut [u32],
@@ -601,206 +609,186 @@ fn merge_small_components(
     local_area: &[usize],
     maximum_area: usize,
     config: &Config,
+    #[cfg(test)] dense_reference: bool,
 ) -> (usize, usize, usize) {
     let mut reassigned = 0;
     let mut merged = 0;
     let mut preserved = 0;
-    let mut bounds = vec![None::<PixelBounds>; palette_lab.len()];
+    // Visit actual owners, not a color's potentially image-wide bounding box.
+    // Incoming pixels from earlier colors are inserted before sorting the next
+    // owner's seeds, preserving the original row-major reassignment order.
+    let mut seeds = vec![Vec::<usize>::new(); palette_lab.len()];
     for (index, &palette) in palette_map.iter().enumerate() {
-        let x = index % width;
-        let y = index / width;
-        match &mut bounds[palette as usize] {
-            Some(value) => value.include(x, y),
-            slot @ None => {
-                *slot = Some(PixelBounds {
-                    min_x: x,
-                    min_y: y,
-                    max_x: x + 1,
-                    max_y: y + 1,
-                });
-            }
-        }
+        seeds[palette as usize].push(index);
     }
-
     let mut visited = vec![0_u32; palette_map.len()];
     let mut epoch = 0_u32;
     for palette in 0..palette_lab.len() {
-        let Some(extent) = bounds[palette] else {
-            continue;
-        };
+        let mut indices = std::mem::take(&mut seeds[palette]);
+        indices.sort_unstable();
+        indices.dedup();
+        #[cfg(test)]
+        if dense_reference {
+            indices = (0..palette_map.len()).collect();
+        }
         epoch = epoch.wrapping_add(1).max(1);
         if epoch == 1 {
             visited.fill(0);
         }
-        for y in extent.min_y..extent.max_y {
-            for x in extent.min_x..extent.max_x {
-                let start = y * width + x;
-                if palette_map[start] != palette as u32 || visited[start] == epoch {
-                    continue;
-                }
-                let mut queue = VecDeque::from([start]);
-                let mut component = Vec::new();
-                visited[start] = epoch;
-                while let Some(index) = queue.pop_front() {
-                    component.push(index);
-                    let px = index % width;
-                    let py = index / width;
-                    let neighbours = [
-                        (px > 0).then(|| index - 1),
-                        (px + 1 < width).then(|| index + 1),
-                        (py > 0).then(|| index - width),
-                        (py + 1 < height).then(|| index + width),
-                    ];
-                    for neighbour in neighbours.into_iter().flatten() {
-                        if palette_map[neighbour] == palette as u32 && visited[neighbour] != epoch {
-                            visited[neighbour] = epoch;
-                            queue.push_back(neighbour);
-                        }
-                    }
-                }
-                if component.len() >= maximum_area {
-                    continue;
-                }
-                let mut local_limits: Vec<usize> =
-                    component.iter().map(|&index| local_area[index]).collect();
-                local_limits.sort_unstable();
-                let local_minimum = if local_limits.len().is_multiple_of(2) {
-                    (local_limits[local_limits.len() / 2 - 1]
-                        + local_limits[local_limits.len() / 2])
-                        / 2
-                } else {
-                    local_limits[local_limits.len() / 2]
-                };
-                let locally_visible = component.len() >= local_minimum;
-                let component_lookup: HashSet<usize> = component.iter().copied().collect();
-                let mut neighbour_ids = HashSet::<u32>::new();
-                for &index in &component {
-                    let px = index % width;
-                    let py = index / width;
-                    for neighbour in [
-                        (px > 0).then(|| index - 1),
-                        (px + 1 < width).then(|| index + 1),
-                        (py > 0).then(|| index - width),
-                        (py + 1 < height).then(|| index + width),
-                    ]
-                    .into_iter()
-                    .flatten()
-                    {
-                        let owner = palette_map[neighbour];
-                        if owner != palette as u32 {
-                            neighbour_ids.insert(owner);
-                        }
-                    }
-                }
-                if neighbour_ids.is_empty() {
-                    continue;
-                }
-                let mut neighbours: Vec<u32> = neighbour_ids.into_iter().collect();
-                neighbours.sort_unstable();
-                let neighbour_colours: Vec<Lab> = neighbours
-                    .iter()
-                    .map(|&owner| palette_lab[owner as usize])
-                    .collect();
-                let source = median_lab(source_lab, &component);
-                let best = neighbour_colours
-                    .iter()
-                    .enumerate()
-                    .map(|(offset, &colour)| (offset, delta_e2000(source, colour)))
-                    .min_by(|left, right| {
-                        left.1
-                            .total_cmp(&right.1)
-                            .then_with(|| left.0.cmp(&right.0))
-                    })
-                    .unwrap();
-                let best_colour = neighbour_colours[best.0];
-                let threshold = adaptive_tolerance((source.l + best_colour.l) * 0.5, config);
-                let minimum_l = neighbour_colours
-                    .iter()
-                    .map(|value| value.l)
-                    .fold(f32::INFINITY, f32::min);
-                let maximum_l = neighbour_colours
-                    .iter()
-                    .map(|value| value.l)
-                    .fold(f32::NEG_INFINITY, f32::max);
-                let extremum = source.l <= minimum_l - 6.0 || source.l >= maximum_l + 6.0;
-                let source_chroma = (source.a * source.a + source.b * source.b).sqrt();
-                let maximum_chroma = neighbour_colours
-                    .iter()
-                    .map(|value| (value.a * value.a + value.b * value.b).sqrt())
-                    .fold(0.0_f32, f32::max);
-                let core = component.iter().any(|&index| {
-                    let px = index % width;
-                    let py = index / width;
-                    px > 0
-                        && py > 0
-                        && px + 1 < width
-                        && py + 1 < height
-                        && component_lookup.contains(&(index - 1))
-                        && component_lookup.contains(&(index + 1))
-                        && component_lookup.contains(&(index - width))
-                        && component_lookup.contains(&(index + width))
-                });
-                let residual = mixture_error(source, &neighbour_colours);
-                let independent = component.len() >= 3
-                    && best.1 > threshold
-                    && residual > (0.75 * threshold).max(2.5)
-                    && (core || source_chroma >= maximum_chroma + 4.0);
-                let local_material = locally_visible
-                    && component.len() >= 3
-                    && core
-                    && best.1 > 0.5 * threshold
-                    && residual > (0.5 * threshold).max(1.5);
-                if (component.len() >= 3 && extremum && best.1 > threshold)
-                    || independent
-                    || local_material
-                {
-                    preserved += 1;
-                    continue;
-                }
-
-                let mut changed_component = false;
-                for &index in &component {
-                    let value = source_lab[index];
-                    let mut selected: Option<(usize, f32)> = None;
-                    for (offset, &colour) in neighbour_colours.iter().enumerate() {
-                        let error = delta_e2000(value, colour);
-                        let pixel_threshold =
-                            adaptive_tolerance((value.l + colour.l) * 0.5, config);
-                        if error > (2.0 * pixel_threshold).max(35.0) {
-                            continue;
-                        }
-                        if selected
-                            .map(|current| {
-                                error < current.1 || (error == current.1 && offset < current.0)
-                            })
-                            .unwrap_or(true)
-                        {
-                            selected = Some((offset, error));
-                        }
-                    }
-                    let Some((offset, _)) = selected else {
-                        continue;
-                    };
-                    let owner = neighbours[offset];
-                    palette_map[index] = owner;
-                    let px = index % width;
-                    let py = index / width;
-                    match &mut bounds[owner as usize] {
-                        Some(value) => value.include(px, py),
-                        slot @ None => {
-                            *slot = Some(PixelBounds {
-                                min_x: px,
-                                min_y: py,
-                                max_x: px + 1,
-                                max_y: py + 1,
-                            });
-                        }
-                    }
-                    reassigned += 1;
-                    changed_component = true;
-                }
-                merged += usize::from(changed_component);
+        for start in indices {
+            if palette_map[start] != palette as u32 || visited[start] == epoch {
+                continue;
             }
+            let mut queue = VecDeque::from([start]);
+            let mut component = Vec::new();
+            visited[start] = epoch;
+            while let Some(index) = queue.pop_front() {
+                component.push(index);
+                let px = index % width;
+                let py = index / width;
+                let neighbours = [
+                    (px > 0).then(|| index - 1),
+                    (px + 1 < width).then(|| index + 1),
+                    (py > 0).then(|| index - width),
+                    (py + 1 < height).then(|| index + width),
+                ];
+                for neighbour in neighbours.into_iter().flatten() {
+                    if palette_map[neighbour] == palette as u32 && visited[neighbour] != epoch {
+                        visited[neighbour] = epoch;
+                        queue.push_back(neighbour);
+                    }
+                }
+            }
+            if component.len() >= maximum_area {
+                continue;
+            }
+            let mut local_limits: Vec<usize> =
+                component.iter().map(|&index| local_area[index]).collect();
+            local_limits.sort_unstable();
+            let local_minimum = if local_limits.len().is_multiple_of(2) {
+                (local_limits[local_limits.len() / 2 - 1] + local_limits[local_limits.len() / 2])
+                    / 2
+            } else {
+                local_limits[local_limits.len() / 2]
+            };
+            let locally_visible = component.len() >= local_minimum;
+            let component_lookup: HashSet<usize> = component.iter().copied().collect();
+            let mut neighbour_ids = HashSet::<u32>::new();
+            for &index in &component {
+                let px = index % width;
+                let py = index / width;
+                for neighbour in [
+                    (px > 0).then(|| index - 1),
+                    (px + 1 < width).then(|| index + 1),
+                    (py > 0).then(|| index - width),
+                    (py + 1 < height).then(|| index + width),
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    let owner = palette_map[neighbour];
+                    if owner != palette as u32 {
+                        neighbour_ids.insert(owner);
+                    }
+                }
+            }
+            if neighbour_ids.is_empty() {
+                continue;
+            }
+            let mut neighbours: Vec<u32> = neighbour_ids.into_iter().collect();
+            neighbours.sort_unstable();
+            let neighbour_colours: Vec<Lab> = neighbours
+                .iter()
+                .map(|&owner| palette_lab[owner as usize])
+                .collect();
+            let source = median_lab(source_lab, &component);
+            let best = neighbour_colours
+                .iter()
+                .enumerate()
+                .map(|(offset, &colour)| (offset, delta_e2000(source, colour)))
+                .min_by(|left, right| {
+                    left.1
+                        .total_cmp(&right.1)
+                        .then_with(|| left.0.cmp(&right.0))
+                })
+                .unwrap();
+            let best_colour = neighbour_colours[best.0];
+            let threshold = adaptive_tolerance((source.l + best_colour.l) * 0.5, config);
+            let minimum_l = neighbour_colours
+                .iter()
+                .map(|value| value.l)
+                .fold(f32::INFINITY, f32::min);
+            let maximum_l = neighbour_colours
+                .iter()
+                .map(|value| value.l)
+                .fold(f32::NEG_INFINITY, f32::max);
+            let extremum = source.l <= minimum_l - 6.0 || source.l >= maximum_l + 6.0;
+            let source_chroma = (source.a * source.a + source.b * source.b).sqrt();
+            let maximum_chroma = neighbour_colours
+                .iter()
+                .map(|value| (value.a * value.a + value.b * value.b).sqrt())
+                .fold(0.0_f32, f32::max);
+            let core = component.iter().any(|&index| {
+                let px = index % width;
+                let py = index / width;
+                px > 0
+                    && py > 0
+                    && px + 1 < width
+                    && py + 1 < height
+                    && component_lookup.contains(&(index - 1))
+                    && component_lookup.contains(&(index + 1))
+                    && component_lookup.contains(&(index - width))
+                    && component_lookup.contains(&(index + width))
+            });
+            let residual = mixture_error(source, &neighbour_colours);
+            let independent = component.len() >= 3
+                && best.1 > threshold
+                && residual > (0.75 * threshold).max(2.5)
+                && (core || source_chroma >= maximum_chroma + 4.0);
+            let local_material = locally_visible
+                && component.len() >= 3
+                && core
+                && best.1 > 0.5 * threshold
+                && residual > (0.5 * threshold).max(1.5);
+            if (component.len() >= 3 && extremum && best.1 > threshold)
+                || independent
+                || local_material
+            {
+                preserved += 1;
+                continue;
+            }
+
+            let mut changed_component = false;
+            for &index in &component {
+                let value = source_lab[index];
+                let mut selected: Option<(usize, f32)> = None;
+                for (offset, &colour) in neighbour_colours.iter().enumerate() {
+                    let error = delta_e2000(value, colour);
+                    let pixel_threshold = adaptive_tolerance((value.l + colour.l) * 0.5, config);
+                    if error > (2.0 * pixel_threshold).max(35.0) {
+                        continue;
+                    }
+                    if selected
+                        .map(|current| {
+                            error < current.1 || (error == current.1 && offset < current.0)
+                        })
+                        .unwrap_or(true)
+                    {
+                        selected = Some((offset, error));
+                    }
+                }
+                let Some((offset, _)) = selected else {
+                    continue;
+                };
+                let owner = neighbours[offset];
+                palette_map[index] = owner;
+                if owner as usize > palette {
+                    seeds[owner as usize].push(index);
+                }
+                reassigned += 1;
+                changed_component = true;
+            }
+            merged += usize::from(changed_component);
         }
     }
     (reassigned, merged, preserved)
@@ -2519,7 +2507,8 @@ pub fn segment(image: &Raster, roles: &EdgeRoles, config: &Config) -> Segmentati
         );
         substage_started = std::time::Instant::now();
     }
-    let (mut palette_map, palette_lab, histogram_cells) = build_palette(&source_lab, config);
+    let (mut palette_map, palette_lab, histogram_cells) =
+        build_palette(&source_lab, &roles.bright_ridge_support, config);
     if cfg!(feature = "diagnostics") && config.retain_diagnostics {
         eprintln!(
             "picvec segmentation substage palette: {:.3}s ({histogram_cells} histogram cells, {} colours)",
@@ -2562,6 +2551,8 @@ pub fn segment(image: &Raster, roles: &EdgeRoles, config: &Config) -> Segmentati
         &local_area,
         maximum_area,
         config,
+        #[cfg(test)]
+        false,
     );
     if cfg!(feature = "diagnostics") && config.retain_diagnostics {
         eprintln!(
@@ -4123,6 +4114,77 @@ pub fn region_mean_raster(image: &Raster, segmentation: &Segmentation) -> Raster
 mod tests {
     use super::*;
     use crate::edge::classify;
+
+    #[test]
+    fn source_highlight_is_not_quantized_into_its_incident_paint() {
+        let mut colours = vec![
+            Lab {
+                l: 88.0,
+                a: 0.0,
+                b: 0.0
+            };
+            100
+        ];
+        colours.extend(vec![
+            Lab {
+                l: 94.0,
+                a: 0.0,
+                b: 0.0
+            };
+            8
+        ]);
+        let mut protected = vec![false; 100];
+        protected.extend(vec![true; 8]);
+        let (labels, palette, _) = build_palette(&colours, &protected, &Config::default());
+        assert_ne!(labels[0], labels[100]);
+        assert!(palette[labels[100] as usize].l > 93.0);
+    }
+
+    #[test]
+    fn indexed_component_seeds_preserve_dense_reassignment_order() {
+        let config = Config::default();
+        for seed in 0..24_usize {
+            let (width, height) = (17, 13);
+            let palette: Vec<Lab> = (0..5)
+                .map(|i| Lab {
+                    l: 45.0 + i as f32 * 2.0,
+                    a: 2.0,
+                    b: 1.0,
+                })
+                .collect();
+            let original: Vec<u32> = (0..width * height)
+                .map(|i| ((i * 17 + i * i * (seed + 1) + seed * 31) % 5) as u32)
+                .collect();
+            let source: Vec<Lab> = original.iter().map(|&i| palette[i as usize]).collect();
+            let mut dense = original.clone();
+            let mut indexed = original;
+            let local_area = vec![8; width * height];
+            let a = merge_small_components(
+                &mut dense,
+                &palette,
+                &source,
+                width,
+                height,
+                &local_area,
+                12,
+                &config,
+                true,
+            );
+            let b = merge_small_components(
+                &mut indexed,
+                &palette,
+                &source,
+                width,
+                height,
+                &local_area,
+                12,
+                &config,
+                false,
+            );
+            assert_eq!(a, b, "seed={seed}");
+            assert_eq!(dense, indexed, "seed={seed}");
+        }
+    }
 
     #[test]
     fn exact_values_split_final_owner_without_changing_its_paint_key() {

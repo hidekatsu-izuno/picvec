@@ -146,6 +146,7 @@ fn gaussian_filter(
     correlate_axis(&intermediate, width, height, 1, &second)
 }
 
+#[cfg(test)]
 fn meijering(input: &[f32], width: usize, height: usize, sigmas: &[f64]) -> Vec<f32> {
     let mut filtered = vec![0.0_f32; input.len()];
     for &sigma in sigmas {
@@ -185,6 +186,57 @@ fn meijering(input: &[f32], width: usize, height: usize, sigmas: &[f64]) -> Vec<
     filtered
 }
 
+/// Gaussian derivatives are linear: the Hessian of -I is -H(I). Keep
+/// both eigenvalue tie orders and normalize each polarity independently.
+fn meijering_polarities(
+    input: &[f32],
+    width: usize,
+    height: usize,
+    sigmas: &[f64],
+) -> (Vec<f32>, Vec<f32>) {
+    let mut dark = vec![0.0_f32; input.len()];
+    let mut bright = dark.clone();
+    for &sigma in sigmas {
+        let row = gaussian_filter(input, width, height, sigma, [1, 0]);
+        let column = gaussian_filter(input, width, height, sigma, [0, 1]);
+        let hrr = gaussian_filter(&row, width, height, sigma, [1, 0]);
+        let hrc = gaussian_filter(&row, width, height, sigma, [0, 1]);
+        let hcc = gaussian_filter(&column, width, height, sigma, [0, 1]);
+        let values: Vec<[f32; 2]> = (0..input.len())
+            .into_par_iter()
+            .map(|i| {
+                let centre = (hrr[i] + hcc[i]) / 2.0;
+                let difference = (hrr[i] - hcc[i]) / 2.0;
+                let root = (hrc[i] * hrc[i] + difference * difference).sqrt();
+                let first = centre + root;
+                let second = centre - root;
+                let a = first + (1.0_f32 / 3.0) * second;
+                let b = (1.0_f32 / 3.0) * first + second;
+                [
+                    (if a.abs() >= b.abs() { a } else { b }).max(0.0),
+                    (if b.abs() >= a.abs() { -b } else { -a }).max(0.0),
+                ]
+            })
+            .collect();
+        let maximum = values
+            .par_iter()
+            .copied()
+            .reduce(|| [0.0_f32; 2], |a, b| [a[0].max(b[0]), a[1].max(b[1])]);
+        dark.par_iter_mut()
+            .zip(bright.par_iter_mut())
+            .zip(values)
+            .for_each(|((d, b), v)| {
+                if maximum[0] > 0.0 {
+                    *d = d.max(v[0] / maximum[0]);
+                }
+                if maximum[1] > 0.0 {
+                    *b = b.max(v[1] / maximum[1]);
+                }
+            });
+    }
+    (dark, bright)
+}
+
 #[doc(hidden)]
 pub fn debug_bright_parts(image: &Raster) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
     let width = image.width;
@@ -202,8 +254,7 @@ pub fn debug_bright_parts(image: &Raster) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
         .collect();
     radii.sort_unstable();
     radii.dedup();
-    let inverted: Vec<f32> = luminance.iter().map(|&value| -value).collect();
-    let bright_hessian = meijering(&inverted, width, height, &sigmas);
+    let (_, bright_hessian) = meijering_polarities(&luminance, width, height, &sigmas);
     let (_, bright_tophat) = top_hats(&luminance, width, height, &radii);
     (luminance, bright_hessian, bright_tophat)
 }
@@ -368,9 +419,7 @@ pub fn detect(image: &Raster) -> RidgeEvidence {
         .collect();
     radii.sort_unstable();
     radii.dedup();
-    let dark_hessian = meijering(&luminance, width, height, &sigmas);
-    let inverted: Vec<f32> = luminance.par_iter().map(|&value| -value).collect();
-    let bright_hessian = meijering(&inverted, width, height, &sigmas);
+    let (dark_hessian, bright_hessian) = meijering_polarities(&luminance, width, height, &sigmas);
     let (dark_tophat, bright_tophat) = top_hats(&luminance, width, height, &radii);
     let dark_hessian = robust_unit(&dark_hessian);
     let bright_hessian = robust_unit(&bright_hessian);
@@ -688,6 +737,27 @@ pub fn adjust_paint_samples(image: &Raster, original: &[bool]) -> Vec<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_hessian_preserves_both_independent_polarities() {
+        for (width, height) in [(1, 17), (23, 1), (23, 19)] {
+            let input: Vec<f32> = (0..width * height)
+                .map(|i| ((i * 71 + i * i * 17) % 251) as f32 / 250.0)
+                .collect();
+            let sigmas = [0.5, 1.5, 3.0];
+            let (dark, bright) = meijering_polarities(&input, width, height, &sigmas);
+            let inverted: Vec<f32> = input.iter().map(|v| -v).collect();
+            for (actual, expected) in [
+                (dark, meijering(&input, width, height, &sigmas)),
+                (bright, meijering(&inverted, width, height, &sigmas)),
+            ] {
+                assert!(actual
+                    .iter()
+                    .zip(expected)
+                    .all(|(a, b)| (a - b).abs() < 1e-6));
+            }
+        }
+    }
 
     #[test]
     fn shared_analysis_matches_independent_ridge_consumers() {

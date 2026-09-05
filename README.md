@@ -80,11 +80,20 @@ then antialiases that curve at the display resolution, so neither an enlarged
 raster staircase nor a persistent semitransparent outline is embedded in the
 SVG. Broad or independent authored transparency is preserved with the uniform
 two-bit levels `0`, `1/3`, `2/3`, and `1`, using nested vector regions. Visible
-pixels retain their straight source RGB, so a foreground colour cannot be
-removed merely because it equals the temporary colour used to normalize fully
-transparent pixels. Nonzero samples are also retained as hidden underpaint,
-preventing the interpolated mask edge from revealing that normalization colour.
-The converter does not flatten transparent input onto white.
+pixels retain their straight source RGB. Fully transparent pixels receive
+extended foreground colours, so hidden PNG RGB and a temporary preview
+background cannot enter colour segmentation or Paint fitting. Alpha owns the
+silhouette independently of those extended colours.
+The converter does not flatten transparent input onto white. Structural ink
+and Paint use the same straight-colour reference; the temporary comparison
+background is reserved for quality measurement. Lines without covered source
+support are discarded.
+Mask-owned thin silhouettes and partial-alpha Paint samples also keep their
+source RGB instead of being replaced by that background. A translucent thin
+line retains its coverage even when it connects to a distant opaque junction;
+only locally supported antialias shoulders are collapsed. A narrow bright RGB rim
+on an opaque/transparent cutout is fitted along the same curves as its alpha
+mask, so it remains a continuous edge instead of isolated Paint fragments.
 
 Constant-colour matting from a single image is inherently ambiguous when the
 foreground itself contains an inferred chroma key. Such areas can be removed
@@ -94,20 +103,43 @@ See [the background-removal design notes](docs/chroma-key-background-removal.md)
 for the matte model, thresholds, and research basis.
 
 Large inputs use source-resolution adaptive refinement by default. The base
-SVG is rendered and compared with the original in balanced source-space
-regions. A region is rerun through the same vector model at a finer scale only
-when its mean/tail DeltaE00 and missing-edge improvement justify its predicted
+SVG is rendered and compared with the original in source-space regions that
+contain whole connected figures. Transparency or a reliably flat background
+provides separation evidence; opaque backgrounds are retained in the output.
+Overlapping figure bounds and nearby details share one region. Figures that
+cannot be separated safely or exceed `--adaptive-tile-dimension` retain their
+whole-image base model. A region is rerun at a finer scale only when its
+mean/tail DeltaE00 and missing-edge improvement justify its predicted
 partition cost and measured added SVG bytes. This rate-distortion rule is
 content-independent: compact clip-art features can receive more detail while
 expensive photographic texture is normally left at the base level. Accepted
 regions are fitted from the original pixels with a halo and clipped back into
-the base SVG. The byte budget and thresholds above control the quality/size
-tradeoff; `--no-adaptive-refinement` restores single-resolution processing.
+the base SVG across the surrounding background. A rendered boundary check
+rejects replacements that disagree with the retained base. The byte budget and
+thresholds above control the quality/size tradeoff; `--no-adaptive-refinement`
+restores single-resolution processing.
 Independent refinement regions run concurrently. The job count is bounded by
 the selected worker count and by a conservative estimate derived from the
 largest crop and currently available memory; `--verbose` reports the selected
 count as `adaptive_refinement.parallel_jobs`. Small source-native crops also
 skip the otherwise redundant automatic-resolution probe.
+
+The default candidate limit is 64, allowing individual figures in an icon
+sheet to be considered without cutting them to fit a fixed grid. This limit
+controls total candidates, not CPU workers. The SVG byte budget is unchanged.
+When transparent refinements replace the entire canvas, the hidden base paths
+and their gradient definitions are omitted from the final SVG.
+
+Narrow, source-supported outline bands can be represented by a centre-line
+and a jointly measured constant width before Paint segmentation. Both incident
+colours are reconstructed beneath the line, including boundaries between
+different materials. Only continuous intervals with a supported ink core and
+consistent width and colour are transferred; diffuse shadows and strongly
+varying bands retain their Paint representation. The existing residual line
+pass handles the remaining candidates. Diagnostic reports count these early
+transfers in the base pass as `structural.recovered_boundary_strokes`.
+See [outline recovery and performance validation](docs/line-quality-performance.md)
+for the model's limits and comparison procedure.
 
 Full-resolution source data waiting for adaptive refinement remains packed as
 RGB8 when it came directly from the decoder and as Q0.16 RGB only when matte or
@@ -177,6 +209,7 @@ separate SVG rasterization step currently uses `rsvg-convert`.
 1. Check the input size, choose a suitable base resolution, and resize the
    raster when needed.
 2. Detect colour regions, boundaries, shading, and thin structural lines.
+   Recover supported uniform-width outline bands and their two incident fills.
    Correct antialias pixels and merge only neighbouring regions that can share
    one fill without losing a visible boundary.
 3. Fit each region with a solid colour or a linear/radial gradient. Neighbouring

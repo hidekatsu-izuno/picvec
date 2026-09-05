@@ -20,8 +20,8 @@ pub struct Config {
     /// Refine source regions whose perceptual error reduction justifies the
     /// additional editable SVG representation cost.
     pub adaptive_refinement: bool,
-    /// Largest source-space side of a refinement core. Larger images are
-    /// partitioned into balanced regions whose sides fit this bound.
+    /// Largest source-space side of a refinement core. Oversized connected
+    /// figures retain their whole-image model instead of being split.
     pub adaptive_tile_dimension: u32,
     /// Maximum number of source regions evaluated by the full vector model.
     pub adaptive_max_patches: usize,
@@ -89,7 +89,7 @@ impl Default for Config {
             remove_chroma_key_background: false,
             adaptive_refinement: true,
             adaptive_tile_dimension: 1400,
-            adaptive_max_patches: 16,
+            adaptive_max_patches: 64,
             adaptive_svg_budget_bytes: 24 * 1024 * 1024,
             adaptive_min_perceptual_gain: 0.75,
             adaptive_min_predicted_rate: 2.5,

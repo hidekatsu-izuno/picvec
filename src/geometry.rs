@@ -2681,14 +2681,14 @@ fn structural_curve_path_data(curves: &[CurveSegment], closed: bool) -> String {
 /// recovered the subpixel crossing of the coverage field. Running those
 /// points through the ordinary Region geometry builder would discard that
 /// crossing and recreate a pixel-edge staircase.
-pub(crate) fn fitted_alpha_contour_path_data(points: &[Point]) -> String {
+fn fit_alpha_contour(points: &[Point]) -> (Vec<Point>, Vec<CurveSegment>) {
     if points.len() < 3 {
-        return String::new();
+        return (Vec::new(), Vec::new());
     }
     let mut source = points.to_vec();
     source.dedup_by(|left, right| left.distance(*right) <= 1e-5);
     if source.len() < 3 {
-        return String::new();
+        return (Vec::new(), Vec::new());
     }
     if source[0].distance(*source.last().unwrap()) > 1e-5 {
         source.push(source[0]);
@@ -2697,18 +2697,95 @@ pub(crate) fn fitted_alpha_contour_path_data(points: &[Point]) -> String {
         *source.last_mut().unwrap() = first;
     }
 
-    // The interpolated isoline is already the coverage observation, so it
-    // must not receive the Gaussian fairing used for integer grid edges. The
-    // cubic fitter still removes sampling-frequency corners while preserving
-    // actual corners selected from the contour itself.
-    let curves =
-        fit_shared_boundary_candidate(&source, true, 0.3, 0.0, 100.0, &HashSet::new(), None, None);
+    // Coverage isolines also contain raster stair steps (especially for binary
+    // alpha). Fair them with the same corner-preserving fitter as colour
+    // boundaries. Both the mask and its incident rim must use this exact fit.
+    if source.len() <= 12 {
+        // There is not enough support to distinguish a raster ripple from
+        // the entire feature. Do not fair away tiny islands or holes.
+        let curves = fit_shared_boundary_candidate(
+            &source,
+            true,
+            0.3,
+            0.0,
+            100.0,
+            &HashSet::new(),
+            None,
+            None,
+        );
+        return (source, curves);
+    }
+    // Keep sharp turns detected before fairing, including the tips of narrow
+    // bands: a smoothed corner probe can otherwise erase their end caps.
+    let corners = polyline_corner_indices(&source, true, 0.65, 100.0);
+    let count = source.len() - 1;
+    let mut fixed = corners.clone();
+    for &corner in &corners {
+        // Protect the small cap around a reversal as well as its vertex.
+        let before = source[(corner + count - 3) % count];
+        let after = source[(corner + 3) % count];
+        if before.distance(after) < 3.0 {
+            for offset in 0..=4.min(count - 1) {
+                fixed.insert((corner + offset) % count);
+                fixed.insert((corner + count - offset) % count);
+            }
+        }
+    }
+    let curves = fit_shared_boundary_candidate(&source, true, 0.65, 1.5, 100.0, &fixed, None, None);
+    (source, curves)
+}
+
+pub(crate) fn fitted_alpha_contour_path_data(points: &[Point]) -> String {
+    let (source, curves) = fit_alpha_contour(points);
+    if source.is_empty() {
+        return String::new();
+    }
     if curves.is_empty() {
         let mut cubics = 0;
         let mut lines = 0;
         return closed_path_data(&source[..source.len() - 1], &mut cubics, &mut lines);
     }
     structural_curve_path_data(&curves, true)
+}
+
+/// Exact pieces of the same curve used by the alpha mask. Edge ink must not
+/// independently refit this contour: subpixel disagreement creates dotted rims.
+pub(crate) struct AlphaContourSpan {
+    pub points: [Point; 3],
+    pub path_data: String,
+}
+
+pub(crate) fn alpha_contour_spans(points: &[Point]) -> Vec<AlphaContourSpan> {
+    let (source, mut curves) = fit_alpha_contour(points);
+    if source.is_empty() {
+        return Vec::new();
+    }
+    if curves.is_empty() {
+        curves = source
+            .windows(2)
+            .map(|p| straight_cubic(p[0], p[1]))
+            .collect();
+    }
+    let mut result = Vec::new();
+    for curve in curves {
+        let length: f32 = (0..8)
+            .map(|i| {
+                cubic_point(curve, i as f32 / 8.0)
+                    .distance(cubic_point(curve, (i + 1) as f32 / 8.0))
+            })
+            .sum();
+        let count = (length / 3.0).ceil().max(1.0) as usize;
+        let mut remainder = curve;
+        for i in 0..count {
+            let (part, rest) = split_curve(remainder, 1.0 / (count - i) as f64);
+            remainder = rest;
+            result.push(AlphaContourSpan {
+                points: [part.start(), cubic_point(part, 0.5), part.end()],
+                path_data: structural_curve_path_data(&[part], false),
+            });
+        }
+    }
+    result
 }
 
 /// Port of the structural layer's constrained centre-line fitter followed by
@@ -6947,6 +7024,98 @@ mod tests {
     use crate::color::rgb_to_lab;
     use crate::raster::Raster;
     use crate::segment::{RegionStats, Segmentation, SegmentationSummary};
+
+    #[test]
+    fn alpha_fairing_retains_rectangle_corners_and_small_islands() {
+        for (left, top, right, bottom) in [(20, 24, 76, 72), (40, 40, 41, 41)] {
+            let values = (0..96 * 96)
+                .map(|index| {
+                    let (x, y) = (index % 96, index / 96);
+                    if (left..right).contains(&x) && (top..bottom).contains(&y) {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                })
+                .collect();
+            let matte = crate::chroma::AlphaMatte::new(96, 96, values);
+            let contours = matte.isocontours(0.5);
+            assert_eq!(contours.len(), 1);
+            let (_, curves) = fit_alpha_contour(&contours[0]);
+            let samples = sample_curve_sequence(&curves, 0.1);
+            for (x, y) in [(left, top), (right, top), (right, bottom), (left, bottom)] {
+                let corner = Point {
+                    x: x as f32,
+                    y: y as f32,
+                };
+                let distance = samples
+                    .iter()
+                    .map(|point| point.distance(corner))
+                    .fold(f32::INFINITY, f32::min);
+                assert!(
+                    distance < 0.8,
+                    "corner rounded away: {corner:?}, distance={distance}"
+                );
+            }
+            let area = samples
+                .windows(2)
+                .map(|p| p[0].x * p[1].y - p[1].x * p[0].y)
+                .sum::<f32>()
+                .abs()
+                * 0.5;
+            assert!(
+                area > 0.3 * ((right - left) * (bottom - top)) as f32,
+                "island collapsed"
+            );
+        }
+    }
+
+    #[test]
+    fn raster_alpha_circle_has_smooth_turning_without_losing_its_shape() {
+        let size = 192;
+        let radius = 80.0;
+        let values = (0..size * size)
+            .map(|index| {
+                let x = (index % size) as f32 + 0.5 - 96.0;
+                let y = (index / size) as f32 + 0.5 - 96.0;
+                if x.hypot(y) < radius {
+                    1.0
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        let matte = crate::chroma::AlphaMatte::new(size, size, values);
+        let contours = matte.isocontours(0.5);
+        assert_eq!(contours.len(), 1);
+        let (_, curves) = fit_alpha_contour(&contours[0]);
+        let samples = sample_curve_sequence(&curves, 0.5);
+        for point in &samples {
+            assert!(
+                ((point.x - 96.0).hypot(point.y - 96.0) - radius).abs() < 0.9,
+                "smoothed silhouette moved too far: {point:?}"
+            );
+        }
+        let directions = samples
+            .windows(2)
+            .filter(|pair| pair[0].distance(pair[1]) > 1e-4)
+            .map(|pair| {
+                normalized(Point {
+                    x: pair[1].x - pair[0].x,
+                    y: pair[1].y - pair[0].y,
+                })
+            })
+            .collect::<Vec<_>>();
+        let total_turn: f32 = directions
+            .iter()
+            .zip(directions.iter().cycle().skip(1))
+            .map(|(a, b)| (a.x * b.y - a.y * b.x).atan2(a.x * b.x + a.y * b.y).abs())
+            .sum();
+        assert!(
+            total_turn < 8.0,
+            "raster ripples remain: total turn {total_turn}"
+        );
+    }
 
     #[test]
     fn smooth_closed_fit_has_no_corner_at_its_storage_origin() {

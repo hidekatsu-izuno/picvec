@@ -309,34 +309,57 @@ fn quantized_alpha_level(alpha: f32) -> u8 {
         .clamp(0.0, f32::from(SOURCE_ALPHA_MAXIMUM_LEVEL)) as u8
 }
 
-/// Preserve straight foreground RGB independently of source coverage.
-///
-/// Pixels with exactly zero source coverage are normalized to a stable colour
-/// so arbitrary hidden PNG RGB does not create vector complexity. Every
-/// nonzero sample retains straight RGB as underpaint, including samples below
-/// the first output-alpha threshold. The interpolated SVG contour can then
-/// move within that sample without exposing the normalization colour.
-#[cfg(test)]
-pub(crate) fn prepare_source_alpha(
-    image: &Raster,
-    matte: &AlphaMatte,
-    transparent_color: [f32; 3],
-) -> Raster {
-    if image.pixels.len() != matte.len() {
-        return image.clone();
+/// Extend visible straight RGB into uncovered samples. Alpha owns the silhouette;
+/// an invented backdrop must never become input to colour fitting or filtering.
+/// A deterministic multi-source wavefront uses only existing foreground colours.
+fn foreground_extension_owners(matte: &AlphaMatte, width: usize) -> Vec<usize> {
+    let mut owners: Vec<_> = (0..matte.len())
+        .map(|i| if matte.get(i) > 0.0 { i } else { usize::MAX })
+        .collect();
+    let mut queue = VecDeque::new();
+    let neighbours = |i: usize| {
+        [
+            (!i.is_multiple_of(width)).then(|| i - 1),
+            (i % width + 1 < width).then(|| i + 1),
+            (i >= width).then(|| i - width),
+            (i + width < matte.len()).then(|| i + width),
+        ]
+    };
+    for i in 0..owners.len() {
+        if owners[i] != usize::MAX
+            && neighbours(i)
+                .into_iter()
+                .flatten()
+                .any(|j| owners[j] == usize::MAX)
+        {
+            queue.push_back(i);
+        }
     }
+    while let Some(i) = queue.pop_front() {
+        for j in neighbours(i).into_iter().flatten() {
+            if owners[j] == usize::MAX {
+                owners[j] = owners[i];
+                queue.push_back(j);
+            }
+        }
+    }
+    owners
+}
+
+#[cfg(test)]
+pub(crate) fn prepare_source_alpha(image: &Raster, matte: &AlphaMatte) -> Raster {
+    assert_eq!(image.pixels.len(), matte.len());
+    let owners = foreground_extension_owners(matte, image.width);
     Raster::new(
         image.width,
         image.height,
-        image
-            .pixels
-            .iter()
-            .zip(matte.iter())
-            .map(|(&pixel, alpha)| {
-                if alpha <= 0.0 {
-                    transparent_color
+        owners
+            .into_iter()
+            .map(|i| {
+                if i == usize::MAX {
+                    [0.0; 3]
                 } else {
-                    pixel
+                    image.pixels[i]
                 }
             })
             .collect(),
@@ -346,14 +369,15 @@ pub(crate) fn prepare_source_alpha(
 pub(crate) fn prepare_compact_source_alpha(
     image: &SourceRaster,
     matte: &AlphaMatte,
-    transparent_color: [f32; 3],
 ) -> SourceRaster {
     assert_eq!(image.width * image.height, matte.len());
+    let owners = foreground_extension_owners(matte, image.width);
     SourceRaster::from_rgb8_fn(image.width, image.height, |index| {
-        if matte.get(index) <= 0.0 {
-            transparent_color
+        let owner = owners[index];
+        if owner == usize::MAX {
+            [0.0; 3]
         } else {
-            image.get(index % image.width, index / image.width)
+            image.get(owner % image.width, owner / image.width)
         }
     })
 }
@@ -630,12 +654,51 @@ impl AlphaMatte {
                 let x = index % width;
                 let y = index / width;
                 let level = levels[index];
-                durable[index] = x > 0
-                    && y > 0
-                    && x + 1 < width
-                    && y + 1 < height
-                    && (y - 1..=y + 1)
-                        .all(|py| (x - 1..=x + 1).all(|px| levels[py * width + px] == level));
+                // A remote opaque junction does not turn an entire translucent
+                // line into an antialias shoulder. Only local shoulders can
+                // be reassigned. A partial band bounded by clear pixels on
+                // both sides also owns its coverage, even near a junction.
+                let near_opaque = (y.saturating_sub(2)..=(y + 2).min(height - 1)).any(|py| {
+                    (x.saturating_sub(2)..=(x + 2).min(width - 1))
+                        .any(|px| levels[py * width + px] == SOURCE_ALPHA_MAXIMUM_LEVEL)
+                });
+                let touches_opaque_core =
+                    (y.saturating_sub(1)..=(y + 1).min(height - 1)).any(|py| {
+                        (x.saturating_sub(1)..=(x + 1).min(width - 1))
+                            .any(|px| levels[py * width + px] == SOURCE_ALPHA_MAXIMUM_LEVEL)
+                    });
+                let partial_band =
+                    [(1_isize, 0_isize), (0, 1), (1, 1), (1, -1)]
+                        .iter()
+                        .any(|&(dx, dy)| {
+                            [-1_isize, 1].iter().all(|&sign| {
+                                for step in 1..=2 {
+                                    let px = x as isize + sign * step * dx;
+                                    let py = y as isize + sign * step * dy;
+                                    if px < 0
+                                        || py < 0
+                                        || px >= width as isize
+                                        || py >= height as isize
+                                    {
+                                        return false;
+                                    }
+                                    match levels[py as usize * width + px as usize] {
+                                        0 => return true,
+                                        SOURCE_ALPHA_MAXIMUM_LEVEL => return false,
+                                        _ => {}
+                                    }
+                                }
+                                false
+                            })
+                        });
+                durable[index] = !near_opaque
+                    || (partial_band && !touches_opaque_core)
+                    || (x > 0
+                        && y > 0
+                        && x + 1 < width
+                        && y + 1 < height
+                        && (y - 1..=y + 1)
+                            .all(|py| (x - 1..=x + 1).all(|px| levels[py * width + px] == level)));
             }
         }
 
@@ -1164,6 +1227,24 @@ mod tests {
     }
 
     #[test]
+    fn partial_line_connected_to_opaque_junction_is_not_an_entire_shoulder() {
+        let mut values = vec![0.0; 64 * 64];
+        for y in 2..62 {
+            for x in 31..33 {
+                values[y * 64 + x] = 0.8;
+            }
+        }
+        values[32 * 64 + 31] = 1.0;
+        let levels = AlphaMatte::new(64, 64, values).vectorized_levels();
+        for y in 2..62 {
+            assert!(
+                levels[y * 64 + 31] > 0 && levels[y * 64 + 32] > 0,
+                "erased line at y={y}"
+            );
+        }
+    }
+
+    #[test]
     fn broad_partial_alpha_transition_keeps_a_durable_core() {
         let matte = AlphaMatte::new(
             5,
@@ -1218,8 +1299,8 @@ mod tests {
             vec![[0.8, 0.1, 0.2], [0.1, 0.8, 0.2], [0.1, 0.2, 0.8]],
         );
         let matte = AlphaMatte::new(3, 1, vec![0.0, 0.1, 1.0]);
-        let prepared = prepare_source_alpha(&image, &matte, [1.0, 0.0, 1.0]);
-        assert_eq!(prepared.pixels[0], [1.0, 0.0, 1.0]);
+        let prepared = prepare_source_alpha(&image, &matte);
+        assert_eq!(prepared.pixels[0], image.pixels[1]);
         assert_eq!(prepared.pixels[1], image.pixels[1]);
         assert_eq!(prepared.pixels[2], image.pixels[2]);
     }
