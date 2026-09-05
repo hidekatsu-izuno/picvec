@@ -75,7 +75,7 @@ struct Arguments {
     /// Spatial coherence required for a face below minimum gradient area.
     #[arg(long, default_value_t = 0.24)]
     paint_primary_small_threshold: f32,
-    /// Rayon workers; zero selects the detected physical core count.
+    /// Rayon workers; zero selects min(4, half the detected CPU count).
     #[arg(long, default_value_t = 0)]
     threads: usize,
     /// Render the completed SVG and report DeltaE00/SSIM diagnostics.

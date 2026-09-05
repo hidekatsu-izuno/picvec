@@ -8,11 +8,13 @@
 //! the Vlahos form discussed by Smith and Blinn, "Blue Screen Matting",
 //! SIGGRAPH 1996, DOI 10.1145/237170.237263.
 
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+
 use image::{imageops::FilterType, ImageBuffer, Luma};
 use serde::Serialize;
 
 use crate::geometry::Point;
-use crate::raster::Raster;
+use crate::raster::{Raster, RasterSource, SourceRaster};
 
 const KEY_CORNERS: [[f32; 3]; 6] = [
     [1.0, 0.0, 0.0],
@@ -26,6 +28,8 @@ const KEY_SAMPLE_DISTANCE: f32 = 56.0 / 255.0;
 const MINIMUM_BORDER_COVERAGE: f32 = 0.20;
 const MAXIMUM_BORDER_BAND_DEPTH: usize = 64;
 const BACKGROUND_OWNERSHIP_ALPHA: f32 = 0.50;
+pub(crate) const SOURCE_ALPHA_QUANTIZATION_BITS: u8 = 2;
+const SOURCE_ALPHA_MAXIMUM_LEVEL: u8 = (1 << SOURCE_ALPHA_QUANTIZATION_BITS) - 1;
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ChromaKey {
@@ -38,7 +42,32 @@ pub(crate) struct ChromaKey {
 pub(crate) struct AlphaMatte {
     pub width: usize,
     pub height: usize,
-    pub values: Vec<f32>,
+    values: AlphaValues,
+}
+
+#[derive(Clone, Debug)]
+enum AlphaValues {
+    /// Exact synthetic coverage used by focused unit tests.
+    #[cfg(test)]
+    Float(Vec<f32>),
+    /// Q0.16 inferred coverage retained at full source resolution.
+    Unorm16(Vec<u16>),
+    /// Exact source alpha. The decoder has already reduced the input to eight
+    /// bits, so retaining bytes is lossless relative to the previous `f32`
+    /// representation.
+    Byte(Vec<u8>),
+    /// Four exact source-alpha levels, packed four pixels per byte.
+    Packed2 { bytes: Vec<u8>, len: usize },
+}
+
+/// A marching-squares crossing is identified by the source-sample edge, not
+/// by a rounded coordinate. This makes adjacent cells share the exact same
+/// vertex even when interpolation produces a non-terminating `f32` value.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum AlphaContourVertex {
+    Horizontal(i32, i32),
+    Vertical(i32, i32),
+    CanvasCorner(i32, i32),
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -56,6 +85,12 @@ pub struct AlphaTransparencySummary {
     pub detected: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temporary_backing_color: Option<[u8; 3]>,
+    /// Maximum bit depth used for durable authored transparency. An
+    /// antialiased opaque silhouette may collapse to one binary mask path.
+    /// Zero means that source alpha was not present.
+    pub quantization_bits: u8,
+    /// Number of vector paths used by the resulting alpha mask.
+    pub mask_paths: usize,
     pub removed_regions: usize,
 }
 
@@ -118,8 +153,8 @@ fn median(mut values: Vec<f32>) -> f32 {
 /// exact perimeter tolerates narrow frames and edge resampling.  The
 /// component-wise median then represents small encoder, lighting, or
 /// quantisation errors in the backing.
-pub(crate) fn detect(image: &Raster) -> Option<ChromaKey> {
-    let border = border_indices(image.width, image.height);
+pub(crate) fn detect<R: RasterSource + ?Sized>(image: &R) -> Option<ChromaKey> {
+    let border = border_indices(image.width(), image.height());
     if border.is_empty() {
         return None;
     }
@@ -129,7 +164,7 @@ pub(crate) fn detect(image: &Raster) -> Option<ChromaKey> {
         let samples = border
             .iter()
             .filter_map(|&index| {
-                let pixel = image.pixels[index];
+                let pixel = image.get(index % image.width(), index / image.width());
                 (squared_distance(pixel, corner) <= maximum_squared_distance).then_some(pixel)
             })
             .collect::<Vec<_>>();
@@ -193,31 +228,39 @@ fn coverage(pixel: [f32; 3], key: ChromaKey) -> f32 {
 /// Pull a soft matte from an already keyed opaque raster.  The raster itself
 /// remains on its detected backing throughout vectorization; only matching
 /// vector regions are omitted from the final SVG.
-pub(crate) fn pull_matte(image: &Raster, key: ChromaKey) -> AlphaMatte {
-    let mut values = Vec::with_capacity(image.pixels.len());
-    for &pixel in &image.pixels {
-        values.push(coverage(pixel, key));
+pub(crate) fn pull_matte<R: RasterSource + ?Sized>(image: &R, key: ChromaKey) -> AlphaMatte {
+    let len = image.width() * image.height();
+    let mut values = Vec::with_capacity(len);
+    for index in 0..len {
+        let alpha = coverage(image.get(index % image.width(), index / image.width()), key);
+        values.push((alpha * 65_535.0).round() as u16);
     }
     AlphaMatte {
-        width: image.width,
-        height: image.height,
-        values,
+        width: image.width(),
+        height: image.height(),
+        values: AlphaValues::Unorm16(values),
     }
 }
 
 /// Choose the saturated RGB corner farthest, on average, from pixels with
 /// source coverage.  This temporary backing makes alpha boundaries visible to
 /// the ordinary RGB vectorizer and is removed again after geometry fitting.
-pub(crate) fn select_alpha_backing(image: &Raster, matte: &AlphaMatte) -> [f32; 3] {
+pub(crate) fn select_alpha_backing<R: RasterSource + ?Sized>(
+    image: &R,
+    matte: &AlphaMatte,
+) -> [f32; 3] {
     KEY_CORNERS
         .into_iter()
         .max_by(|&first, &second| {
             let score = |corner| {
-                image
-                    .pixels
-                    .iter()
-                    .zip(&matte.values)
-                    .map(|(&pixel, &alpha)| squared_distance(pixel, corner) * alpha)
+                (0..image.width() * image.height())
+                    .zip(matte.iter())
+                    .map(|(index, alpha)| {
+                        squared_distance(
+                            image.get(index % image.width(), index / image.width()),
+                            corner,
+                        ) * alpha
+                    })
                     .sum::<f32>()
             };
             score(first).total_cmp(&score(second))
@@ -226,7 +269,7 @@ pub(crate) fn select_alpha_backing(image: &Raster, matte: &AlphaMatte) -> [f32; 
 }
 
 pub(crate) fn composite_over(image: &Raster, matte: &AlphaMatte, backing: [f32; 3]) -> Raster {
-    if image.pixels.len() != matte.values.len() {
+    if image.pixels.len() != matte.len() {
         return image.clone();
     }
     Raster::new(
@@ -235,8 +278,8 @@ pub(crate) fn composite_over(image: &Raster, matte: &AlphaMatte, backing: [f32; 
         image
             .pixels
             .iter()
-            .zip(&matte.values)
-            .map(|(&pixel, &alpha)| {
+            .zip(matte.iter())
+            .map(|(&pixel, alpha)| {
                 let alpha = alpha.clamp(0.0, 1.0);
                 [0, 1, 2].map(|channel| pixel[channel] * alpha + backing[channel] * (1.0 - alpha))
             })
@@ -244,12 +287,42 @@ pub(crate) fn composite_over(image: &Raster, matte: &AlphaMatte, backing: [f32; 
     )
 }
 
-/// Turn the soft keyed boundary into vector ownership while removing backing
-/// contamination from the retained side.  Pixels below the half-coverage
-/// crossing become uniform backing; pixels above it are unmixed with the
-/// standard compositing equation before ordinary colour segmentation.
-pub(crate) fn separate_foreground(image: &Raster, matte: &AlphaMatte, backing: [f32; 3]) -> Raster {
-    if image.pixels.len() != matte.values.len() {
+/// Build the retained alpha-composited reference directly in Q0.16 storage.
+/// It is sampled for adaptive scoring but expanded to `f32` only for pixels
+/// that are actually visited or cropped.
+pub(crate) fn composite_source_over(
+    image: &SourceRaster,
+    matte: &AlphaMatte,
+    backing: [f32; 3],
+) -> SourceRaster {
+    assert_eq!(image.width * image.height, matte.len());
+    SourceRaster::from_unorm16_fn(image.width, image.height, |index| {
+        let pixel = image.get(index % image.width, index / image.width);
+        let alpha = matte.get(index).clamp(0.0, 1.0);
+        [0, 1, 2].map(|channel| pixel[channel] * alpha + backing[channel] * (1.0 - alpha))
+    })
+}
+
+fn quantized_alpha_level(alpha: f32) -> u8 {
+    (alpha.clamp(0.0, 1.0) * f32::from(SOURCE_ALPHA_MAXIMUM_LEVEL))
+        .round()
+        .clamp(0.0, f32::from(SOURCE_ALPHA_MAXIMUM_LEVEL)) as u8
+}
+
+/// Preserve straight foreground RGB independently of source coverage.
+///
+/// Pixels with exactly zero source coverage are normalized to a stable colour
+/// so arbitrary hidden PNG RGB does not create vector complexity. Every
+/// nonzero sample retains straight RGB as underpaint, including samples below
+/// the first output-alpha threshold. The interpolated SVG contour can then
+/// move within that sample without exposing the normalization colour.
+#[cfg(test)]
+pub(crate) fn prepare_source_alpha(
+    image: &Raster,
+    matte: &AlphaMatte,
+    transparent_color: [f32; 3],
+) -> Raster {
+    if image.pixels.len() != matte.len() {
         return image.clone();
     }
     Raster::new(
@@ -258,8 +331,50 @@ pub(crate) fn separate_foreground(image: &Raster, matte: &AlphaMatte, backing: [
         image
             .pixels
             .iter()
-            .zip(&matte.values)
-            .map(|(&pixel, &alpha)| {
+            .zip(matte.iter())
+            .map(|(&pixel, alpha)| {
+                if alpha <= 0.0 {
+                    transparent_color
+                } else {
+                    pixel
+                }
+            })
+            .collect(),
+    )
+}
+
+pub(crate) fn prepare_compact_source_alpha(
+    image: &SourceRaster,
+    matte: &AlphaMatte,
+    transparent_color: [f32; 3],
+) -> SourceRaster {
+    assert_eq!(image.width * image.height, matte.len());
+    SourceRaster::from_rgb8_fn(image.width, image.height, |index| {
+        if matte.get(index) <= 0.0 {
+            transparent_color
+        } else {
+            image.get(index % image.width, index / image.width)
+        }
+    })
+}
+
+/// Turn the soft keyed boundary into vector ownership while removing backing
+/// contamination from the retained side.  Pixels below the half-coverage
+/// crossing become uniform backing; pixels above it are unmixed with the
+/// standard compositing equation before ordinary colour segmentation.
+#[cfg(test)]
+pub(crate) fn separate_foreground(image: &Raster, matte: &AlphaMatte, backing: [f32; 3]) -> Raster {
+    if image.pixels.len() != matte.len() {
+        return image.clone();
+    }
+    Raster::new(
+        image.width,
+        image.height,
+        image
+            .pixels
+            .iter()
+            .zip(matte.iter())
+            .map(|(&pixel, alpha)| {
                 let alpha = alpha.clamp(0.0, 1.0);
                 if alpha < BACKGROUND_OWNERSHIP_ALPHA {
                     backing
@@ -274,13 +389,124 @@ pub(crate) fn separate_foreground(image: &Raster, matte: &AlphaMatte, backing: [
     )
 }
 
+pub(crate) fn separate_compact_foreground(
+    image: &SourceRaster,
+    matte: &AlphaMatte,
+    backing: [f32; 3],
+) -> SourceRaster {
+    assert_eq!(image.width * image.height, matte.len());
+    SourceRaster::from_unorm16_fn(image.width, image.height, |index| {
+        let pixel = image.get(index % image.width, index / image.width);
+        let alpha = matte.get(index).clamp(0.0, 1.0);
+        if alpha < BACKGROUND_OWNERSHIP_ALPHA {
+            backing
+        } else {
+            [0, 1, 2].map(|channel| {
+                ((pixel[channel] - backing[channel] * (1.0 - alpha)) / alpha.max(1e-6))
+                    .clamp(0.0, 1.0)
+            })
+        }
+    })
+}
+
 impl AlphaMatte {
+    #[cfg(test)]
     pub(crate) fn new(width: usize, height: usize, values: Vec<f32>) -> Self {
         assert_eq!(values.len(), width * height);
         Self {
             width,
             height,
-            values,
+            values: AlphaValues::Float(values),
+        }
+    }
+
+    pub(crate) fn from_u8(width: usize, height: usize, values: Vec<u8>) -> Self {
+        assert_eq!(values.len(), width * height);
+        Self {
+            width,
+            height,
+            values: AlphaValues::Byte(values),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn len(&self) -> usize {
+        match &self.values {
+            #[cfg(test)]
+            AlphaValues::Float(values) => values.len(),
+            AlphaValues::Unorm16(values) => values.len(),
+            AlphaValues::Byte(values) => values.len(),
+            AlphaValues::Packed2 { len, .. } => *len,
+        }
+    }
+
+    #[inline]
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    #[inline]
+    pub(crate) fn get(&self, index: usize) -> f32 {
+        match &self.values {
+            #[cfg(test)]
+            AlphaValues::Float(values) => values[index],
+            AlphaValues::Unorm16(values) => f32::from(values[index]) / 65_535.0,
+            AlphaValues::Byte(values) => f32::from(values[index]) / 255.0,
+            AlphaValues::Packed2 { bytes, len } => {
+                assert!(index < *len);
+                let shift = (index & 3) * SOURCE_ALPHA_QUANTIZATION_BITS as usize;
+                f32::from((bytes[index / 4] >> shift) & SOURCE_ALPHA_MAXIMUM_LEVEL)
+                    / f32::from(SOURCE_ALPHA_MAXIMUM_LEVEL)
+            }
+        }
+    }
+
+    fn iter(&self) -> impl ExactSizeIterator<Item = f32> + '_ {
+        (0..self.len()).map(|index| self.get(index))
+    }
+
+    #[cfg(test)]
+    fn storage_bytes(&self) -> usize {
+        match &self.values {
+            #[cfg(test)]
+            AlphaValues::Float(values) => std::mem::size_of_val(values.as_slice()),
+            AlphaValues::Unorm16(values) => std::mem::size_of_val(values.as_slice()),
+            AlphaValues::Byte(values) => values.len(),
+            AlphaValues::Packed2 { bytes, .. } => bytes.len(),
+        }
+    }
+
+    #[inline]
+    fn quantized_level_at(&self, index: usize) -> u8 {
+        match &self.values {
+            AlphaValues::Packed2 { bytes, len } => {
+                assert!(index < *len);
+                let shift = (index & 3) * SOURCE_ALPHA_QUANTIZATION_BITS as usize;
+                (bytes[index / 4] >> shift) & SOURCE_ALPHA_MAXIMUM_LEVEL
+            }
+            _ => quantized_alpha_level(self.get(index)),
+        }
+    }
+
+    fn packed_2bit_from_levels(
+        width: usize,
+        height: usize,
+        levels: impl IntoIterator<Item = u8>,
+    ) -> Self {
+        let len = width * height;
+        let mut bytes = vec![0_u8; len.div_ceil(4)];
+        let mut count = 0_usize;
+        for (index, level) in levels.into_iter().enumerate() {
+            assert!(index < len);
+            let shift = (index & 3) * SOURCE_ALPHA_QUANTIZATION_BITS as usize;
+            bytes[index / 4] |= (level & SOURCE_ALPHA_MAXIMUM_LEVEL) << shift;
+            count += 1;
+        }
+        assert_eq!(count, len);
+        Self {
+            width,
+            height,
+            values: AlphaValues::Packed2 { bytes, len },
         }
     }
 
@@ -292,34 +518,436 @@ impl AlphaMatte {
             self.width as u32,
             self.height as u32,
             |x, y| {
-                Luma([
-                    (self.values[y as usize * self.width + x as usize].clamp(0.0, 1.0) * 255.0)
-                        .round() as u8,
-                ])
+                Luma([(self
+                    .get(y as usize * self.width + x as usize)
+                    .clamp(0.0, 1.0)
+                    * 255.0)
+                    .round() as u8])
             },
         );
         let resized =
             image::imageops::resize(&source, width as u32, height as u32, FilterType::Lanczos3);
-        let values = resized
-            .pixels()
-            .map(|pixel| pixel[0] as f32 / 255.0)
-            .collect();
-        Self {
+        Self::from_u8(
             width,
             height,
-            values,
+            resized.pixels().map(|pixel| pixel[0]).collect(),
+        )
+    }
+
+    /// Quantize exact source coverage to the four values representable by a
+    /// two-bit alpha channel: 0, 1/3, 2/3, and 1.
+    pub(crate) fn quantized_2bit(&self) -> Self {
+        if matches!(self.values, AlphaValues::Packed2 { .. }) {
+            return self.clone();
         }
+        Self::packed_2bit_from_levels(
+            self.width,
+            self.height,
+            (0..self.len()).map(|index| self.quantized_level_at(index)),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn quantized_levels(&self) -> Vec<u8> {
+        (0..self.len())
+            .map(|index| self.quantized_level_at(index))
+            .collect()
+    }
+
+    /// Reduce raster coverage shoulders to durable vector alpha regions.
+    ///
+    /// A thin connected run of intermediate alpha between clear and opaque is
+    /// sampling coverage, not an authored translucent object. Keeping it as
+    /// two extra SVG bands creates a visible grey outline at large zoom. Such
+    /// pixels are reassigned to their nearest durable alpha region. A partial
+    /// component touching only one extreme is retained, as is the eroded core
+    /// of a broad transition, so intentional translucent fills and gradients
+    /// still survive the conversion.
+    pub(crate) fn vectorized_levels(&self) -> Vec<u8> {
+        let levels = (0..self.len())
+            .map(|index| self.quantized_level_at(index))
+            .collect::<Vec<_>>();
+        if levels.is_empty() {
+            return levels;
+        }
+        let width = self.width;
+        let height = self.height;
+        let mut durable = levels
+            .iter()
+            .map(|&level| level == 0 || level == SOURCE_ALPHA_MAXIMUM_LEVEL)
+            .collect::<Vec<_>>();
+        let mut visited = vec![false; levels.len()];
+
+        for start in 0..levels.len() {
+            if visited[start] || levels[start] == 0 || levels[start] == SOURCE_ALPHA_MAXIMUM_LEVEL {
+                continue;
+            }
+            visited[start] = true;
+            let mut pending = vec![start];
+            let mut component = Vec::<usize>::new();
+            let mut touches_clear = false;
+            let mut touches_opaque = false;
+            while let Some(index) = pending.pop() {
+                component.push(index);
+                let x = index % width;
+                let y = index / width;
+                for dy in -1_isize..=1 {
+                    for dx in -1_isize..=1 {
+                        if dx == 0 && dy == 0 {
+                            continue;
+                        }
+                        let px = x as isize + dx;
+                        let py = y as isize + dy;
+                        if px < 0 || py < 0 || px >= width as isize || py >= height as isize {
+                            touches_clear = true;
+                            continue;
+                        }
+                        let neighbour = py as usize * width + px as usize;
+                        match levels[neighbour] {
+                            0 => touches_clear = true,
+                            SOURCE_ALPHA_MAXIMUM_LEVEL => touches_opaque = true,
+                            _ if !visited[neighbour] => {
+                                visited[neighbour] = true;
+                                pending.push(neighbour);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+
+            if !touches_clear || !touches_opaque {
+                for index in component {
+                    durable[index] = true;
+                }
+                continue;
+            }
+
+            // A 3x3 same-level interior is wider than an ordinary one-pixel
+            // coverage shoulder. Retain it as evidence of authored opacity;
+            // its boundary samples will be assigned from these core seeds.
+            for index in component {
+                let x = index % width;
+                let y = index / width;
+                let level = levels[index];
+                durable[index] = x > 0
+                    && y > 0
+                    && x + 1 < width
+                    && y + 1 < height
+                    && (y - 1..=y + 1)
+                        .all(|py| (x - 1..=x + 1).all(|px| levels[py * width + px] == level));
+            }
+        }
+
+        let mut distance = vec![usize::MAX; levels.len()];
+        let mut owners = vec![u8::MAX; levels.len()];
+        let mut queue = VecDeque::<usize>::new();
+        for index in 0..levels.len() {
+            if durable[index] {
+                distance[index] = 0;
+                owners[index] = levels[index];
+                queue.push_back(index);
+            }
+        }
+        if queue.is_empty() {
+            return levels;
+        }
+
+        while let Some(index) = queue.pop_front() {
+            let x = index % width;
+            let y = index / width;
+            for neighbour in [
+                (x > 0).then(|| index - 1),
+                (x + 1 < width).then_some(index + 1),
+                (y > 0).then(|| index - width),
+                (y + 1 < height).then_some(index + width),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                if durable[neighbour] {
+                    continue;
+                }
+                let candidate_distance = distance[index].saturating_add(1);
+                let candidate_owner = owners[index];
+                let target = self.get(neighbour) * f32::from(SOURCE_ALPHA_MAXIMUM_LEVEL);
+                let candidate_error = (target - f32::from(candidate_owner)).abs();
+                let current_error = (target - f32::from(owners[neighbour])).abs();
+                let better_tie = candidate_distance == distance[neighbour]
+                    && (candidate_error < current_error
+                        || (candidate_error == current_error
+                            && candidate_owner < owners[neighbour]));
+                if candidate_distance < distance[neighbour] || better_tie {
+                    distance[neighbour] = candidate_distance;
+                    owners[neighbour] = candidate_owner;
+                    queue.push_back(neighbour);
+                }
+            }
+        }
+        owners
+    }
+
+    fn contour_sample(&self, x: i32, y: i32) -> f32 {
+        if x < 0 || y < 0 || x >= self.width as i32 || y >= self.height as i32 {
+            0.0
+        } else {
+            self.get(y as usize * self.width + x as usize)
+        }
+    }
+
+    fn contour_point(&self, vertex: AlphaContourVertex, threshold: f32) -> Point {
+        let interpolate = |first: f32, second: f32| {
+            if (second - first).abs() <= 1e-8 {
+                0.5
+            } else {
+                ((threshold - first) / (second - first)).clamp(0.0, 1.0)
+            }
+        };
+        match vertex {
+            AlphaContourVertex::Horizontal(x, y) => {
+                // Crossings against the virtual clear ring belong exactly on
+                // the SVG viewport edge. Letting the interpolation threshold
+                // move these crossings inward would incorrectly feather an
+                // opaque object merely because it touches the canvas border.
+                let position = if x < 0 {
+                    0.0
+                } else if x + 1 >= self.width as i32 {
+                    self.width as f32
+                } else {
+                    x as f32
+                        + 0.5
+                        + interpolate(self.contour_sample(x, y), self.contour_sample(x + 1, y))
+                };
+                Point {
+                    x: position,
+                    y: y as f32 + 0.5,
+                }
+            }
+            AlphaContourVertex::Vertical(x, y) => {
+                let position = if y < 0 {
+                    0.0
+                } else if y + 1 >= self.height as i32 {
+                    self.height as f32
+                } else {
+                    y as f32
+                        + 0.5
+                        + interpolate(self.contour_sample(x, y), self.contour_sample(x, y + 1))
+                };
+                Point {
+                    x: x as f32 + 0.5,
+                    y: position,
+                }
+            }
+            AlphaContourVertex::CanvasCorner(x, y) => Point {
+                x: x as f32,
+                y: y as f32,
+            },
+        }
+    }
+
+    /// Recover closed alpha isolines in pixel-centre coordinates.
+    ///
+    /// Exact source alpha is a coverage sample, not a label located at a pixel
+    /// edge. Interpolating the crossing between neighbouring samples avoids
+    /// baking the source raster staircase into an otherwise resolution-
+    /// independent SVG mask. A clear virtual ring closes contours at the
+    /// viewport; corner cells are routed through the exact canvas corner so a
+    /// fully covered image remains fully covered up to its clip boundary.
+    pub(crate) fn isocontours(&self, threshold: f32) -> Vec<Vec<Point>> {
+        if self.width == 0 || self.height == 0 || !(0.0..=1.0).contains(&threshold) {
+            return Vec::new();
+        }
+        type Segment = (AlphaContourVertex, AlphaContourVertex);
+        let normalized = |first: AlphaContourVertex, second: AlphaContourVertex| -> Segment {
+            if first < second {
+                (first, second)
+            } else {
+                (second, first)
+            }
+        };
+        let mut segments = BTreeSet::<Segment>::new();
+        let mut add = |first: AlphaContourVertex, second: AlphaContourVertex| {
+            if first != second {
+                segments.insert(normalized(first, second));
+            }
+        };
+
+        let width = self.width as i32;
+        let height = self.height as i32;
+        for y in -1..height {
+            for x in -1..width {
+                let top_left = self.contour_sample(x, y);
+                let top_right = self.contour_sample(x + 1, y);
+                let bottom_right = self.contour_sample(x + 1, y + 1);
+                let bottom_left = self.contour_sample(x, y + 1);
+                let case = u8::from(top_left >= threshold)
+                    | (u8::from(top_right >= threshold) << 1)
+                    | (u8::from(bottom_right >= threshold) << 2)
+                    | (u8::from(bottom_left >= threshold) << 3);
+                if case == 0 || case == 15 {
+                    continue;
+                }
+                let top = AlphaContourVertex::Horizontal(x, y);
+                let right = AlphaContourVertex::Vertical(x + 1, y);
+                let bottom = AlphaContourVertex::Horizontal(x, y + 1);
+                let left = AlphaContourVertex::Vertical(x, y);
+
+                // The four padded corner cells otherwise cut diagonally
+                // between boundary midpoints and leave a transparent triangle
+                // in an opaque canvas corner.
+                if x == -1 && y == -1 && case == 4 {
+                    let corner = AlphaContourVertex::CanvasCorner(0, 0);
+                    add(right, corner);
+                    add(corner, bottom);
+                    continue;
+                }
+                if x == width - 1 && y == -1 && case == 8 {
+                    let corner = AlphaContourVertex::CanvasCorner(width, 0);
+                    add(left, corner);
+                    add(corner, bottom);
+                    continue;
+                }
+                if x == -1 && y == height - 1 && case == 2 {
+                    let corner = AlphaContourVertex::CanvasCorner(0, height);
+                    add(top, corner);
+                    add(corner, right);
+                    continue;
+                }
+                if x == width - 1 && y == height - 1 && case == 1 {
+                    let corner = AlphaContourVertex::CanvasCorner(width, height);
+                    add(top, corner);
+                    add(corner, left);
+                    continue;
+                }
+
+                let centre_inside =
+                    0.25 * (top_left + top_right + bottom_right + bottom_left) >= threshold;
+                match case {
+                    1 => add(top, left),
+                    2 => add(top, right),
+                    3 => add(left, right),
+                    4 => add(right, bottom),
+                    5 if centre_inside => {
+                        add(top, right);
+                        add(bottom, left);
+                    }
+                    5 => {
+                        add(top, left);
+                        add(right, bottom);
+                    }
+                    6 => add(top, bottom),
+                    7 => add(left, bottom),
+                    8 => add(bottom, left),
+                    9 => add(top, bottom),
+                    10 if centre_inside => {
+                        add(top, left);
+                        add(right, bottom);
+                    }
+                    10 => {
+                        add(top, right);
+                        add(bottom, left);
+                    }
+                    11 => add(right, bottom),
+                    12 => add(left, right),
+                    13 => add(top, right),
+                    14 => add(top, left),
+                    _ => unreachable!("all marching-squares cases are covered"),
+                }
+            }
+        }
+
+        let mut adjacency = BTreeMap::<AlphaContourVertex, Vec<AlphaContourVertex>>::new();
+        for &(first, second) in &segments {
+            adjacency.entry(first).or_default().push(second);
+            adjacency.entry(second).or_default().push(first);
+        }
+        for neighbours in adjacency.values_mut() {
+            neighbours.sort_unstable();
+            neighbours.dedup();
+        }
+
+        let mut remaining = segments;
+        let mut contours = Vec::<Vec<Point>>::new();
+        while let Some(&(start, following)) = remaining.iter().next() {
+            remaining.remove(&normalized(start, following));
+            let mut vertices = vec![start];
+            let mut current = following;
+            let mut closed = false;
+            while vertices.len() <= adjacency.len() + 1 {
+                if current == start {
+                    closed = true;
+                    break;
+                }
+                vertices.push(current);
+                let next = adjacency
+                    .get(&current)
+                    .into_iter()
+                    .flatten()
+                    .copied()
+                    .find(|&candidate| remaining.contains(&normalized(current, candidate)));
+                let Some(next) = next else {
+                    break;
+                };
+                remaining.remove(&normalized(current, next));
+                current = next;
+            }
+            if !closed {
+                continue;
+            }
+            let mut points = vertices
+                .into_iter()
+                .map(|vertex| self.contour_point(vertex, threshold))
+                .collect::<Vec<_>>();
+            points.dedup_by(|left, right| left.distance(*right) <= 1e-5);
+            if points.len() >= 3 {
+                contours.push(points);
+            }
+        }
+        contours
     }
 
     pub(crate) fn crop(&self, x: usize, y: usize, width: usize, height: usize) -> Self {
         assert!(x <= self.width && y <= self.height);
         let width = width.min(self.width - x);
         let height = height.min(self.height - y);
-        let mut values = Vec::with_capacity(width * height);
-        for row in y..y + height {
-            let start = row * self.width + x;
-            values.extend_from_slice(&self.values[start..start + width]);
+        if matches!(self.values, AlphaValues::Packed2 { .. }) {
+            return Self::packed_2bit_from_levels(
+                width,
+                height,
+                (y..y + height).flat_map(|row| {
+                    let start = row * self.width + x;
+                    (start..start + width).map(|index| self.quantized_level_at(index))
+                }),
+            );
         }
+        let values = match &self.values {
+            AlphaValues::Unorm16(source) => {
+                let mut values = Vec::with_capacity(width * height);
+                for row in y..y + height {
+                    let start = row * self.width + x;
+                    values.extend_from_slice(&source[start..start + width]);
+                }
+                AlphaValues::Unorm16(values)
+            }
+            AlphaValues::Byte(source) => {
+                let mut values = Vec::with_capacity(width * height);
+                for row in y..y + height {
+                    let start = row * self.width + x;
+                    values.extend_from_slice(&source[start..start + width]);
+                }
+                AlphaValues::Byte(values)
+            }
+            #[cfg(test)]
+            AlphaValues::Float(source) => {
+                let mut values = Vec::with_capacity(width * height);
+                for row in y..y + height {
+                    let start = row * self.width + x;
+                    values.extend_from_slice(&source[start..start + width]);
+                }
+                AlphaValues::Float(values)
+            }
+            AlphaValues::Packed2 { .. } => unreachable!("packed matte returned above"),
+        };
         Self {
             width,
             height,
@@ -328,7 +956,7 @@ impl AlphaMatte {
     }
 
     fn sample_nearest(&self, point: Point) -> f32 {
-        if self.width == 0 || self.height == 0 || self.values.is_empty() {
+        if self.width == 0 || self.height == 0 || self.is_empty() {
             return 1.0;
         }
         let x = point
@@ -339,7 +967,7 @@ impl AlphaMatte {
             .y
             .round()
             .clamp(0.0, self.height.saturating_sub(1) as f32) as usize;
-        self.values[y * self.width + x]
+        self.get(y * self.width + x)
     }
 
     pub(crate) fn retains_stroke(&self, points: &[Point]) -> bool {
@@ -363,13 +991,13 @@ pub(crate) fn background_regions(
     region_count: usize,
     matte: &AlphaMatte,
 ) -> Vec<bool> {
-    if labels.len() != matte.values.len() {
+    if labels.len() != matte.len() {
         return vec![false; region_count];
     }
     let mut areas = vec![0_usize; region_count];
     let mut background_owned = vec![0_usize; region_count];
     let mut alpha_sum = vec![0.0_f64; region_count];
-    for (&label, &alpha) in labels.iter().zip(&matte.values) {
+    for (&label, alpha) in labels.iter().zip(matte.iter()) {
         let label = label as usize;
         if label >= region_count {
             continue;
@@ -449,8 +1077,8 @@ mod tests {
         // Half-covered neutral gray and black over green.
         let source = Raster::new(2, 1, vec![[0.25, 0.75, 0.25], [0.0, 0.5, 0.0]]);
         let matte = pull_matte(&source, key);
-        assert!((matte.values[0] - 0.5).abs() < 1e-6);
-        assert!((matte.values[1] - 0.5).abs() < 1e-6);
+        assert!((matte.get(0) - 0.5).abs() <= 0.5 / 65_535.0);
+        assert!((matte.get(1) - 0.5).abs() <= 0.5 / 65_535.0);
     }
 
     #[test]
@@ -461,7 +1089,10 @@ mod tests {
             border_coverage: 1.0,
         };
         let source = Raster::new(2, 1, vec![[1.0, 1.0, 0.0], [0.0, 1.0, 1.0]]);
-        assert_eq!(pull_matte(&source, key).values, vec![1.0, 1.0]);
+        assert_eq!(
+            pull_matte(&source, key).iter().collect::<Vec<_>>(),
+            vec![1.0, 1.0]
+        );
     }
 
     #[test]
@@ -471,6 +1102,126 @@ mod tests {
         let composed = composite_over(&image, &matte, [0.0, 1.0, 0.0]);
         assert_eq!(composed.pixels[0], [0.0, 1.0, 0.0]);
         assert_eq!(composed.pixels[1], [0.25, 0.75, 0.25]);
+    }
+
+    #[test]
+    fn source_alpha_is_quantized_to_four_uniform_levels() {
+        let matte = AlphaMatte::new(8, 1, vec![0.0, 0.10, 0.17, 0.49, 0.50, 0.82, 0.84, 1.0]);
+        let quantized = matte.quantized_2bit();
+        assert_eq!(
+            quantized.iter().collect::<Vec<_>>(),
+            vec![
+                0.0,
+                0.0,
+                1.0 / 3.0,
+                1.0 / 3.0,
+                2.0 / 3.0,
+                2.0 / 3.0,
+                1.0,
+                1.0
+            ]
+        );
+        assert_eq!(quantized.storage_bytes(), 2);
+        assert_eq!(matte.quantized_levels(), vec![0, 0, 1, 1, 2, 2, 3, 3]);
+    }
+
+    #[test]
+    fn narrow_source_antialias_shoulders_are_not_vector_alpha_regions() {
+        let matte = AlphaMatte::new(
+            5,
+            3,
+            [0.0, 0.25, 0.75, 1.0, 1.0]
+                .into_iter()
+                .cycle()
+                .take(15)
+                .collect(),
+        );
+        assert_eq!(
+            matte.vectorized_levels(),
+            [0, 0, 3, 3, 3]
+                .into_iter()
+                .cycle()
+                .take(15)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn authored_translucent_area_is_retained() {
+        let mut values = vec![0.0; 25];
+        for y in 1..4 {
+            for x in 1..4 {
+                values[y * 5 + x] = 0.25;
+            }
+        }
+        let matte = AlphaMatte::new(5, 5, values);
+        let levels = matte.vectorized_levels();
+        for y in 1..4 {
+            for x in 1..4 {
+                assert_eq!(levels[y * 5 + x], 1);
+            }
+        }
+    }
+
+    #[test]
+    fn broad_partial_alpha_transition_keeps_a_durable_core() {
+        let matte = AlphaMatte::new(
+            5,
+            5,
+            [0.0, 0.25, 0.25, 0.25, 1.0]
+                .into_iter()
+                .cycle()
+                .take(25)
+                .collect(),
+        );
+        let levels = matte.vectorized_levels();
+        assert_eq!(levels[2 * 5 + 2], 1);
+        assert!(levels.contains(&1));
+    }
+
+    #[test]
+    fn source_alpha_isoline_uses_the_interpolated_subpixel_crossing() {
+        let matte = AlphaMatte::new(2, 2, vec![0.0, 0.75, 0.0, 0.75]);
+        let contours = matte.isocontours(0.5);
+        assert_eq!(contours.len(), 1);
+
+        // Pixel centres are x=0.5 and x=1.5. Alpha=0.5 crosses two thirds of
+        // the way between them, at x=7/6, rather than at their grid edge x=1.
+        let expected = 7.0 / 6.0;
+        let crossings = contours[0]
+            .iter()
+            .filter(|point| (point.x - expected).abs() < 1e-5)
+            .count();
+        assert_eq!(crossings, 2, "contour was snapped back to pixel edges");
+    }
+
+    #[test]
+    fn opaque_alpha_isoline_covers_all_four_canvas_corners() {
+        let matte = AlphaMatte::new(2, 2, vec![1.0; 4]);
+        let contours = matte.isocontours(0.5);
+        assert_eq!(contours.len(), 1);
+        for corner in [
+            Point { x: 0.0, y: 0.0 },
+            Point { x: 2.0, y: 0.0 },
+            Point { x: 2.0, y: 2.0 },
+            Point { x: 0.0, y: 2.0 },
+        ] {
+            assert!(contours[0].contains(&corner), "missing corner {corner:?}");
+        }
+    }
+
+    #[test]
+    fn source_alpha_rgb_is_retained_for_every_nonzero_coverage_sample() {
+        let image = Raster::new(
+            3,
+            1,
+            vec![[0.8, 0.1, 0.2], [0.1, 0.8, 0.2], [0.1, 0.2, 0.8]],
+        );
+        let matte = AlphaMatte::new(3, 1, vec![0.0, 0.1, 1.0]);
+        let prepared = prepare_source_alpha(&image, &matte, [1.0, 0.0, 1.0]);
+        assert_eq!(prepared.pixels[0], [1.0, 0.0, 1.0]);
+        assert_eq!(prepared.pixels[1], image.pixels[1]);
+        assert_eq!(prepared.pixels[2], image.pixels[2]);
     }
 
     #[test]
@@ -501,29 +1252,25 @@ mod tests {
 
     #[test]
     fn disconnected_clear_labels_are_all_background() {
-        let matte = AlphaMatte {
-            width: 5,
-            height: 1,
-            values: vec![0.0, 0.0, 1.0, 0.0, 0.0],
-        };
+        let matte = AlphaMatte::new(5, 1, vec![0.0, 0.0, 1.0, 0.0, 0.0]);
         let removed = background_regions(&[0, 0, 1, 2, 2], 3, &matte);
         assert_eq!(removed, vec![true, false, true]);
     }
 
     #[test]
     fn background_region_tolerates_many_antialiased_boundary_samples() {
-        let matte = AlphaMatte {
-            width: 10,
-            height: 1,
-            values: vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.15, 0.20, 0.30],
-        };
+        let matte = AlphaMatte::new(
+            10,
+            1,
+            vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.15, 0.20, 0.30],
+        );
         assert_eq!(background_regions(&[0; 10], 1, &matte), vec![true]);
 
-        let foreground = AlphaMatte {
-            width: 10,
-            height: 1,
-            values: vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.50, 1.0, 1.0, 1.0, 1.0],
-        };
+        let foreground = AlphaMatte::new(
+            10,
+            1,
+            vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.50, 1.0, 1.0, 1.0, 1.0],
+        );
         assert_eq!(background_regions(&[0; 10], 1, &foreground), vec![false]);
     }
 }

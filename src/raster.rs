@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::sync::Arc;
 
 use image::{imageops::FilterType, DynamicImage, ImageBuffer, ImageReader, Limits, Rgb};
 
@@ -9,6 +10,34 @@ pub struct Raster {
     pub width: usize,
     pub height: usize,
     pub pixels: Vec<[f32; 3]>,
+}
+
+/// Read-only full-resolution source retained for adaptive refinement.
+///
+/// Working images stay in `f32`, but decoded source pixels spend most of
+/// their lifetime waiting for a small crop to be selected. Keeping those
+/// pixels packed cuts that retained allocation without introducing fixed
+/// point into colour, filtering, or geometry calculations.
+#[derive(Clone, Debug)]
+pub(crate) struct SourceRaster {
+    pub width: usize,
+    pub height: usize,
+    pixels: SourcePixels,
+}
+
+#[derive(Clone, Debug)]
+enum SourcePixels {
+    /// Exact representation of the decoder's RGBA8 output.
+    Rgb8(Arc<Vec<u8>>),
+    /// Q0.16 storage for chroma separation and alpha-composited references.
+    Unorm16(Arc<Vec<u16>>),
+}
+
+pub(crate) trait RasterSource: Sync {
+    fn width(&self) -> usize;
+    fn height(&self) -> usize;
+    fn get(&self, x: usize, y: usize) -> [f32; 3];
+    fn resize_max(&self, maximum: u32) -> Raster;
 }
 
 impl Raster {
@@ -55,43 +84,6 @@ impl Raster {
             maximum_decode_bytes,
         )?;
         Ok(Self::from_dynamic(&decoded))
-    }
-
-    /// Decode straight RGB and return the source alpha separately.  Keeping
-    /// alpha out of `Raster` avoids making every opaque pipeline allocation
-    /// four-channel while allowing the converter entry point to preserve
-    /// transparent PNG input without first flattening it onto white.
-    pub(crate) fn load_with_alpha(
-        path: &Path,
-        maximum_dimension: u32,
-        maximum_pixels: u64,
-        maximum_decode_bytes: u64,
-    ) -> Result<(Self, Option<Vec<f32>>)> {
-        let decoded = Self::decode_limited(
-            path,
-            maximum_dimension,
-            maximum_pixels,
-            maximum_decode_bytes,
-        )?;
-        let rgba = decoded.to_rgba8();
-        let (width, height) = rgba.dimensions();
-        let mut has_transparency = false;
-        let mut pixels = Vec::with_capacity(width as usize * height as usize);
-        let mut alpha = Vec::with_capacity(pixels.capacity());
-        for pixel in rgba.pixels() {
-            pixels.push([
-                pixel[0] as f32 / 255.0,
-                pixel[1] as f32 / 255.0,
-                pixel[2] as f32 / 255.0,
-            ]);
-            let value = pixel[3] as f32 / 255.0;
-            has_transparency |= pixel[3] != 255;
-            alpha.push(value);
-        }
-        Ok((
-            Self::new(width as usize, height as usize, pixels),
-            has_transparency.then_some(alpha),
-        ))
     }
 
     fn decode_limited(
@@ -199,6 +191,182 @@ impl Raster {
     }
 }
 
+impl RasterSource for Raster {
+    #[inline]
+    fn width(&self) -> usize {
+        self.width
+    }
+
+    #[inline]
+    fn height(&self) -> usize {
+        self.height
+    }
+
+    #[inline]
+    fn get(&self, x: usize, y: usize) -> [f32; 3] {
+        Raster::get(self, x, y)
+    }
+
+    fn resize_max(&self, maximum: u32) -> Raster {
+        Raster::resize_max(self, maximum)
+    }
+}
+
+impl SourceRaster {
+    pub(crate) fn load_with_alpha(
+        path: &Path,
+        maximum_dimension: u32,
+        maximum_pixels: u64,
+        maximum_decode_bytes: u64,
+    ) -> Result<(Self, Option<Vec<u8>>)> {
+        let decoded = Raster::decode_limited(
+            path,
+            maximum_dimension,
+            maximum_pixels,
+            maximum_decode_bytes,
+        )?;
+        let rgba = decoded.into_rgba8();
+        let (width, height) = rgba.dimensions();
+        let len = width as usize * height as usize;
+        let mut pixels = Vec::with_capacity(len * 3);
+        let mut alpha = None::<Vec<u8>>;
+        for (index, pixel) in rgba.pixels().enumerate() {
+            pixels.extend([pixel[0], pixel[1], pixel[2]]);
+            if pixel[3] != 255 && alpha.is_none() {
+                let mut values = Vec::with_capacity(len);
+                values.resize(index, 255);
+                alpha = Some(values);
+            }
+            if let Some(values) = &mut alpha {
+                values.push(pixel[3]);
+            }
+        }
+        Ok((
+            Self {
+                width: width as usize,
+                height: height as usize,
+                pixels: SourcePixels::Rgb8(Arc::new(pixels)),
+            },
+            alpha,
+        ))
+    }
+
+    pub(crate) fn from_unorm16_fn(
+        width: usize,
+        height: usize,
+        pixel: impl Fn(usize) -> [f32; 3],
+    ) -> Self {
+        let len = width * height;
+        let mut packed = Vec::with_capacity(len * 3);
+        for index in 0..len {
+            packed.extend(
+                pixel(index).map(|channel| (channel.clamp(0.0, 1.0) * 65_535.0).round() as u16),
+            );
+        }
+        Self {
+            width,
+            height,
+            pixels: SourcePixels::Unorm16(Arc::new(packed)),
+        }
+    }
+
+    pub(crate) fn from_rgb8_fn(
+        width: usize,
+        height: usize,
+        pixel: impl Fn(usize) -> [f32; 3],
+    ) -> Self {
+        let len = width * height;
+        let mut packed = Vec::with_capacity(len * 3);
+        for index in 0..len {
+            packed.extend(
+                pixel(index).map(|channel| (channel.clamp(0.0, 1.0) * 255.0).round() as u8),
+            );
+        }
+        Self {
+            width,
+            height,
+            pixels: SourcePixels::Rgb8(Arc::new(packed)),
+        }
+    }
+
+    pub(crate) fn crop(&self, x: usize, y: usize, width: usize, height: usize) -> Raster {
+        assert!(x <= self.width && y <= self.height);
+        let width = width.min(self.width - x);
+        let height = height.min(self.height - y);
+        let mut pixels = Vec::with_capacity(width * height);
+        for row in y..y + height {
+            for column in x..x + width {
+                pixels.push(self.get(column, row));
+            }
+        }
+        Raster::new(width, height, pixels)
+    }
+
+    fn to_rgb8(&self) -> ImageBuffer<Rgb<u8>, Vec<u8>> {
+        if let SourcePixels::Rgb8(values) = &self.pixels {
+            return ImageBuffer::from_raw(
+                self.width as u32,
+                self.height as u32,
+                values.as_ref().clone(),
+            )
+            .expect("packed RGB source length matches its dimensions");
+        }
+        ImageBuffer::from_fn(self.width as u32, self.height as u32, |x, y| {
+            let pixel = self.get(x as usize, y as usize);
+            Rgb(pixel.map(|channel| (channel.clamp(0.0, 1.0) * 255.0).round() as u8))
+        })
+    }
+
+    fn to_raster(&self) -> Raster {
+        Raster::new(
+            self.width,
+            self.height,
+            (0..self.width * self.height)
+                .map(|index| self.get(index % self.width, index / self.width))
+                .collect(),
+        )
+    }
+}
+
+impl RasterSource for SourceRaster {
+    #[inline]
+    fn width(&self) -> usize {
+        self.width
+    }
+
+    #[inline]
+    fn height(&self) -> usize {
+        self.height
+    }
+
+    #[inline]
+    fn get(&self, x: usize, y: usize) -> [f32; 3] {
+        let x = x.min(self.width - 1);
+        let y = y.min(self.height - 1);
+        let offset = (y * self.width + x) * 3;
+        match &self.pixels {
+            SourcePixels::Rgb8(values) => {
+                [0, 1, 2].map(|channel| f32::from(values[offset + channel]) / 255.0)
+            }
+            SourcePixels::Unorm16(values) => {
+                [0, 1, 2].map(|channel| f32::from(values[offset + channel]) / 65_535.0)
+            }
+        }
+    }
+
+    fn resize_max(&self, maximum: u32) -> Raster {
+        let current = self.width.max(self.height) as u32;
+        if current <= maximum || maximum == 0 {
+            return self.to_raster();
+        }
+        let scale = maximum as f64 / current as f64;
+        let width = (self.width as f64 * scale).round().max(1.0) as u32;
+        let height = (self.height as f64 * scale).round().max(1.0) as u32;
+        let resized = image::imageops::resize(&self.to_rgb8(), width, height, FilterType::Lanczos3);
+        Raster::from_dynamic(&DynamicImage::ImageRgb8(resized))
+    }
+}
+
 pub fn percentile(mut values: Vec<f32>, quantile: f32) -> f32 {
     if values.is_empty() {
         return 0.0;
@@ -240,9 +408,38 @@ mod tests {
         let image = image::RgbaImage::from_pixel(2, 1, image::Rgba([12, 34, 56, 0]));
         image.save(&path).unwrap();
         let (raster, alpha) =
-            Raster::load_with_alpha(&path, 64, 64 * 64, 64 * 1024 * 1024).unwrap();
-        assert_eq!(raster.pixels[0], [12.0 / 255.0, 34.0 / 255.0, 56.0 / 255.0]);
-        assert_eq!(alpha.unwrap(), vec![0.0, 0.0]);
+            SourceRaster::load_with_alpha(&path, 64, 64 * 64, 64 * 1024 * 1024).unwrap();
+        assert_eq!(raster.get(0, 0), [12.0 / 255.0, 34.0 / 255.0, 56.0 / 255.0]);
+        assert_eq!(alpha.unwrap(), vec![0, 0]);
+    }
+
+    #[test]
+    fn retained_source_uses_rgb8_or_unorm16_storage() {
+        let rgb8 = SourceRaster::from_rgb8_fn(2, 1, |index| {
+            if index == 0 {
+                [12.0 / 255.0, 34.0 / 255.0, 56.0 / 255.0]
+            } else {
+                [1.0, 0.0, 0.5]
+            }
+        });
+        let SourcePixels::Rgb8(values) = &rgb8.pixels else {
+            panic!("decoded source should use RGB8 storage");
+        };
+        assert_eq!(values.len(), 6);
+        assert_eq!(rgb8.get(0, 0), [12.0 / 255.0, 34.0 / 255.0, 56.0 / 255.0]);
+
+        let expected = [[0.123_456, 0.5, 0.987_654], [0.0, 1.0, 0.25]];
+        let unorm16 = SourceRaster::from_unorm16_fn(2, 1, |index| expected[index]);
+        let SourcePixels::Unorm16(values) = &unorm16.pixels else {
+            panic!("derived source should use Q0.16 storage");
+        };
+        assert_eq!(values.len() * std::mem::size_of::<u16>(), 12);
+        for (index, expected) in expected.into_iter().enumerate() {
+            let actual = unorm16.get(index, 0);
+            for channel in 0..3 {
+                assert!((actual[channel] - expected[channel]).abs() <= 0.5 / 65_535.0);
+            }
+        }
     }
 
     #[test]

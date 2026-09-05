@@ -66,7 +66,7 @@ pub struct Config {
     pub paint_primary_min_explained_variance: f32,
     /// Stricter coherence threshold for faces below `minimum_gradient_area`.
     pub paint_primary_small_min_explained_variance: f32,
-    /// Rayon worker count. Zero selects physical cores when discoverable.
+    /// Rayon worker count. Zero selects half the detected CPUs, capped at four.
     pub rayon_threads: usize,
     /// Render the complete SVG in memory and calculate report-only quality
     /// metrics. Requires the `diagnostics` Cargo feature.

@@ -53,7 +53,7 @@ Useful controls:
 --adaptive-min-perceptual-gain <DE>
 --adaptive-min-predicted-rate <RATE>
 --adaptive-complexity-penalty <RATE>
---threads <N>                 # 0: detected physical cores
+--threads <N>                 # 0: min(4, detected CPUs / 2), at least one
 --quality-metrics             # diagnostics feature: full-SVG DeltaE00/SSIM report
 --verbose                     # diagnostics feature: JSON report on stderr
 ```
@@ -71,14 +71,25 @@ black are deliberately not treated as automatic key colours. Without this
 option, opaque input does not use automatic chroma-key removal.
 
 An alpha channel already present in the input is handled automatically and
-does not require this option. The converter temporarily composites its RGB
-channels over one of the six saturated key colours, vectorizes that keyed
-image, and omits the alpha-clear regions from the SVG. It does not flatten
-transparent input onto white.
+does not require this option. Exact source alpha is retained as one-byte
+coverage samples while the vector mask is built. A narrow run of intermediate
+coverage connecting clear and opaque pixels is treated as raster antialiasing,
+not as a translucent object: its half-coverage position is interpolated between
+pixel centres and fitted as one fully opaque vector contour. The SVG renderer
+then antialiases that curve at the display resolution, so neither an enlarged
+raster staircase nor a persistent semitransparent outline is embedded in the
+SVG. Broad or independent authored transparency is preserved with the uniform
+two-bit levels `0`, `1/3`, `2/3`, and `1`, using nested vector regions. Visible
+pixels retain their straight source RGB, so a foreground colour cannot be
+removed merely because it equals the temporary colour used to normalize fully
+transparent pixels. Nonzero samples are also retained as hidden underpaint,
+preventing the interpolated mask edge from revealing that normalization colour.
+The converter does not flatten transparent input onto white.
 
 Constant-colour matting from a single image is inherently ambiguous when the
-foreground itself contains the key colour. Such areas can be removed with the
-backing; choose a key colour absent from the subject for reliable results.
+foreground itself contains an inferred chroma key. Such areas can be removed
+with the backing; choose a key colour absent from the subject for reliable
+opaque-key results. Exact source alpha does not have this ambiguity.
 See [the background-removal design notes](docs/chroma-key-background-removal.md)
 for the matte model, thresholds, and research basis.
 
@@ -97,6 +108,17 @@ the selected worker count and by a conservative estimate derived from the
 largest crop and currently available memory; `--verbose` reports the selected
 count as `adaptive_refinement.parallel_jobs`. Small source-native crops also
 skip the otherwise redundant automatic-resolution probe.
+
+Full-resolution source data waiting for adaptive refinement remains packed as
+RGB8 when it came directly from the decoder and as Q0.16 RGB only when matte or
+chroma processing produced fractional channels. Working crops are expanded to
+`f32`, so filtering and perceptual calculations do not use fixed-point
+arithmetic.
+
+The default worker count leaves thermal and interactive headroom: it uses half
+of the detected logical CPUs, capped at four workers and with a minimum of one.
+`--threads N` remains an explicit override for callers that prefer a different
+throughput/resource tradeoff.
 
 Input dimensions and total area are checked from the image header before
 decoding (32,768 pixels per axis and 32 megapixels by default), and decoder

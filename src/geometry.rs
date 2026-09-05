@@ -2144,6 +2144,7 @@ fn fit_smoothed_chain(
     smoothed: &[Point],
     raw: &[Point],
     closed: bool,
+    smooth_closure: bool,
     fixed: &HashSet<usize>,
     tolerance: f32,
     start_tangent: Option<Point>,
@@ -2202,6 +2203,12 @@ fn fit_smoothed_chain(
         ordered[index] = ordered_raw[index];
     }
     let mut curves = Vec::new();
+    let closure_tangent = smooth_closure.then(|| {
+        normalized(Point {
+            x: ordered[1].x - ordered[ordered.len() - 2].x,
+            y: ordered[1].y - ordered[ordered.len() - 2].y,
+        })
+    });
     for pair in split_indices.windows(2) {
         let start_index = pair[0];
         let end_index = pair[1];
@@ -2209,7 +2216,14 @@ fn fit_smoothed_chain(
         if points.len() < 2 {
             continue;
         }
-        let left = if !closed && start_index == 0 {
+        let left = if closed && start_index == 0 {
+            closure_tangent.unwrap_or_else(|| {
+                normalized(Point {
+                    x: points[1].x - points[0].x,
+                    y: points[1].y - points[0].y,
+                })
+            })
+        } else if !closed && start_index == 0 {
             start_tangent.map(normalized).unwrap_or_else(|| {
                 normalized(Point {
                     x: points[1].x - points[0].x,
@@ -2222,7 +2236,19 @@ fn fit_smoothed_chain(
                 y: points[1].y - points[0].y,
             })
         };
-        let right = if !closed && end_index + 1 == base.len() {
+        let right = if closed && end_index == base.len() {
+            closure_tangent
+                .map(|value| Point {
+                    x: -value.x,
+                    y: -value.y,
+                })
+                .unwrap_or_else(|| {
+                    normalized(Point {
+                        x: points[points.len() - 2].x - points[points.len() - 1].x,
+                        y: points[points.len() - 2].y - points[points.len() - 1].y,
+                    })
+                })
+        } else if !closed && end_index + 1 == base.len() {
             end_tangent
                 .map(|value| {
                     let value = normalized(value);
@@ -2275,6 +2301,11 @@ fn fit_shared_boundary_candidate(
     );
     let mut fixed = polyline_corner_indices(&corner_probe, closed, tolerance, corner_angle);
     fixed.extend(fixed_indices.iter().copied());
+    // A closed shared chain must retain its topology-selected storage origin,
+    // but that origin is not automatically a semantic corner. Remember the
+    // distinction before adding the positional anchor: smooth contours need
+    // one periodic tangent across this artificial seam.
+    let smooth_closure = closed && !fixed.contains(&0);
     if closed {
         fixed.insert(0);
     }
@@ -2283,6 +2314,7 @@ fn fit_shared_boundary_candidate(
         &smoothed,
         points,
         closed,
+        smooth_closure,
         &fixed,
         tolerance.max(0.25),
         start_tangent,
@@ -2642,6 +2674,41 @@ fn structural_curve_path_data(curves: &[CurveSegment], closed: bool) -> String {
         data.push_str(" Z");
     }
     data
+}
+
+/// Fit a closed scalar-field contour without snapping it back to the raster
+/// grid. Alpha mattes use this after marching-squares interpolation has
+/// recovered the subpixel crossing of the coverage field. Running those
+/// points through the ordinary Region geometry builder would discard that
+/// crossing and recreate a pixel-edge staircase.
+pub(crate) fn fitted_alpha_contour_path_data(points: &[Point]) -> String {
+    if points.len() < 3 {
+        return String::new();
+    }
+    let mut source = points.to_vec();
+    source.dedup_by(|left, right| left.distance(*right) <= 1e-5);
+    if source.len() < 3 {
+        return String::new();
+    }
+    if source[0].distance(*source.last().unwrap()) > 1e-5 {
+        source.push(source[0]);
+    } else {
+        let first = source[0];
+        *source.last_mut().unwrap() = first;
+    }
+
+    // The interpolated isoline is already the coverage observation, so it
+    // must not receive the Gaussian fairing used for integer grid edges. The
+    // cubic fitter still removes sampling-frequency corners while preserving
+    // actual corners selected from the contour itself.
+    let curves =
+        fit_shared_boundary_candidate(&source, true, 0.3, 0.0, 100.0, &HashSet::new(), None, None);
+    if curves.is_empty() {
+        let mut cubics = 0;
+        let mut lines = 0;
+        return closed_path_data(&source[..source.len() - 1], &mut cubics, &mut lines);
+    }
+    structural_curve_path_data(&curves, true)
 }
 
 /// Port of the structural layer's constrained centre-line fitter followed by
@@ -6880,6 +6947,59 @@ mod tests {
     use crate::color::rgb_to_lab;
     use crate::raster::Raster;
     use crate::segment::{RegionStats, Segmentation, SegmentationSummary};
+
+    #[test]
+    fn smooth_closed_fit_has_no_corner_at_its_storage_origin() {
+        let mut points = (0..48)
+            .map(|index| {
+                let angle = std::f32::consts::TAU * index as f32 / 48.0;
+                Point {
+                    x: 20.0 + 12.0 * angle.cos(),
+                    y: 20.0 + 7.0 * angle.sin(),
+                }
+            })
+            .collect::<Vec<_>>();
+        points.push(points[0]);
+
+        let curves = fit_shared_boundary_candidate(
+            &points,
+            true,
+            std::f32::consts::FRAC_1_SQRT_2,
+            1.5,
+            70.0,
+            &HashSet::new(),
+            None,
+            None,
+        );
+
+        let first = curves.first().copied().expect("closed curve");
+        let last = curves.last().copied().expect("closed curve");
+        assert_eq!(first.start(), points[0]);
+        assert_eq!(last.end(), points[0]);
+        let outgoing = match first {
+            CurveSegment::Cubic { start, first, .. } => normalized(Point {
+                x: first.x - start.x,
+                y: first.y - start.y,
+            }),
+            CurveSegment::Line { start, end } => normalized(Point {
+                x: end.x - start.x,
+                y: end.y - start.y,
+            }),
+        };
+        let incoming = match last {
+            CurveSegment::Cubic { second, end, .. } => normalized(Point {
+                x: end.x - second.x,
+                y: end.y - second.y,
+            }),
+            CurveSegment::Line { start, end } => normalized(Point {
+                x: end.x - start.x,
+                y: end.y - start.y,
+            }),
+        };
+
+        assert!(incoming.x * outgoing.x + incoming.y * outgoing.y > 0.999_999);
+        assert!((incoming.x * outgoing.y - incoming.y * outgoing.x).abs() < 1e-4);
+    }
 
     #[test]
     fn structural_endpoint_constraint_preserves_anchor_and_sets_g1_direction() {

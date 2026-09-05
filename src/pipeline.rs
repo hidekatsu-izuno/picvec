@@ -7,8 +7,6 @@ use serde::Serialize;
 use tempfile::{Builder as TemporaryFileBuilder, NamedTempFile};
 
 use std::collections::HashMap;
-#[cfg(target_os = "linux")]
-use std::collections::HashSet;
 
 use crate::adaptive::{
     compose_refinements, perceptual_score, plan_candidates, AdaptiveRefinementSummary,
@@ -18,7 +16,9 @@ use crate::chroma::{self, AlphaMatte, AlphaTransparencySummary, ChromaKeySummary
 use crate::color::{rgb_to_lab, Lab};
 use crate::config::Config;
 use crate::edge::{classify, dilate, dilate_square, perceptual_smooth, EdgeSummary};
-use crate::geometry::{build_with_topology as build_geometry, GeometrySummary};
+use crate::geometry::{
+    build_with_topology as build_geometry, fitted_alpha_contour_path_data, GeometrySummary,
+};
 use crate::gradient::{
     fit_all_without_topology, merge_partition, merge_source_supported_paints, refresh_summary,
     GradientSummary, Paint,
@@ -27,13 +27,15 @@ use crate::hierarchy::{HierarchicalTopology, HierarchicalTopologySummary};
 use crate::metrics::QualityMetrics;
 use crate::optimize::{summarize as optimization_summary, OptimizationSummary};
 use crate::ownership::{resolve as resolve_boundary_ownership, BoundaryOwnershipSummary};
-use crate::raster::Raster;
+use crate::raster::{Raster, RasterSource, SourceRaster};
 use crate::segment::{
     refine_thin_paint_ownership, regularize_boundaries, replace_final_exact_paint_labels, segment,
-    Segmentation, SegmentationSummary,
+    split_partition_by_values, Segmentation, SegmentationSummary,
 };
 use crate::structural::{analyse as analyse_structural, StructuralInk, StructuralSummary};
-use crate::svg::{serialize_filtered as serialize_svg, SvgSummary};
+use crate::svg::{
+    serialize_filtered_with_alpha as serialize_svg, AlphaMask, AlphaMaskLayer, SvgSummary,
+};
 use crate::union_find::UnionFind;
 use crate::{Error, Result};
 
@@ -181,6 +183,76 @@ fn merge_exact_final_paints(
     accepted
 }
 
+fn build_source_alpha_mask(matte: &AlphaMatte) -> AlphaMask {
+    let levels = matte.vectorized_levels();
+    let only_extremes = levels.iter().all(|&level| level == 0 || level == 3);
+    if only_extremes {
+        // The discarded intermediate samples still provide the most accurate
+        // location of an opaque silhouette. Use their half-coverage crossing
+        // once, then let the SVG renderer antialias that vector curve at the
+        // display resolution. No translucent vector band remains.
+        let path_data = matte
+            .isocontours(0.5)
+            .iter()
+            .map(|contour| fitted_alpha_contour_path_data(contour))
+            .collect::<String>();
+        return AlphaMask {
+            layers: (!path_data.is_empty())
+                .then_some(AlphaMaskLayer {
+                    path_data,
+                    opacity: 1.0,
+                })
+                .into_iter()
+                .collect(),
+        };
+    }
+
+    // Intentional partial-alpha areas are represented as durable, flat vector
+    // regions. Build nested binary superlevel sets so every jump between two
+    // regions has one shared curve rather than a source-resolution opacity
+    // ramp. Different opacities accumulate to the existing 2-bit levels.
+    let mut cumulative = Vec::<(String, u8)>::new();
+    for threshold in 1_u8..=3 {
+        let binary = AlphaMatte::from_u8(
+            matte.width,
+            matte.height,
+            levels
+                .iter()
+                .map(|&level| if level >= threshold { 255 } else { 0 })
+                .collect(),
+        );
+        let path_data = binary
+            .isocontours(0.5)
+            .iter()
+            .map(|contour| fitted_alpha_contour_path_data(contour))
+            .collect::<String>();
+        if path_data.is_empty() {
+            continue;
+        }
+        if let Some((previous_path, maximum_level)) = cumulative.last_mut() {
+            if *previous_path == path_data {
+                *maximum_level = threshold;
+                continue;
+            }
+        }
+        cumulative.push((path_data, threshold));
+    }
+
+    let mut previous_coverage = 0.0_f32;
+    let layers = cumulative
+        .into_iter()
+        .map(|(path_data, level)| {
+            let target_coverage = f32::from(level) / 3.0;
+            let opacity = ((target_coverage - previous_coverage)
+                / (1.0 - previous_coverage).max(1e-6))
+            .clamp(0.0, 1.0);
+            previous_coverage = target_coverage;
+            AlphaMaskLayer { path_data, opacity }
+        })
+        .collect();
+    AlphaMask { layers }
+}
+
 #[cfg(feature = "diagnostics")]
 fn save_label_diagnostic(name: &str, labels: &[u32], width: usize, height: usize) {
     let Ok(prefix) = std::env::var("PICVEC_PIPELINE_DIAGNOSTICS") else {
@@ -210,8 +282,8 @@ fn save_mask_diagnostic(name: &str, mask: &[bool], width: usize, height: usize) 
 #[cfg(not(feature = "diagnostics"))]
 fn save_mask_diagnostic(_name: &str, _mask: &[bool], _width: usize, _height: usize) {}
 
-fn estimate_dimension(image: &Raster, config: &Config) -> ComplexityProbe {
-    let probe_max = image.width.max(image.height).min(1024) as u32;
+fn estimate_dimension<R: RasterSource + ?Sized>(image: &R, config: &Config) -> ComplexityProbe {
+    let probe_max = image.width().max(image.height()).min(1024) as u32;
     let probe = image.resize_max(probe_max);
     let lab: Vec<Lab> = probe.pixels.iter().copied().map(rgb_to_lab).collect();
     let at = |x: isize, y: isize| {
@@ -308,13 +380,14 @@ fn estimate_dimension(image: &Raster, config: &Config) -> ComplexityProbe {
     let complexity = 0.65 * normalized_region_density + 0.35 * normalized_edge_density;
     let target_pixels = MINIMUM_AUTOMATIC_TARGET_PIXELS
         + (MAXIMUM_AUTOMATIC_TARGET_PIXELS - MINIMUM_AUTOMATIC_TARGET_PIXELS) * complexity;
-    let source_pixels = (image.width * image.height).max(1) as f32;
-    let estimated = image.width.max(image.height) as f32 * (target_pixels / source_pixels).sqrt();
+    let source_pixels = (image.width() * image.height()).max(1) as f32;
+    let estimated =
+        image.width().max(image.height()) as f32 * (target_pixels / source_pixels).sqrt();
     let (automatic_minimum, automatic_maximum) = config.automatic_dimension_bounds();
     let selected = estimated
         .round()
         .clamp(automatic_minimum as f32, automatic_maximum as f32)
-        .min(image.width.max(image.height) as f32) as u32;
+        .min(image.width().max(image.height()) as f32) as u32;
     ComplexityProbe {
         probe_width: probe.width,
         probe_height: probe.height,
@@ -362,6 +435,7 @@ fn render_svg_preview(
     paint_overlap: f32,
     final_geometry: bool,
     excluded_regions: &[bool],
+    alpha_mask: Option<&AlphaMask>,
     background: [f32; 3],
 ) -> Result<Raster> {
     let (width, height) = dimensions;
@@ -375,6 +449,7 @@ fn render_svg_preview(
         paint_overlap,
         final_geometry,
         excluded_regions,
+        alpha_mask,
     );
     render_svg_document_on(&document, width, height, background)
 }
@@ -446,28 +521,8 @@ pub fn vectorize(input: &Path, output: &Path, config: &Config) -> Result<Summary
     pool.install(|| vectorize_inner(input, output, config, threads))
 }
 
-fn physical_core_count() -> Option<usize> {
-    #[cfg(target_os = "linux")]
-    {
-        let mut cores = HashSet::<(String, String)>::new();
-        for entry in fs::read_dir("/sys/devices/system/cpu").ok()? {
-            let entry = entry.ok()?;
-            let name = entry.file_name();
-            let name = name.to_str()?;
-            if !name.strip_prefix("cpu").is_some_and(|suffix| {
-                !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
-            }) {
-                continue;
-            }
-            let topology = entry.path().join("topology");
-            let package = fs::read_to_string(topology.join("physical_package_id")).ok()?;
-            let core = fs::read_to_string(topology.join("core_id")).ok()?;
-            cores.insert((package.trim().to_owned(), core.trim().to_owned()));
-        }
-        (!cores.is_empty()).then_some(cores.len())
-    }
-    #[cfg(not(target_os = "linux"))]
-    None
+fn default_execution_thread_count(cpu_count: usize) -> usize {
+    (cpu_count / 2).clamp(1, 4)
 }
 
 fn execution_thread_count(config: &Config) -> usize {
@@ -477,7 +532,7 @@ fn execution_thread_count(config: &Config) -> usize {
     if config.rayon_threads > 0 {
         return config.rayon_threads.min(logical).max(1);
     }
-    physical_core_count().unwrap_or(logical).min(logical).max(1)
+    default_execution_thread_count(logical)
 }
 
 #[cfg(target_os = "linux")]
@@ -553,9 +608,12 @@ enum RefinementOutcome {
 /// explains source-resolution evidence sufficiently better per added SVG
 /// byte.  High-frequency photographic texture therefore competes on exactly
 /// the same terms as a small, cheaply representable icon feature.
+#[allow(clippy::too_many_arguments)]
 fn adaptively_refine(
-    vector_source: Option<&Raster>,
+    vector_source: Option<&SourceRaster>,
+    reference_source: Option<&SourceRaster>,
     source_matte: Option<&AlphaMatte>,
+    source_alpha: bool,
     input_dimensions: (usize, usize),
     core: &mut CoreVectorization,
     config: &Config,
@@ -576,7 +634,9 @@ fn adaptively_refine(
     let vector_source = vector_source.ok_or_else(|| -> Error {
         "adaptive source raster was released before refinement".into()
     })?;
-    let source = vector_source;
+    let reference_source = reference_source.ok_or_else(|| -> Error {
+        "adaptive reference raster was released before refinement".into()
+    })?;
     let base_render = render_svg_document_on(
         &core.document,
         core.processing_reference.width,
@@ -589,12 +649,12 @@ fn adaptively_refine(
         width: input_width,
         height: input_height,
     };
-    let baseline_whole = perceptual_score(source, whole, &base_render, whole);
+    let baseline_whole = perceptual_score(reference_source, whole, &base_render, whole);
     summary.baseline_mean_delta_e = baseline_whole.mean_delta_e;
     summary.refined_mean_delta_e = baseline_whole.mean_delta_e;
 
     let mut candidates = plan_candidates(
-        source,
+        reference_source,
         &base_render,
         &core.labels,
         config.adaptive_tile_dimension as usize,
@@ -688,6 +748,7 @@ fn adaptively_refine(
                 let child = vectorize_processing(
                     processing,
                     processing_matte.as_ref(),
+                    source_alpha,
                     core.preview_background,
                     &child_config,
                 )?;
@@ -697,7 +758,8 @@ fn adaptively_refine(
                     child.processing_reference.height,
                     core.preview_background,
                 )?;
-                let refined = perceptual_score(source, candidate.core, &child_render, expanded);
+                let refined =
+                    perceptual_score(reference_source, candidate.core, &child_render, expanded);
                 let combined_gain = candidate.baseline.combined - refined.combined;
                 if combined_gain < config.adaptive_min_perceptual_gain
                     || refined.p90_delta_e > candidate.baseline.p90_delta_e + 0.25
@@ -824,7 +886,7 @@ fn vectorize_inner(
 ) -> Result<Summary> {
     fs::create_dir_all(output_parent(output))?;
     let started = Instant::now();
-    let (decoded, decoded_alpha) = Raster::load_with_alpha(
+    let (decoded, decoded_alpha) = SourceRaster::load_with_alpha(
         input,
         config.maximum_input_dimension,
         config.maximum_input_pixels,
@@ -833,31 +895,34 @@ fn vectorize_inner(
     let input_width = decoded.width;
     let input_height = decoded.height;
     let source_has_alpha = decoded_alpha.is_some();
-    let (source, input_matte, preview_background, detected_key, alpha_backing) =
+    let (source, source_reference, input_matte, preview_background, detected_key, alpha_backing) =
         if let Some(alpha) = decoded_alpha {
-            let matte = AlphaMatte::new(input_width, input_height, alpha);
+            let matte = AlphaMatte::from_u8(input_width, input_height, alpha);
             let backing = chroma::select_alpha_backing(&decoded, &matte);
-            let composed = chroma::composite_over(&decoded, &matte, backing);
-            (
-                chroma::separate_foreground(&composed, &matte, backing),
-                Some(matte),
-                backing,
-                None,
-                Some(backing),
-            )
+            let source = chroma::prepare_compact_source_alpha(&decoded, &matte, backing);
+            let reference =
+                chroma::composite_source_over(&source, &matte.quantized_2bit(), backing);
+            (source, reference, Some(matte), backing, None, Some(backing))
         } else if let Some(key) = config
             .remove_chroma_key_background
             .then(|| chroma::detect(&decoded))
             .flatten()
         {
             let matte = chroma::pull_matte(&decoded, key);
-            let separated = chroma::separate_foreground(&decoded, &matte, key.sampled);
-            (separated, Some(matte), key.sampled, Some(key), None)
+            let separated = chroma::separate_compact_foreground(&decoded, &matte, key.sampled);
+            (
+                separated.clone(),
+                separated,
+                Some(matte),
+                key.sampled,
+                Some(key),
+                None,
+            )
         } else {
-            (decoded, None, [1.0; 3], None, None)
+            (decoded.clone(), decoded, None, [1.0; 3], None, None)
         };
     let complexity = if config.auto_dimension {
-        estimate_dimension(&source, config)
+        estimate_dimension(&source_reference, config)
     } else {
         ComplexityProbe {
             selected_dimension: config
@@ -877,6 +942,7 @@ fn vectorize_inner(
     let retain_adaptive_source =
         config.adaptive_refinement && source_scale >= config.adaptive_min_source_scale;
     let adaptive_source = retain_adaptive_source.then_some(source);
+    let adaptive_reference = retain_adaptive_source.then_some(source_reference);
     let adaptive_matte = if retain_adaptive_source {
         input_matte
     } else {
@@ -885,12 +951,15 @@ fn vectorize_inner(
     let mut core = vectorize_processing(
         processing,
         processing_matte.as_ref(),
+        source_has_alpha,
         preview_background,
         config,
     )?;
     let adaptive_refinement = adaptively_refine(
         adaptive_source.as_ref(),
+        adaptive_reference.as_ref(),
         adaptive_matte.as_ref(),
+        source_has_alpha,
         (input_width, input_height),
         &mut core,
         config,
@@ -901,6 +970,16 @@ fn vectorize_inner(
     let source_alpha = AlphaTransparencySummary {
         detected: source_has_alpha,
         temporary_backing_color: alpha_backing.map(to_u8),
+        quantization_bits: if source_has_alpha {
+            chroma::SOURCE_ALPHA_QUANTIZATION_BITS
+        } else {
+            0
+        },
+        mask_paths: if source_has_alpha {
+            core.svg.alpha_mask_paths
+        } else {
+            0
+        },
         removed_regions: if source_has_alpha {
             core.removed_background_regions
         } else {
@@ -968,14 +1047,24 @@ struct CoreVectorization {
 fn vectorize_processing(
     processing: Raster,
     chroma_matte: Option<&AlphaMatte>,
+    source_alpha: bool,
     preview_background: [f32; 3],
     config: &Config,
 ) -> Result<CoreVectorization> {
     let started = Instant::now();
     let mut checkpoint = started;
     save_pipeline_diagnostic("source", &processing);
+    let processing_reference = if source_alpha {
+        let matte = chroma_matte.ok_or_else(|| -> Error {
+            "source alpha vectorization requires an alpha matte".into()
+        })?;
+        chroma::composite_over(&processing, matte, preview_background)
+    } else {
+        processing.clone()
+    };
+    save_pipeline_diagnostic("source-reference", &processing_reference);
     report_progress(config, "load-resize", started, &mut checkpoint);
-    let mut roles = classify(&processing);
+    let mut roles = classify(&processing_reference);
     save_mask_diagnostic(
         "edge-boundary",
         &roles.boundary,
@@ -1184,6 +1273,30 @@ fn vectorize_processing(
     if supported_paint_merges.merges > 0 || exact_paint_merges > 0 {
         refresh_summary(&mut gradient_report, &paints);
     }
+
+    // The temporary colour used to normalize exactly zero-alpha RGB may also
+    // be a legitimate visible colour. Split only after every Paint merge, so
+    // the two uses can never become one final owner, then duplicate the fitted
+    // Paint and exclude only the zero-coverage child below. Samples below the
+    // first quantized mask level deliberately remain as underpaint: a
+    // subpixel isoline can cross their pixel footprint and must not reveal the
+    // normalization colour or a raster-aligned geometry edge.
+    let source_alpha_region_classes = if source_alpha {
+        let matte = chroma_matte.expect("source alpha requires an alpha matte");
+        let support = (0..matte.len())
+            .map(|index| matte.get(index) > 0.0)
+            .collect::<Vec<_>>();
+        let (parents, classes) =
+            split_partition_by_values(&paint_reference, &mut segmentation, &support);
+        paints = parents
+            .iter()
+            .map(|&parent| paints[parent].clone())
+            .collect();
+        refresh_summary(&mut gradient_report, &paints);
+        Some(classes)
+    } else {
+        None
+    };
     save_label_diagnostic(
         "paint-merged-labels",
         &segmentation.labels,
@@ -1193,10 +1306,24 @@ fn vectorize_processing(
     gradient_report.source_supported_paint_merges = supported_paint_merges.merges;
     gradient_report.source_supported_boundary_edges_removed =
         supported_paint_merges.boundary_edges_removed;
-    let excluded_regions = chroma_matte
-        .map(|matte| chroma::background_regions(&segmentation.labels, paints.len(), matte))
-        .unwrap_or_default();
+    // Exact source alpha uses an independent vector mask. Exactly zero-alpha
+    // owners can still be omitted; all nonzero straight RGB remains available
+    // as underpaint beneath the interpolated mask boundary.
+    // Inferred chroma keys retain their existing binary region exclusion.
+    let excluded_regions = if let Some(classes) = source_alpha_region_classes {
+        classes.into_iter().map(|class| !class).collect()
+    } else {
+        chroma_matte
+            .map(|matte| chroma::background_regions(&segmentation.labels, paints.len(), matte))
+            .unwrap_or_default()
+    };
     let removed_background_regions = excluded_regions.iter().filter(|&&removed| removed).count();
+    let alpha_mask = if source_alpha {
+        chroma_matte.map(build_source_alpha_mask)
+    } else {
+        None
+    };
+    report_progress(config, "source-alpha-mask", started, &mut checkpoint);
     let topology = HierarchicalTopology::build(&segmentation);
     report_progress(config, "exact-paint-merge", started, &mut checkpoint);
     let (geometry, geometry_report) = build_geometry(&segmentation, &topology);
@@ -1211,18 +1338,19 @@ fn vectorize_processing(
         0.0,
         false,
         &excluded_regions,
+        alpha_mask.as_ref(),
         preview_background,
     )?;
     report_progress(config, "paint-preview", started, &mut checkpoint);
     let optimization = optimization_summary(&geometry, &paints, &geometry_report);
     let mut ownership = resolve_boundary_ownership(
-        &processing,
+        &processing_reference,
         &paint_render,
         &structural_candidates,
         &geometry_report.paint_junctions,
         config.shared_boundary_overlap,
     );
-    if let Some(matte) = chroma_matte {
+    if let Some(matte) = chroma_matte.filter(|_| !source_alpha) {
         ownership
             .structural
             .retain_strokes(|stroke| matte.retains_stroke(&stroke.points));
@@ -1240,10 +1368,11 @@ fn vectorize_processing(
             ownership.paint_overlap,
             excluded_regions.iter().all(|&excluded| !excluded),
             &excluded_regions,
+            alpha_mask.as_ref(),
             preview_background,
         )?;
         report_progress(config, "quality-preview", started, &mut checkpoint);
-        let quality = crate::metrics::compare(&processing, &residual_render);
+        let quality = crate::metrics::compare(&processing_reference, &residual_render);
         report_progress(config, "quality-metrics", started, &mut checkpoint);
         Some(quality)
     } else {
@@ -1263,11 +1392,12 @@ fn vectorize_processing(
         paint_overlap,
         excluded_regions.iter().all(|&excluded| !excluded),
         &excluded_regions,
+        alpha_mask.as_ref(),
     );
     report_progress(config, "final-svg", started, &mut checkpoint);
     Ok(CoreVectorization {
         document,
-        processing_reference: processing,
+        processing_reference,
         labels: segmentation.labels,
         removed_background_regions,
         preview_background,
@@ -1387,6 +1517,17 @@ mod tests {
             ..Config::default()
         };
         assert_eq!(estimate_dimension(&image, &config).selected_dimension, 192);
+    }
+
+    #[test]
+    fn default_worker_count_uses_half_the_cpus_capped_at_four() {
+        assert_eq!(default_execution_thread_count(1), 1);
+        assert_eq!(default_execution_thread_count(2), 1);
+        assert_eq!(default_execution_thread_count(3), 1);
+        assert_eq!(default_execution_thread_count(4), 2);
+        assert_eq!(default_execution_thread_count(6), 3);
+        assert_eq!(default_execution_thread_count(8), 4);
+        assert_eq!(default_execution_thread_count(20), 4);
     }
 
     #[test]
@@ -1602,10 +1743,14 @@ mod tests {
         .unwrap();
         assert!(summary.source_alpha.detected);
         assert!(summary.source_alpha.temporary_backing_color.is_some());
+        assert_eq!(summary.source_alpha.quantization_bits, 2);
+        assert!(summary.source_alpha.mask_paths >= 1);
         assert!(summary.source_alpha.removed_regions >= 2);
         assert!(!summary.chroma_key.enabled);
 
         let document = fs::read_to_string(&output).unwrap();
+        assert!(document.contains("id=\"source-alpha-mask\""));
+        assert!(document.contains("mask=\"url(#source-alpha-mask)\""));
         let tree = parse_svg_document(&document).unwrap();
         let mut pixmap = resvg::tiny_skia::Pixmap::new(64, 64).unwrap();
         resvg::render(
@@ -1622,6 +1767,100 @@ mod tests {
             0,
             "enclosed source alpha should remain clear"
         );
+    }
+
+    #[test]
+    fn two_bit_source_alpha_preserves_foreground_equal_to_temporary_backing() {
+        use image::{ImageBuffer, Rgba};
+
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("input.png");
+        let output = directory.path().join("output.svg");
+        let mut image = ImageBuffer::from_pixel(64, 64, Rgba([17_u8, 31, 47, 0]));
+
+        // Cyan dominates covered pixels, making red the farthest temporary
+        // normalization colour. The disconnected opaque red square must not
+        // merge with that normalized transparent RGB and disappear.
+        for y in 16..56 {
+            for x in 16..56 {
+                image.put_pixel(x, y, Rgba([0, 255, 255, 255]));
+            }
+        }
+        for y in 4..12 {
+            for x in 4..12 {
+                image.put_pixel(x, y, Rgba([255, 0, 0, 255]));
+            }
+        }
+        // Broad authored translucent areas exercise the two intermediate
+        // alpha levels independently of boundary antialiasing.
+        for y in 22..30 {
+            for x in 22..30 {
+                image.put_pixel(x, y, Rgba([0, 255, 0, 80]));
+            }
+        }
+        for y in 38..46 {
+            for x in 38..46 {
+                image.put_pixel(x, y, Rgba([0, 0, 255, 180]));
+            }
+        }
+        image.save(&input).unwrap();
+
+        let summary = vectorize(
+            &input,
+            &output,
+            &Config {
+                maximum_dimension: 64,
+                auto_dimension: false,
+                adaptive_refinement: false,
+                smoothing_radius: 1,
+                segmentation_min_size: 2,
+                minimum_gradient_area: 8,
+                rayon_threads: 1,
+                ..Config::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            summary.source_alpha.temporary_backing_color,
+            Some([255, 0, 0])
+        );
+        assert_eq!(summary.source_alpha.quantization_bits, 2);
+        assert_eq!(summary.source_alpha.mask_paths, 3);
+
+        let document = fs::read_to_string(&output).unwrap();
+        assert!(document.contains("fill-opacity=\"0.333\""));
+        assert!(document.contains("fill-opacity=\"0.5\""));
+        let tree = parse_svg_document(&document).unwrap();
+        let mut pixmap = resvg::tiny_skia::Pixmap::new(64, 64).unwrap();
+        resvg::render(
+            &tree,
+            resvg::tiny_skia::Transform::identity(),
+            &mut pixmap.as_mut(),
+        );
+        let pixel = |x: usize, y: usize| pixmap.pixels()[y * 64 + x];
+        assert_eq!(pixel(2, 2).alpha(), 0);
+        assert!(pixel(8, 8).alpha() > 240);
+        assert!(pixel(8, 8).red() > 240);
+        assert!(pixel(8, 8).green() < 10);
+        assert!((75..=95).contains(&pixel(26, 26).alpha()));
+        assert!((160..=180).contains(&pixel(42, 42).alpha()));
+    }
+
+    #[test]
+    fn source_antialias_coverage_builds_one_opaque_vector_silhouette() {
+        let matte = AlphaMatte::new(
+            5,
+            3,
+            [0.0, 0.25, 0.75, 1.0, 1.0]
+                .into_iter()
+                .cycle()
+                .take(15)
+                .collect(),
+        );
+        let mask = build_source_alpha_mask(&matte);
+        assert_eq!(mask.layers.len(), 1);
+        assert_eq!(mask.layers[0].opacity, 1.0);
+        assert!(!mask.layers[0].path_data.is_empty());
     }
 
     #[cfg(feature = "diagnostics")]

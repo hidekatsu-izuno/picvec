@@ -2227,13 +2227,14 @@ fn add_supported_medial_ridges(
     let radius = 7.0 * scale;
     let mut candidate_count = 0_usize;
     let mut supported_count = 0_usize;
-    for (_candidate_index, (mut candidate, maximum_width)) in [
+    for (candidate_index, (mut candidate, maximum_width)) in [
         (absolute_dark.to_vec(), 6.0 * scale),
         (relative_extension, 4.0 * scale),
     ]
     .into_iter()
     .enumerate()
     {
+        let _ = candidate_index;
         remove_tiny_components(&mut candidate, width, height, 2);
         let (mut medial, distance) = medial_axis(&candidate, width, height);
         #[cfg(feature = "diagnostics")]
@@ -2247,7 +2248,7 @@ fn add_supported_medial_ridges(
                         0
                     }])
                 });
-                let _ = raster.save(format!("{prefix}-{name}-{_candidate_index}.png"));
+                let _ = raster.save(format!("{prefix}-{name}-{candidate_index}.png"));
             }
         }
         for index in 0..medial.len() {
@@ -3193,6 +3194,38 @@ fn adaptive_tolerance(lightness: f32, config: &Config) -> f32 {
         + (config.smoothing_light_delta_e - config.smoothing_dark_delta_e) * smooth
 }
 
+/// Calculate one shifted bilateral range plane immediately before it is
+/// consumed. Keeping all canonical planes resident used 160 bytes per pixel
+/// at the default radius of four (40 full-frame `f32` buffers). The distance
+/// is symmetric, so evaluating the requested orientation directly retains
+/// the same weights while allowing the plane to be released after one pass.
+fn bilateral_range_weights(
+    lab: &[Lab],
+    width: usize,
+    height: usize,
+    dx: isize,
+    dy: isize,
+    config: &Config,
+) -> Vec<f32> {
+    let mut weights = (0..lab.len())
+        .into_par_iter()
+        .map(|index| {
+            let x = (index % width) as isize;
+            let y = (index / width) as isize;
+            let px = (x + dx).clamp(0, width as isize - 1) as usize;
+            let py = (y + dy).clamp(0, height as isize - 1) as usize;
+            let centre = lab[index];
+            let sample = lab[py * width + px];
+            let distance = delta_e94_local(centre, sample);
+            let threshold = adaptive_tolerance(0.5 * (centre.l + sample.l), config).max(1e-3);
+            let ratio = distance / threshold;
+            -0.5_f32 * (ratio * ratio)
+        })
+        .collect::<Vec<_>>();
+    crate::elementary::exp_f32_in_place(&mut weights);
+    weights
+}
+
 /// Small-radius bilateral smoothing that never averages through a strong
 /// perceptual edge.
 pub fn perceptual_smooth(image: &Raster, config: &Config) -> Raster {
@@ -3214,60 +3247,16 @@ pub fn perceptual_smooth(image: &Raster, config: &Config) -> Raster {
     let sigma = config.smoothing_spatial_sigma.max(0.1);
     let mut numerator = vec![[0.0_f32; 3]; image.pixels.len()];
     let mut denominator = vec![0.0_f32; image.pixels.len()];
-    // The bilateral range term is symmetric. Cache only one orientation of
-    // every offset and reuse it for the opposite orientation. This preserves
-    // the original dy/dx-major accumulation order while halving the costly
-    // CIEDE2000 and exponential batches.
-    let canonical_offsets: Vec<(isize, isize)> = (0..=radius)
-        .flat_map(|dy| {
-            (-radius..=radius)
-                .filter(move |&dx| dy > 0 || dx > 0)
-                .map(move |dx| (dx, dy))
-        })
-        .collect();
-    let offset_span = (2 * radius + 1) as usize;
-    let mut offset_slots = vec![usize::MAX; offset_span * offset_span];
-    for (slot, &(dx, dy)) in canonical_offsets.iter().enumerate() {
-        offset_slots[(dy + radius) as usize * offset_span + (dx + radius) as usize] = slot;
-    }
-    let mut cached_range_weights = Vec::<Vec<f32>>::with_capacity(canonical_offsets.len());
-    for &(dx, dy) in &canonical_offsets {
-        let samples: Vec<Lab> = (0..image.pixels.len())
-            .into_par_iter()
-            .map(|index| {
-                let x = (index % image.width) as isize;
-                let y = (index / image.width) as isize;
-                let px = (x + dx).clamp(0, image.width as isize - 1) as usize;
-                let py = (y + dy).clamp(0, image.height as isize - 1) as usize;
-                lab[py * image.width + px]
-            })
-            .collect();
-        let distances: Vec<f32> = lab
-            .par_iter()
-            .zip(samples.par_iter())
-            .map(|(&first, &second)| delta_e94_local(first, second))
-            .collect();
-        let mut weights: Vec<f32> = distances
-            .into_par_iter()
-            .enumerate()
-            .map(|(index, distance)| {
-                let centre = lab[index];
-                let sample = samples[index];
-                let threshold = adaptive_tolerance(0.5 * (centre.l + sample.l), config).max(1e-3);
-                let ratio = distance / threshold;
-                -0.5_f32 * (ratio * ratio)
-            })
-            .collect();
-        crate::elementary::exp_f32_in_place(&mut weights);
-        cached_range_weights.push(weights);
-    }
     // Python advances one complete shifted image at a time. Besides enabling
     // NumPy's dispatched contiguous `exp`, this fixes the accumulation order
-    // for every output pixel. Keep that same dy/dx-major traversal here.
+    // for every output pixel. Keep that same dy/dx-major traversal while
+    // retaining only the range plane consumed by the current shift.
     for dy in -radius..=radius {
         for dx in -radius..=radius {
             let spatial =
                 crate::elementary::exp_f64(-0.5_f64 * (dx * dx + dy * dy) as f64 / (sigma * sigma));
+            let range_weights = (dx != 0 || dy != 0)
+                .then(|| bilateral_range_weights(&lab, image.width, image.height, dx, dy, config));
             numerator
                 .par_iter_mut()
                 .zip(denominator.par_iter_mut())
@@ -3279,21 +3268,7 @@ pub fn perceptual_smooth(image: &Raster, config: &Config) -> Raster {
                     let py = (y + dy).clamp(0, image.height as isize - 1);
                     let sample_index = py as usize * image.width + px as usize;
                     let sample = lab[sample_index];
-                    let actual_dx = px - x;
-                    let actual_dy = py - y;
-                    let range = if actual_dx == 0 && actual_dy == 0 {
-                        1.0
-                    } else if actual_dy > 0 || (actual_dy == 0 && actual_dx > 0) {
-                        let slot = offset_slots[(actual_dy + radius) as usize * offset_span
-                            + (actual_dx + radius) as usize];
-                        cached_range_weights[slot][index]
-                    } else {
-                        let canonical_dx = -actual_dx;
-                        let canonical_dy = -actual_dy;
-                        let slot = offset_slots[(canonical_dy + radius) as usize * offset_span
-                            + (canonical_dx + radius) as usize];
-                        cached_range_weights[slot][sample_index]
-                    };
+                    let range = range_weights.as_ref().map_or(1.0, |weights| weights[index]);
                     let weight = (spatial * range as f64) as f32;
                     sum[0] += sample.l * weight;
                     sum[1] += sample.a * weight;

@@ -29,6 +29,7 @@ pub struct SvgSummary {
     pub merged_arc_segments: usize,
     pub paint_paths_merged: usize,
     pub paint_batches: usize,
+    pub alpha_mask_paths: usize,
     pub bytes: usize,
 }
 
@@ -49,7 +50,23 @@ impl SvgSummary {
         self.merged_arc_segments += other.merged_arc_segments;
         self.paint_paths_merged += other.paint_paths_merged;
         self.paint_batches += other.paint_batches;
+        self.alpha_mask_paths += other.alpha_mask_paths;
     }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct AlphaMaskLayer {
+    pub path_data: String,
+    /// Source-over opacity chosen so this nested layer raises accumulated
+    /// coverage to its corresponding alpha level. An antialiased opaque
+    /// silhouette is a single full-opacity layer; durable authored
+    /// transparency may use nested two-bit layers.
+    pub opacity: f32,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct AlphaMask {
+    pub layers: Vec<AlphaMaskLayer>,
 }
 
 #[derive(Clone, Debug)]
@@ -570,9 +587,56 @@ pub(crate) fn serialize_filtered(
     final_geometry: bool,
     excluded_regions: &[bool],
 ) -> (String, SvgSummary) {
+    serialize_filtered_with_alpha(
+        width,
+        height,
+        geometries,
+        paints,
+        structural,
+        paint_overlap,
+        final_geometry,
+        excluded_regions,
+        None,
+    )
+}
+
+/// Serialize selected raster regions and optionally apply an independent
+/// vector alpha mask to the complete Paint and structural content.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn serialize_filtered_with_alpha(
+    width: usize,
+    height: usize,
+    geometries: &[RegionGeometry],
+    paints: &[Paint],
+    structural: &StructuralInk,
+    paint_overlap: f32,
+    final_geometry: bool,
+    excluded_regions: &[bool],
+    alpha_mask: Option<&AlphaMask>,
+) -> (String, SvgSummary) {
     let mut gradient_ids = HashMap::<String, String>::new();
     let mut definitions = String::new();
     let mut summary = SvgSummary::default();
+    if let Some(mask) = alpha_mask {
+        let _ = write!(
+            definitions,
+            "<mask id=\"source-alpha-mask\" maskUnits=\"userSpaceOnUse\" maskContentUnits=\"userSpaceOnUse\" x=\"0\" y=\"0\" width=\"{}\" height=\"{}\" mask-type=\"alpha\" style=\"mask-type:alpha\">",
+            width, height
+        );
+        for layer in &mask.layers {
+            if layer.path_data.is_empty() || layer.opacity <= 0.0 {
+                continue;
+            }
+            let _ = write!(
+                definitions,
+                "<path d=\"{}\" fill=\"#ffffff\" fill-opacity=\"{}\" fill-rule=\"evenodd\"/>",
+                layer.path_data,
+                number(layer.opacity.clamp(0.0, 1.0)),
+            );
+            summary.alpha_mask_paths += 1;
+        }
+        definitions.push_str("</mask>");
+    }
     for (region, paint) in paints.iter().enumerate() {
         if excluded_regions.get(region).copied().unwrap_or(false) {
             continue;
@@ -731,6 +795,9 @@ pub(crate) fn serialize_filtered(
         summary.structural_strokes += 1;
     }
     body.push_str("</g>");
+    if alpha_mask.is_some() {
+        body = format!("<g mask=\"url(#source-alpha-mask)\">{body}</g>");
+    }
     let document = format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?><svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{}\" height=\"{}\" viewBox=\"0 0 {} {}\"><defs>{}</defs>{}</svg>\n",
         width, height, width, height, definitions, body

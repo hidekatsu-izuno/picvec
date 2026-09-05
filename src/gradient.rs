@@ -104,6 +104,15 @@ pub struct GradientSummary {
     pub maximum_stops: usize,
     pub primary_gate_active: bool,
     pub primary_solid_regions: usize,
+    /// Faces that passed the primary gate but were proven Solid before any
+    /// gradient geometry was fitted.
+    pub provable_solid_regions: usize,
+    /// Faces whose Solid error cannot clear the gradient promotion charge.
+    pub gain_bound_solid_regions: usize,
+    /// Faces whose complete sample range is already within the Solid limit.
+    pub low_range_solid_regions: usize,
+    /// Faces for which linear/radial gradient models were actually fitted.
+    pub gradient_model_search_regions: usize,
     pub full_fit_regions: usize,
 }
 
@@ -207,7 +216,9 @@ fn primary_gradient_coherence(
     directional_only: bool,
     sample_budget: usize,
 ) -> f32 {
-    let samples = sampled_indices(samples, sample_budget.max(8));
+    let sample_budget = sample_budget.max(8);
+    let sampled = (samples.len() > sample_budget).then(|| sampled_indices(samples, sample_budget));
+    let samples = sampled.as_deref().unwrap_or(samples);
     if samples.len() < 4 {
         return 1.0;
     }
@@ -235,7 +246,7 @@ fn primary_gradient_coherence(
     let mut yy = 0.0_f32;
     let mut x_color = [0.0_f32; 3];
     let mut y_color = [0.0_f32; 3];
-    for &index in &samples {
+    for &index in samples {
         let x = (index % source.width) as f32 - mean_x;
         let y = (index / source.width) as f32 - mean_y;
         xx += x * x;
@@ -273,15 +284,16 @@ fn primary_gradient_coherence(
             RadialOrigin::BottomRight,
         ] {
             let (center, radius) = radial_geometry(origin, region_bounds);
-            let parameters = samples
+            let mean_parameter = samples
                 .iter()
                 .map(|&index| radial_parameter(index, source.width, center, radius))
-                .collect::<Vec<_>>();
-            let mean_parameter = parameters.iter().sum::<f32>() / divisor;
+                .sum::<f32>()
+                / divisor;
             let mut variance = 0.0_f32;
             let mut covariance = [0.0_f32; 3];
-            for (&index, &parameter) in samples.iter().zip(&parameters) {
-                let parameter = parameter - mean_parameter;
+            for &index in samples {
+                let parameter =
+                    radial_parameter(index, source.width, center, radius) - mean_parameter;
                 variance += parameter * parameter;
                 for channel in 0..3 {
                     covariance[channel] +=
@@ -663,6 +675,14 @@ struct ErrorStats {
     percentile: f32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RegionFitWork {
+    PrimarySolid,
+    GainBoundSolid,
+    LowRangeSolid,
+    GradientModelSearch,
+}
+
 fn paint_error(
     source: &Raster,
     samples: &[usize],
@@ -701,53 +721,58 @@ fn paint_error_against_labs(
             percentile: 0.0,
         };
     }
-    let references: Vec<Lab> = samples.iter().map(|&index| source_labs[index]).collect();
-    let rendered = Raster::new(
-        samples.len(),
-        1,
-        samples.iter().map(|&index| predicted(index)).collect(),
-    );
-    let rendered_labs = lab_pixels(&rendered);
-    let errors = delta_e2000_pairs(&references, &rendered_labs);
-    ErrorStats {
-        mean: numpy_sum_f32(&errors) / errors.len() as f32,
-        percentile: percentile(errors, 0.90),
-    }
+    let references = samples
+        .iter()
+        .map(|&index| source_labs[index])
+        .collect::<Vec<_>>();
+    let rendered = samples
+        .iter()
+        .map(|&index| predicted(index))
+        .collect::<Vec<_>>();
+    paint_error_against_sample_labs(&references, rendered)
 }
 
-fn constant_paint_error_against_labs(
-    source_labs: &[Lab],
-    samples: &[usize],
-    rendered_lab: Lab,
-) -> ErrorStats {
-    if samples.is_empty() {
+fn paint_error_against_sample_labs(reference_labs: &[Lab], rendered: Vec<[f32; 3]>) -> ErrorStats {
+    if reference_labs.is_empty() {
         return ErrorStats {
             mean: 0.0,
             percentile: 0.0,
         };
     }
-    let references: Vec<Lab> = samples.iter().map(|&index| source_labs[index]).collect();
-    let errors = delta_e2000_to_many(&references, rendered_lab);
+    assert_eq!(reference_labs.len(), rendered.len());
+    let rendered = Raster::new(rendered.len(), 1, rendered);
+    let rendered_labs = lab_pixels(&rendered);
+    let errors = delta_e2000_pairs(reference_labs, &rendered_labs);
     ErrorStats {
         mean: numpy_sum_f32(&errors) / errors.len() as f32,
         percentile: percentile(errors, 0.90),
     }
 }
 
-fn gradient_error_against_labs(
-    source_labs: &[Lab],
-    samples: &[usize],
+fn constant_paint_error_for_labs(reference_labs: &[Lab], rendered_lab: Lab) -> ErrorStats {
+    if reference_labs.is_empty() {
+        return ErrorStats {
+            mean: 0.0,
+            percentile: 0.0,
+        };
+    }
+    let errors = delta_e2000_to_many(reference_labs, rendered_lab);
+    ErrorStats {
+        mean: numpy_sum_f32(&errors) / errors.len() as f32,
+        percentile: percentile(errors, 0.90),
+    }
+}
+
+fn gradient_error_against_sample_labs(
+    reference_labs: &[Lab],
     parameters: &[f32],
     stops: &[ColorStop],
 ) -> ErrorStats {
-    let lookup: HashMap<usize, f32> = samples
+    let rendered = parameters
         .iter()
-        .copied()
-        .zip(parameters.iter().copied())
+        .map(|&parameter| interpolate(stops, parameter))
         .collect();
-    paint_error_against_labs(source_labs, samples, |index| {
-        interpolate(stops, lookup[&index])
-    })
+    paint_error_against_sample_labs(reference_labs, rendered)
 }
 
 fn paint_stats_against_labs(
@@ -757,6 +782,19 @@ fn paint_stats_against_labs(
     paint: &Paint,
 ) -> ErrorStats {
     paint_error_against_labs(source_labs, samples, |index| paint_at(paint, index, width))
+}
+
+fn paint_stats_against_sample_labs(
+    reference_labs: &[Lab],
+    samples: &[usize],
+    width: usize,
+    paint: &Paint,
+) -> ErrorStats {
+    let rendered = samples
+        .iter()
+        .map(|&index| paint_at(paint, index, width))
+        .collect();
+    paint_error_against_sample_labs(reference_labs, rendered)
 }
 
 fn preprocess_color_values(colors: Vec<[f32; 3]>) -> Vec<Lab> {
@@ -1093,12 +1131,28 @@ fn gradient_error(
     parameters: &[f32],
     stops: &[ColorStop],
 ) -> ErrorStats {
-    let lookup: HashMap<usize, f32> = samples
+    assert_eq!(samples.len(), parameters.len());
+    if samples.is_empty() {
+        return ErrorStats {
+            mean: 0.0,
+            percentile: 0.0,
+        };
+    }
+    let references = samples
         .iter()
-        .copied()
-        .zip(parameters.iter().copied())
-        .collect();
-    paint_error(source, samples, |index| interpolate(stops, lookup[&index]))
+        .map(|&index| source.pixels[index])
+        .collect::<Vec<_>>();
+    let rendered = parameters
+        .iter()
+        .map(|&parameter| interpolate(stops, parameter))
+        .collect::<Vec<_>>();
+    let reference_lab = preprocess_color_values(references);
+    let rendered_lab = preprocess_color_values(rendered);
+    let errors = delta_e2000_pairs(&reference_lab, &rendered_lab);
+    ErrorStats {
+        mean: numpy_sum_f32(&errors) / errors.len() as f32,
+        percentile: percentile(errors, 0.90),
+    }
 }
 
 fn weighted_median_lab(values: &[(f32, f32)]) -> f32 {
@@ -1218,37 +1272,35 @@ fn legacy_stops(source_labs: &[Lab], samples: &[usize], parameters: &[f32]) -> V
         .collect()
 }
 
-fn legacy_gradient_error_against_labs(
-    source_labs: &[Lab],
-    samples: &[usize],
+fn legacy_gradient_error_against_sample_labs(
+    reference_labs: &[Lab],
     parameters: &[f32],
     stops: &[ColorStop],
 ) -> ErrorStats {
-    let lookup: HashMap<usize, f32> = samples
-        .iter()
-        .copied()
-        .zip(parameters.iter().copied())
-        .collect();
     let colors: Vec<[f32; 3]> = stops
         .iter()
         .map(|stop| stop.color.map(|value| value as f32))
         .collect();
-    paint_error_against_labs(source_labs, samples, |index| {
-        let parameter = lookup[&index].clamp(0.0, 1.0);
-        let (first, second, first_weight, second_weight) = if parameter <= 0.5 {
-            (0, 1, 1.0 - 2.0 * parameter, 2.0 * parameter)
-        } else {
-            (1, 2, 2.0 - 2.0 * parameter, 2.0 * parameter - 1.0)
-        };
-        [0, 1, 2].map(|channel| {
-            first_weight * colors[first][channel] + second_weight * colors[second][channel]
+    let rendered = parameters
+        .iter()
+        .map(|&parameter| {
+            let parameter = parameter.clamp(0.0, 1.0);
+            let (first, second, first_weight, second_weight) = if parameter <= 0.5 {
+                (0, 1, 1.0 - 2.0 * parameter, 2.0 * parameter)
+            } else {
+                (1, 2, 2.0 - 2.0 * parameter, 2.0 * parameter - 1.0)
+            };
+            [0, 1, 2].map(|channel| {
+                first_weight * colors[first][channel] + second_weight * colors[second][channel]
+            })
         })
-    })
+        .collect();
+    paint_error_against_sample_labs(reference_labs, rendered)
 }
 
 fn add_office_stops(
     source: &Raster,
-    source_labs: &[Lab],
+    reference_labs: &[Lab],
     samples: &[usize],
     parameters: &[f32],
     template: &Paint,
@@ -1278,7 +1330,7 @@ fn add_office_stops(
             proposed.push(offset);
             proposed.sort_by(f64::total_cmp);
             let stops = fitted_stops(source, samples, parameters, &proposed);
-            let stats = gradient_error_against_labs(source_labs, samples, parameters, &stops);
+            let stats = gradient_error_against_sample_labs(reference_labs, parameters, &stops);
             let candidate = objective(stats);
             if best
                 .as_ref()
@@ -1324,6 +1376,7 @@ fn add_office_stops(
 fn legacy_gradient_candidate(
     source: &Raster,
     source_labs: &[Lab],
+    reference_labs: &[Lab],
     samples: &[usize],
     region_bounds: Bounds,
     directional_only: bool,
@@ -1347,7 +1400,7 @@ fn legacy_gradient_candidate(
         let (start, end, parameters) =
             legacy_linear_geometry_parameters(samples, source.width, direction);
         let stops = legacy_stops(source_labs, samples, &parameters);
-        let stats = legacy_gradient_error_against_labs(source_labs, samples, &parameters, &stops);
+        let stats = legacy_gradient_error_against_sample_labs(reference_labs, &parameters, &stops);
         candidates.push((
             Paint::Linear {
                 preset: LinearPreset::Fitted,
@@ -1403,7 +1456,7 @@ fn legacy_gradient_candidate(
             .map(|&index| radial_parameter(index, source.width, radial_center, radius))
             .collect();
         let stops = legacy_stops(source_labs, samples, &parameters);
-        let stats = legacy_gradient_error_against_labs(source_labs, samples, &parameters, &stops);
+        let stats = legacy_gradient_error_against_sample_labs(reference_labs, &parameters, &stops);
         candidates.push((
             Paint::Radial {
                 origin: RadialOrigin::Fitted,
@@ -1427,6 +1480,27 @@ fn office_gradient_candidate(
     region_bounds: Bounds,
     maximum_stops: usize,
 ) -> Option<(Paint, ErrorStats)> {
+    let reference_labs = samples
+        .iter()
+        .map(|&index| source_labs[index])
+        .collect::<Vec<_>>();
+    office_gradient_candidate_with_labs(
+        source,
+        &reference_labs,
+        samples,
+        region_bounds,
+        maximum_stops,
+    )
+}
+
+fn office_gradient_candidate_with_labs(
+    source: &Raster,
+    reference_labs: &[Lab],
+    samples: &[usize],
+    region_bounds: Bounds,
+    maximum_stops: usize,
+) -> Option<(Paint, ErrorStats)> {
+    assert_eq!(reference_labs.len(), samples.len());
     let mut candidates = Vec::<(f32, Paint, Vec<f32>, Option<ErrorStats>)>::new();
     {
         let mut push_linear = |preset: LinearPreset, start: Point, end: Point| {
@@ -1493,8 +1567,8 @@ fn office_gradient_candidate(
     }
     candidates.sort_by(|left, right| left.0.total_cmp(&right.0));
     for candidate in candidates.iter_mut().take(3) {
-        candidate.3 = Some(paint_stats_against_labs(
-            source_labs,
+        candidate.3 = Some(paint_stats_against_sample_labs(
+            reference_labs,
             samples,
             source.width,
             &candidate.1,
@@ -1509,7 +1583,7 @@ fn office_gradient_candidate(
     let selected_two_stop = candidates[selected].1.clone();
     let (mut gradient, mut gradient_stats) = add_office_stops(
         source,
-        source_labs,
+        reference_labs,
         samples,
         &candidates[selected].2,
         &candidates[selected].1,
@@ -1519,15 +1593,16 @@ fn office_gradient_candidate(
 
     let mean = mean_color(source, samples);
     let solid = Paint::Solid { color: mean };
-    let solid_stats = paint_stats_against_labs(source_labs, samples, source.width, &solid);
+    let solid_stats =
+        paint_stats_against_sample_labs(reference_labs, samples, source.width, &solid);
     let percentile_guard = solid_stats.percentile + (0.10 * solid_stats.percentile).max(1.0);
     let mut accepted =
         solid_stats.mean >= gradient_stats.mean && gradient_stats.percentile <= percentile_guard;
     if !accepted && maximum_stops > 2 {
         for candidate in &mut candidates {
             if candidate.3.is_none() {
-                candidate.3 = Some(paint_stats_against_labs(
-                    source_labs,
+                candidate.3 = Some(paint_stats_against_sample_labs(
+                    reference_labs,
                     samples,
                     source.width,
                     &candidate.1,
@@ -1555,7 +1630,7 @@ fn office_gradient_candidate(
             }
             let expanded = add_office_stops(
                 source,
-                source_labs,
+                reference_labs,
                 samples,
                 &candidates[index].2,
                 &candidates[index].1,
@@ -1587,7 +1662,7 @@ fn fit_region(
     sample_budget: usize,
     use_primary_gate: bool,
     config: &Config,
-) -> (Paint, f32, bool) {
+) -> (Paint, f32, RegionFitWork) {
     let sample_source = if paint_indices.is_empty() {
         indices
     } else {
@@ -1596,8 +1671,10 @@ fn fit_region(
     // A bounded, row-major stratified sample acts as the finest Paint leaf
     // budget. Larger flat interiors therefore do not dominate the fit, while
     // edge-rich and small regions still retain every available observation.
-    let samples = sampled_indices(sample_source, sample_budget);
-    let region_bounds = bounds(&samples, source.width);
+    let sampled = (sample_source.len() > sample_budget)
+        .then(|| sampled_indices(sample_source, sample_budget));
+    let samples = sampled.as_deref().unwrap_or(sample_source);
+    let region_bounds = bounds(samples, source.width);
     let small_region = indices.len() < config.minimum_gradient_area as usize;
     let threshold = if small_region {
         config.paint_primary_small_min_explained_variance
@@ -1614,16 +1691,16 @@ fn fit_region(
         || traced
         || primary_gradient_coherence(
             source,
-            &samples,
+            samples,
             region_bounds,
             directional_only,
             config.paint_primary_sample_budget,
         ) >= threshold;
-    let (paint, error) = fit_region_samples(
+    fit_region_samples(
         label,
         source,
         source_labs,
-        &samples,
+        samples,
         indices.len(),
         region_bounds,
         canonical_solid,
@@ -1631,8 +1708,7 @@ fn fit_region(
         directional_only,
         run_full_fit,
         config,
-    );
-    (paint, error, run_full_fit)
+    )
 }
 
 fn gradient_gain_is_sufficient(
@@ -1643,9 +1719,27 @@ fn gradient_gain_is_sufficient(
     region_area: usize,
     minimum_gradient_area: usize,
 ) -> bool {
-    let required_gain = if small_region {
+    let required_gain = required_gradient_gain(
+        small_region,
+        minimum_improvement,
+        region_area,
+        minimum_gradient_area,
+    );
+    let relative_gain = !small_region || gradient.mean <= solid.mean * 0.88;
+    relative_gain
+        && solid.mean - gradient.mean >= required_gain
+        && gradient.percentile <= solid.percentile + 1e-4
+}
+
+fn required_gradient_gain(
+    small_region: bool,
+    minimum_improvement: f32,
+    region_area: usize,
+    minimum_gradient_area: usize,
+) -> f32 {
+    if small_region {
         // Charge every new gradient the same minimum total perceptual gain
-        // as a face at the configured area threshold.  Without this
+        // as a face at the configured area threshold. Without this
         // normalisation, many tiny faces can each buy an SVG definition with
         // a small per-pixel improvement and make the vector representation
         // substantially more complex for little image-wide benefit.
@@ -1654,11 +1748,7 @@ fn gradient_gain_is_sufficient(
         small_region_office_required_gain(minimum_improvement, region_area, minimum_gradient_area)
     } else {
         0.05 * 2.3
-    };
-    let relative_gain = !small_region || gradient.mean <= solid.mean * 0.88;
-    relative_gain
-        && solid.mean - gradient.mean >= required_gain
-        && gradient.percentile <= solid.percentile + 1e-4
+    }
 }
 
 fn small_region_office_required_gain(
@@ -1682,15 +1772,20 @@ fn fit_region_samples(
     directional_only: bool,
     run_full_fit: bool,
     config: &Config,
-) -> (Paint, f32) {
+) -> (Paint, f32, RegionFitWork) {
     // The reference fits Solid from the quantized canonical image while all
     // model errors are measured on native Paint samples.  Using the source
     // mean here makes every nominally solid face a different colour before
     // gradient selection even starts.
     let solid_color = canonical_solid;
-    let solid_error = constant_paint_error_against_labs(source_labs, samples, canonical_solid_lab);
+    let sample_labs: Vec<Lab> = samples.iter().map(|&index| source_labs[index]).collect();
+    let solid_error = constant_paint_error_for_labs(&sample_labs, canonical_solid_lab);
     if !run_full_fit {
-        return (Paint::Solid { color: solid_color }, solid_error.mean);
+        return (
+            Paint::Solid { color: solid_color },
+            solid_error.mean,
+            RegionFitWork::PrimarySolid,
+        );
     }
     let trace = cfg!(feature = "diagnostics")
         && std::env::var("PICVEC_TRACE_PAINT_LABEL")
@@ -1699,36 +1794,40 @@ fn fit_region_samples(
             == Some(label);
     let small_region = area < config.minimum_gradient_area as usize;
     let minimum_improvement = 0.25 * 2.3;
-    // Small faces start from Solid and can only be promoted by the Office
-    // candidate. Its error is non-negative, so when the fixed complexity
-    // charge exceeds the complete Solid error no gradient can possibly win.
-    // Return before the median/range calculation as well as candidate fitting.
-    if small_region
-        && solid_error.mean
-            < small_region_office_required_gain(
-                minimum_improvement,
-                area,
-                config.minimum_gradient_area as usize,
-            )
+    // Every candidate error is non-negative. If even a hypothetical perfect
+    // gradient cannot clear the existing promotion charge, no emitted
+    // gradient can win. This proof applies to normal as well as small faces
+    // and avoids all geometry searches without changing a fit decision.
+    if solid_error.mean
+        < required_gradient_gain(
+            small_region,
+            minimum_improvement,
+            area,
+            config.minimum_gradient_area as usize,
+        )
     {
-        return (Paint::Solid { color: solid_color }, solid_error.mean);
+        return (
+            Paint::Solid { color: solid_color },
+            solid_error.mean,
+            RegionFitWork::GainBoundSolid,
+        );
     }
-    let sample_labs: Vec<Lab> = samples.iter().map(|&index| source_labs[index]).collect();
     let median_lab = Lab {
         l: median(&mut sample_labs.iter().map(|value| value.l).collect::<Vec<_>>()),
         a: median(&mut sample_labs.iter().map(|value| value.a).collect::<Vec<_>>()),
         b: median(&mut sample_labs.iter().map(|value| value.b).collect::<Vec<_>>()),
     };
-    let perceptual_range = percentile(
-        delta_e2000_pairs(&sample_labs, &vec![median_lab; sample_labs.len()]),
-        0.90,
-    );
+    let perceptual_range = percentile(delta_e2000_to_many(&sample_labs, median_lab), 0.90);
     // A complete just-noticeable-difference is too coarse for smooth,
     // low-chroma shading: on light monochrome artwork it can make a visibly
     // modelled ramp look flat after vectorization. The improvement and
     // complexity gates below still prevent gratuitous SVG gradients.
     if perceptual_range <= config.solid_color_max_delta_e {
-        return (Paint::Solid { color: solid_color }, solid_error.mean);
+        return (
+            Paint::Solid { color: solid_color },
+            solid_error.mean,
+            RegionFitWork::LowRangeSolid,
+        );
     }
     // Rank every geometry family with one perceptual objective. Previously
     // the source-fitted direction and the Office presets had different
@@ -1739,15 +1838,16 @@ fn fit_region_samples(
         candidates.push(legacy_gradient_candidate(
             source,
             source_labs,
+            &sample_labs,
             samples,
             region_bounds,
             directional_only,
         ));
     }
 
-    let office_candidate = office_gradient_candidate(
+    let office_candidate = office_gradient_candidate_with_labs(
         source,
-        source_labs,
+        &sample_labs,
         samples,
         region_bounds,
         config.maximum_gradient_stops,
@@ -1776,9 +1876,17 @@ fn fit_region_samples(
             config.minimum_gradient_area as usize,
         )
     {
-        return (selected, selected_stats.mean);
+        return (
+            selected,
+            selected_stats.mean,
+            RegionFitWork::GradientModelSearch,
+        );
     }
-    (Paint::Solid { color: solid_color }, solid_error.mean)
+    (
+        Paint::Solid { color: solid_color },
+        solid_error.mean,
+        RegionFitWork::GradientModelSearch,
+    )
 }
 
 fn fitted_stops_direct(
@@ -5334,7 +5442,7 @@ fn fit_all_internal(
         1,
         canonical_solids.clone(),
     ));
-    let fitted: Vec<(Paint, f32, bool)> = region_indices
+    let fitted: Vec<(Paint, f32, RegionFitWork)> = region_indices
         .par_iter()
         .zip(region_paint_indices.par_iter())
         .enumerate()
@@ -5387,13 +5495,32 @@ fn fit_all_internal(
             )
         })
         .collect();
-    let full_fit_regions = fitted.iter().filter(|value| value.2).count();
+    let primary_solid_regions = fitted
+        .iter()
+        .filter(|value| value.2 == RegionFitWork::PrimarySolid)
+        .count();
+    let gain_bound_solid_regions = fitted
+        .iter()
+        .filter(|value| value.2 == RegionFitWork::GainBoundSolid)
+        .count();
+    let low_range_solid_regions = fitted
+        .iter()
+        .filter(|value| value.2 == RegionFitWork::LowRangeSolid)
+        .count();
+    let gradient_model_search_regions = fitted
+        .iter()
+        .filter(|value| value.2 == RegionFitWork::GradientModelSearch)
+        .count();
+    let provable_solid_regions = gain_bound_solid_regions + low_range_solid_regions;
+    let full_fit_regions = fitted.len() - primary_solid_regions;
     if cfg!(feature = "diagnostics") && config.retain_diagnostics {
         eprintln!(
-            "picvec paint substage initial: {:.3}s (primary solid {}, full fit {})",
+            "picvec paint substage initial: {:.3}s (primary solid {}, gain-bound solid {}, low-range solid {}, model search {})",
             initial_started.elapsed().as_secs_f64(),
-            fitted.len() - full_fit_regions,
-            full_fit_regions,
+            primary_solid_regions,
+            gain_bound_solid_regions,
+            low_range_solid_regions,
+            gradient_model_search_regions,
         );
     }
     let mut paints: Vec<Paint> = fitted.iter().map(|value| value.0.clone()).collect();
@@ -5482,7 +5609,11 @@ fn fit_all_internal(
     let mut summary = GradientSummary {
         coupled_linear_regions: coupled + locally_coupled,
         primary_gate_active: use_primary_gate,
-        primary_solid_regions: fitted.len() - full_fit_regions,
+        primary_solid_regions,
+        provable_solid_regions,
+        gain_bound_solid_regions,
+        low_range_solid_regions,
+        gradient_model_search_regions,
         full_fit_regions,
         ..GradientSummary::default()
     };
@@ -5583,7 +5714,7 @@ mod tests {
         let solid = [0.31, 0.57, 0.83];
         let rendered_lab = lab_pixels(&Raster::new(1, 1, vec![solid]))[0];
         let previous = paint_error_against_labs(&source_labs, &samples, |_| solid);
-        let cached = constant_paint_error_against_labs(&source_labs, &samples, rendered_lab);
+        let cached = constant_paint_error_for_labs(&source_labs, rendered_lab);
         assert_eq!(cached.mean.to_bits(), previous.mean.to_bits());
         assert_eq!(cached.percentile.to_bits(), previous.percentile.to_bits());
     }

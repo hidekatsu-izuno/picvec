@@ -9,8 +9,8 @@ use std::collections::HashSet;
 
 use serde::Serialize;
 
-use crate::color::{delta_e2000, rgb_to_lab};
-use crate::raster::{percentile, Raster};
+use crate::color::{delta_e2000_pairs, rgb_to_lab, Lab};
+use crate::raster::{percentile, Raster, RasterSource};
 use crate::{Error, Result};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -129,8 +129,8 @@ fn mapped_sample(
 /// larger source rectangle.  The local tail prevents small icon details from
 /// disappearing into a large flat background; only source edges not present
 /// in the candidate add an edge penalty.
-pub(crate) fn perceptual_score(
-    source: &Raster,
+pub(crate) fn perceptual_score<S: RasterSource + ?Sized>(
+    source: &S,
     region: SourceRect,
     candidate: &Raster,
     candidate_source: SourceRect,
@@ -140,17 +140,21 @@ pub(crate) fn perceptual_score(
         .sqrt()
         .ceil() as usize)
         .max(1);
-    let mut deltas = Vec::with_capacity(region.area().div_ceil(step * step));
-    let mut edge_samples = 0_usize;
-    let mut missing_edges = 0_usize;
+    let sample_capacity = region.area().div_ceil(step * step);
+    let mut source_samples = Vec::<Lab>::with_capacity(sample_capacity);
+    let mut represented_samples = Vec::<Lab>::with_capacity(sample_capacity);
+    let mut source_edge_starts = Vec::<Lab>::with_capacity(sample_capacity * 2);
+    let mut source_edge_ends = Vec::<Lab>::with_capacity(sample_capacity * 2);
+    let mut represented_edge_starts = Vec::<Lab>::with_capacity(sample_capacity * 2);
+    let mut represented_edge_ends = Vec::<(usize, usize)>::with_capacity(sample_capacity * 2);
     for y in (region.y..region.y + region.height).step_by(step) {
         for x in (region.x..region.x + region.width).step_by(step) {
             let source_pixel = source.get(x, y);
             let represented = mapped_sample(candidate, candidate_source, x as f32, y as f32);
-            deltas.push(delta_e2000(
-                rgb_to_lab(source_pixel),
-                rgb_to_lab(represented),
-            ));
+            let source_lab = rgb_to_lab(source_pixel);
+            let represented_lab = rgb_to_lab(represented);
+            source_samples.push(source_lab);
+            represented_samples.push(represented_lab);
             for (following_x, following_y) in [
                 ((x + 1).min(region.x + region.width - 1), y),
                 (x, (y + 1).min(region.y + region.height - 1)),
@@ -158,31 +162,53 @@ pub(crate) fn perceptual_score(
                 if following_x == x && following_y == y {
                     continue;
                 }
-                let source_edge = delta_e2000(
-                    rgb_to_lab(source_pixel),
-                    rgb_to_lab(source.get(following_x, following_y)),
-                );
-                if source_edge < 6.0 {
-                    continue;
-                }
-                edge_samples += 1;
-                let represented_following = mapped_sample(
-                    candidate,
-                    candidate_source,
-                    following_x as f32,
-                    following_y as f32,
-                );
-                let represented_edge =
-                    delta_e2000(rgb_to_lab(represented), rgb_to_lab(represented_following));
-                if represented_edge < 0.55 * source_edge {
-                    missing_edges += 1;
-                }
+                source_edge_starts.push(source_lab);
+                source_edge_ends.push(rgb_to_lab(source.get(following_x, following_y)));
+                represented_edge_starts.push(represented_lab);
+                represented_edge_ends.push((following_x, following_y));
             }
         }
     }
+    let deltas = delta_e2000_pairs(&source_samples, &represented_samples);
     if deltas.is_empty() {
         return PerceptualScore::default();
     }
+
+    // CIEDE2000 contains several elementary functions. Evaluate all source
+    // edges in contiguous SIMD batches, then evaluate only the rendered edges
+    // whose source counterparts are visible. This retains the exact sampling
+    // and thresholds while avoiding tens of thousands of one-element SIMD
+    // allocations per refinement region.
+    let source_edges = delta_e2000_pairs(&source_edge_starts, &source_edge_ends);
+    let mut visible_source_edges = Vec::<f32>::new();
+    let mut visible_represented_starts = Vec::<Lab>::new();
+    let mut visible_represented_ends = Vec::<Lab>::new();
+    for ((&source_edge, &represented_start), &(following_x, following_y)) in source_edges
+        .iter()
+        .zip(&represented_edge_starts)
+        .zip(&represented_edge_ends)
+    {
+        if source_edge < 6.0 {
+            continue;
+        }
+        let represented_following = mapped_sample(
+            candidate,
+            candidate_source,
+            following_x as f32,
+            following_y as f32,
+        );
+        visible_source_edges.push(source_edge);
+        visible_represented_starts.push(represented_start);
+        visible_represented_ends.push(rgb_to_lab(represented_following));
+    }
+    let represented_edges =
+        delta_e2000_pairs(&visible_represented_starts, &visible_represented_ends);
+    let edge_samples = visible_source_edges.len();
+    let missing_edges = represented_edges
+        .iter()
+        .zip(&visible_source_edges)
+        .filter(|(represented_edge, source_edge)| **represented_edge < 0.55 * **source_edge)
+        .count();
     let mean_delta_e = deltas.iter().sum::<f32>() / deltas.len() as f32;
     let p90_delta_e = percentile(deltas, 0.90);
     let missing_edge_fraction = missing_edges as f32 / edge_samples.max(1) as f32;
@@ -238,8 +264,8 @@ fn local_model_cost(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn plan_candidates(
-    source: &Raster,
+pub(crate) fn plan_candidates<S: RasterSource + ?Sized>(
+    source: &S,
     base: &Raster,
     labels: &[u32],
     tile_dimension: usize,
@@ -249,10 +275,10 @@ pub(crate) fn plan_candidates(
     let whole = SourceRect {
         x: 0,
         y: 0,
-        width: source.width,
-        height: source.height,
+        width: source.width(),
+        height: source.height(),
     };
-    let mut candidates = balanced_regions(source.width, source.height, tile_dimension)
+    let mut candidates = balanced_regions(source.width(), source.height(), tile_dimension)
         .into_iter()
         .filter_map(|core| {
             let baseline = perceptual_score(source, core, base, whole);
@@ -261,7 +287,7 @@ pub(crate) fn plan_candidates(
             }
             let model_cost = local_model_cost(
                 core,
-                (source.width, source.height),
+                (source.width(), source.height()),
                 labels,
                 (base.width, base.height),
             );

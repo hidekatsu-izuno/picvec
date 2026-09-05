@@ -2698,6 +2698,56 @@ pub(crate) fn replace_merged_labels(
     segmentation.summary.paint_aware_region_merges += accepted_merges;
 }
 
+/// Split an existing final ownership partition by an exact per-pixel class.
+///
+/// This pass deliberately does not refit Paint. Every returned region keeps
+/// the Paint of its parent, while callers can use the returned class for
+/// independent output decisions such as excluding only zero-alpha support.
+/// Running it after all Paint merges also prevents equal temporary and real
+/// colours from joining across the alpha-support boundary.
+pub(crate) fn split_partition_by_values<T: Copy + Ord>(
+    image: &Raster,
+    segmentation: &mut Segmentation,
+    values: &[T],
+) -> (Vec<usize>, Vec<T>) {
+    assert_eq!(values.len(), segmentation.labels.len());
+
+    let mut pairs = segmentation
+        .labels
+        .iter()
+        .copied()
+        .zip(values.iter().copied())
+        .collect::<Vec<_>>();
+    pairs.sort_unstable();
+    pairs.dedup();
+
+    let labels = segmentation
+        .labels
+        .iter()
+        .copied()
+        .zip(values.iter().copied())
+        .map(|pair| pairs.binary_search(&pair).unwrap_or(0) as u32)
+        .collect::<Vec<_>>();
+    let parent_labels = pairs
+        .iter()
+        .map(|&(parent, _)| parent as usize)
+        .collect::<Vec<_>>();
+    let partition_values = pairs.iter().map(|&(_, value)| value).collect::<Vec<_>>();
+    let paint_keys = parent_labels
+        .iter()
+        .map(|&parent| segmentation.paint_keys[parent])
+        .collect::<Vec<_>>();
+    let count = pairs.len();
+
+    segmentation.canonical = region_mean_raster_for(&segmentation.canonical, &labels, count);
+    segmentation.labels = labels;
+    segmentation.paint_keys = paint_keys;
+    segmentation.regions = region_stats(image, &segmentation.labels, count);
+    segmentation.summary.merged_regions = count;
+
+    (parent_labels, partition_values)
+}
+
 /// Compact a final exact-Paint ownership partition without changing the
 /// canonical raster that positioned its external shared boundaries.
 ///
@@ -4073,6 +4123,36 @@ pub fn region_mean_raster(image: &Raster, segmentation: &Segmentation) -> Raster
 mod tests {
     use super::*;
     use crate::edge::classify;
+
+    #[test]
+    fn exact_values_split_final_owner_without_changing_its_paint_key() {
+        let image = Raster::new(
+            3,
+            1,
+            vec![[0.2, 0.3, 0.4], [0.2, 0.3, 0.4], [0.8, 0.7, 0.6]],
+        );
+        let mut segmentation = Segmentation {
+            width: 3,
+            height: 1,
+            labels: vec![0, 0, 1],
+            paint_keys: vec![7, 9],
+            paint_samples: vec![true; 3],
+            canonical: image.clone(),
+            regions: region_stats(&image, &[0, 0, 1], 2),
+            summary: SegmentationSummary {
+                merged_regions: 2,
+                ..SegmentationSummary::default()
+            },
+        };
+
+        let (parents, values) = split_partition_by_values(&image, &mut segmentation, &[0, 1, 1]);
+
+        assert_eq!(segmentation.labels, vec![0, 1, 2]);
+        assert_eq!(segmentation.paint_keys, vec![7, 7, 9]);
+        assert_eq!(parents, vec![0, 0, 1]);
+        assert_eq!(values, vec![0, 1, 1]);
+        assert_eq!(segmentation.summary.merged_regions, 3);
+    }
 
     #[test]
     fn hierarchical_connected_components_match_dense_label_order() {
