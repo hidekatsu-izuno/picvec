@@ -527,3 +527,56 @@ authored gaps. A rendered pipeline test checks a filled outline with straight
 and circular sections, a tapered branch and an optional gap. Validation passes
 173 Rust tests (one existing manual sample test ignored), Clippy with warnings
 denied, formatting and diff checks.
+
+## Shared face contours across pixel fragments
+
+The remaining staircase on the left of `car` was produced by several stages
+acting together. Coreless red fragments could acquire the background's
+continuity class before a matching red owner was reached through neighbouring
+fragments. Short class-pair tracks were then excluded from joint fitting. Even
+when a smooth master existed, graph nodes were parameterized by raster length
+and clamped back towards pixel corners, introducing steps or backward hooks.
+
+The geometry pass now:
+
+* Assigns coreless continuity classes by minimum accumulated perceptual colour
+  distance from durable faces over the whole adjacency graph. Paint ownership
+  and colours remain separate from these geometric classes.
+* Fits short tracks and traces each face against its complement, so changing
+  colours on the other side does not force an artificial contour junction.
+  Persistent geometric corners and actual graph branches still split fits.
+* Accepts a source-supported joint baseline even when another fairing pass
+  cannot reduce its segment count further.
+* Projects graph nodes onto the shared master and pools backward raster
+  excursions with isotonic regression. All slices retain the original master
+  and ordered parameters. The master and every mapped node are checked against
+  the existing `sqrt(2) + 0.25` working-pixel corridor before adoption.
+* Keeps validated node positions and uses that same corridor for incident
+  chains. A tighter downstream check previously restored a pixel staircase on
+  a neighbouring colour boundary after the exterior had been corrected.
+
+These rules contain no car-specific coordinates, colours or label IDs.
+
+The regenerated [car.svg](../sample/output/car.svg) and
+[10x source / before / after crop](../sample/comparison/car-left-lines.png)
+show the reported exterior staircase removed. In the diagnostic shared curves
+incident to background label 0, with endpoint midpoint in
+x=43..53, y=649..663, there were 8 exactly horizontal/vertical segments at
+least 0.5 pixels long before this change and zero afterwards. This measures
+vector geometry, rather than antialiasing in an enlarged raster rendering.
+The complete car and the code icon cropped from `cliparts-6x6` were also
+rendered and inspected.
+
+Regression coverage includes colour propagation through multiple fragments,
+nonuniform Bezier speed, ordered projection of raster backtracking, and a
+fragmented diagonal with a short shaded band and one-pixel excursions. The
+diagonal test runs in two orientations, checks the exterior for grid steps
+and backward hooks, checks its neighbouring colour boundary for grid steps,
+and verifies shared-loop continuity. The exterior regression fails on the
+previous implementation. All 177 Rust tests pass (one existing manual sample
+test ignored), as do Clippy with warnings denied, formatting and diff checks.
+
+On this workspace, single four-thread car conversions took approximately
+24.0 seconds before and 31.5 seconds after; these are individual runs, not a
+controlled benchmark. Fitting complete face contours adds work. The SVG size
+changed from 959,138 to 958,665 bytes; segmentation stayed at 1,331 regions.
