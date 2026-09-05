@@ -130,8 +130,8 @@ controls total candidates, not CPU workers. The SVG byte budget is unchanged.
 When transparent refinements replace the entire canvas, the hidden base paths
 and their gradient definitions are omitted from the final SVG.
 
-Narrow, source-supported outline bands can be represented by a centre-line
-and a jointly measured constant width before Paint segmentation. Both incident
+Narrow, source-supported dark and bright outline bands can be represented by a
+centre-line and a jointly measured constant width before Paint segmentation. Both incident
 colours are reconstructed beneath the line, including boundaries between
 different materials. Only continuous intervals with a supported ink core and
 consistent width and colour are transferred; diffuse shadows and strongly
@@ -140,6 +140,15 @@ pass handles the remaining candidates. Diagnostic reports count these early
 transfers in the base pass as `structural.recovered_boundary_strokes`.
 See [outline recovery and performance validation](docs/line-quality-performance.md)
 for the model's limits and comparison procedure.
+
+Band recovery also examines source contours before residual line classification
+can fragment them. It searches across the full supported band, measures both
+sharp transitions, and uses the interior ink colour rather than a single
+extreme pixel. Compatible detector fragments join only when the intervening
+source cross-sections support the same band; intentional gaps remain open.
+The recovered geometry, width and colour are retained through final output.
+Open recovery intervals use butt caps with a short original-Paint overlap,
+so rounding their ends cannot fill an authored break.
 
 Long, supported boundary and centre-line intervals are fitted to straight lines
 or circular arcs before free-form cubic fitting. The fit preserves shared graph

@@ -1273,7 +1273,11 @@ fn extend_structural_silhouette_antialias(source: &Raster, structural: &[bool]) 
 /// faces remain Paint-owned; there is intentionally no median-colour
 /// silhouette overlay that could flatten tyre or shadow gradients.
 pub fn analyse(source: &Raster, roles: &mut EdgeRoles) -> (Raster, StructuralInk) {
-    let recovered = stroke_model::recover(source, &roles.dark_boundary_graph);
+    let recovered = stroke_model::recover(
+        source,
+        &roles.dark_boundary_graph,
+        &roles.band_boundary_graph,
+    );
     let (mut classified_lines, classified_silhouettes) = source_structural_lines(source);
     let classified_silhouettes =
         extend_structural_silhouette_antialias(source, &classified_silhouettes);
@@ -4153,6 +4157,12 @@ pub fn select_missing_with_junctions(
         .into_par_iter()
         .enumerate()
         .filter_map(|(stroke_index, stroke)| {
+            if stroke.role == "boundary-stroke" {
+                // This model already owns the removed Paint band. Keep its
+                // jointly measured ink, width and centre-line: independently
+                // refitting or resampling its colour breaks that agreement.
+                return Some(stroke);
+            }
             let length = stroke
                 .points
                 .windows(2)

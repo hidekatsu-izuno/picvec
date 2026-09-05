@@ -66,6 +66,10 @@ pub struct EdgeRoles {
     pub gradient: Vec<f32>,
     pub visible_ridge_graph: Vec<SourceEdge>,
     pub dark_boundary_graph: Vec<SourceEdge>,
+    /// Unsplit source contours used only to propose jointly measured bands.
+    /// Residual overlay classification can fragment a wide or bright outline
+    /// before its two incident paints have been measured.
+    pub(crate) band_boundary_graph: Vec<SourceEdge>,
     pub summary: EdgeSummary,
 }
 
@@ -2984,6 +2988,16 @@ fn classify_normal_profile_edges(image: &Raster) -> EdgeRoles {
     let classified_chains =
         classify_skeleton_chains(&skeleton, &field, &lab, width, height, radius);
     let edge_chain_count = classified_chains.len();
+    let band_boundary_graph = classified_chains
+        .iter()
+        .filter(|chain| chain.points.len() >= 12)
+        .map(|chain| SourceEdge {
+            points: chain.points.clone(),
+            width: 1.2,
+            role: "band-boundary",
+            width_samples: Vec::new(),
+        })
+        .collect();
     let edge_chain_samples = classified_chains
         .iter()
         .filter(|chain| chain.pixels.len() >= 3)
@@ -3152,6 +3166,7 @@ fn classify_normal_profile_edges(image: &Raster) -> EdgeRoles {
         gradient: field.edge,
         visible_ridge_graph,
         dark_boundary_graph,
+        band_boundary_graph,
         summary,
     }
 }

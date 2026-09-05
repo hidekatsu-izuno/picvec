@@ -318,3 +318,87 @@ Validation: 162 Rust tests pass (one manual large-sample regression ignored),
 9 Python evaluator tests pass, Clippy passes with warnings denied, and formatting
 and diff checks pass. The Python tests use the cached evaluator environment,
 which includes NumPy and Pillow.
+
+## Joint band recovery across detector fragments
+
+The primitive fitter above cannot regularize width while both sides of a
+painted band remain independent. The joint recovery pass now receives source
+contours before residual overlay classification, as well as the existing dark
+boundary graph. It evaluates both dark and bright bands. A provisional
+1.2-pixel edge width no longer limits the search for the core of a 12-pixel
+outline: core search extends at least eight pixels from the seed and the
+normal profile reaches at least twenty pixels to observe both incident paints.
+A weak distance tie-break and a locally supported core prevent an antialiased
+edge minimum from hiding a valid interior core.
+
+Both 20--80% transitions must be sharp, in addition to the existing contrast,
+width, length, colour and ink/paint mixture checks. Mild core shading is
+allowed, but the exported ink uses the median interior colour instead of the
+extreme used to locate the band. Steps and diffuse dark or bright shadows
+remain Paint-owned. Widths outside 1.5--16 working pixels and strongly varying
+bands remain unsupported.
+
+Nearby detector fragments are joined before rejecting short intervals. A
+spatial endpoint index, up to eight joining rounds, width/colour agreement,
+and tangent agreement bound the work. Every interpolated bridge cross-section
+must independently recover the same band within the 2.5-pixel maximum gap;
+a one-pixel authored break vetoes the join. The most complete candidates claim
+Paint ownership before overlapping opposite-edge duplicates.
+
+A recovered band is fitted once. Its exact centre-line, measured width and
+interior colour survive residual selection unchanged, instead of being
+independently refitted and recoloured after its Paint has already been removed.
+Open intervals use butt caps and retain a 1.5-pixel original-Paint overlap at
+their ends. This avoids extending a round cap into a real break or erasing
+pixels the cap only partially covers. Closed bands retain their continuous
+closure.
+
+New tests cover outside-edge seeds at four raster phases, removal of old ink
+under a constant-width stroke, complete circular bands, bright ink between two
+different incident paints, shaded-core colour bias, joining short fragments,
+and rendered one- and eight-pixel gaps. The existing step/shadow rejection is
+also tested for both polarities.
+
+The final 5016 × 5016 keyed sheet was regenerated with default adaptive
+refinement and four workers. Both versions accepted 26 of 28 evaluated regions.
+The base pass recovered 175 joint bands (previously 16); this counter excludes
+additional bands in the adaptive regions. Its underpaint ownership increased
+from 27,134 to 53,593 pixels.
+
+[Source / before / after band comparison](../sample/comparison/cliparts-6x6-bands.png)
+uses crops rendered from the full sheet SVG at source resolution, then enlarged
+for inspection. The database's white separator is more continuous; the
+source-code frame's straight band has less width variation. The Wi-Fi example
+also shows remaining gradient and thin-outline irregularities.
+
+For the source-code icon at sheet origin (836, 0), a scan of local rows
+260..659 and columns 150..203 measures its left border. The two crossings use
+half the luminance contrast between the row's ink minimum and each incident
+paint. On the full-sheet render, width standard deviation decreases from
+0.11015 to 0.06436 source pixels; mean width changes from 12.2550 to 12.3901
+(source: 12.2463). Centre-line residual about a fitted straight line changes
+from 0.04316 to 0.04709 pixels. This is a local rendered-width diagnostic,
+not a claim of improved centre-line accuracy or uniform improvement everywhere.
+
+Separate native 836 × 836 crop conversions recover 6 bands for source-code
+(previously 4) and 16 for database (previously 5). Code's underpaint ownership
+increases from 1,844 to 18,401 pixels and database's from 4,939 to 18,902.
+Their remaining total structural stroke counts decrease from 50 to 44 and
+39 to 38, respectively: recovery can replace several residual fragments with
+one model even when the number of recovered bands increases.
+
+The colour/complexity tradeoff is not uniformly favourable. On full-sheet
+836 × 836 source-code, database and Wi-Fi crops, mean absolute RGB error
+(8-bit channel units) changes from 4.37069 to 4.65377, 5.05286 to 5.12061,
+and 4.67780 to 4.77998. Removing ink before segmentation also changes the
+surrounding Paint fit; subtle shading remains a limitation. The sampled refined
+mean DeltaE00 over all planned regions changes from 1.99339 to 1.98512.
+
+The SVG grows from 21,102,874 to 21,703,335 bytes. Conversion took 258.638 s,
+compared with the preceding implementation's 193.943 s diagnostic run. These
+are individual runs, with some validation work overlapping, not a controlled
+benchmark. The default and explicit CPU worker limits are unchanged. This
+change improves supported band representation at a runtime and file-size cost.
+
+Validation: 169 Rust tests pass (one manual large-sample regression ignored),
+9 Python evaluator tests pass, and Clippy, formatting and diff checks pass.

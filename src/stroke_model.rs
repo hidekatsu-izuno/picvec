@@ -9,7 +9,9 @@ use rayon::prelude::*;
 type PaintUpdate = (usize, [f32; 3]);
 type StrokeCandidate = (StructuralStroke, Vec<PaintUpdate>);
 
+#[derive(Clone)]
 struct Profile {
+    bright: bool,
     center: Point,
     normal: Point,
     width: f32,
@@ -57,7 +59,14 @@ fn offset(p: Point, n: Point, d: f32) -> Point {
     }
 }
 
-fn profile(image: &Raster, edge: &SourceEdge, i: usize) -> Option<Profile> {
+fn profile(image: &Raster, edge: &SourceEdge, i: usize, bright: bool) -> Option<Profile> {
+    let value = |color| {
+        if bright {
+            1.0 - luma(color)
+        } else {
+            luma(color)
+        }
+    };
     let points = &edge.points;
     let closed = points.first() == points.last();
     let n = points.len() - usize::from(closed);
@@ -83,66 +92,109 @@ fn profile(image: &Raster, edge: &SourceEdge, i: usize) -> Option<Profile> {
     // A dark-boundary seed lies near one side of the band. Its provisional
     // overlay width is not the band width, so search far enough to see both.
     let scale = (image.width.max(image.height) as f32 / 1024.0).max(1.0);
-    let reach = (edge.width as f32 + 2.5).max(12.0 * scale).min(24.0);
+    let reach = (edge.width as f32 + 2.5).max(20.0 * scale).min(24.0);
     let count = (reach * 2.0).ceil() as isize;
     let colors: Vec<_> = (-count..=count)
         .map(|k| sample(image, offset(p, normal, k as f32 * 0.5)))
         .collect();
     let middle = count as usize;
-    let search = ((edge.width as f32 * 0.5 + 0.75) * 2.0).ceil() as usize;
-    let core = (middle.saturating_sub(search)..=(middle + search).min(colors.len() - 1)).min_by(
-        |&a, &b| {
-            let score = |j: usize| luma(colors[j]) + 0.001 * (j as f32 - middle as f32).powi(2);
+    let search = ((edge.width as f32 * 0.5 + 0.75).max(8.0) * 2.0).ceil() as usize;
+    let core = (middle.saturating_sub(search)..=(middle + search).min(colors.len() - 1))
+        .filter(|&j| {
+            j > 0
+                && j + 1 < colors.len()
+                && (value(colors[j - 1]) - value(colors[j]))
+                    .max(value(colors[j + 1]) - value(colors[j]))
+                    <= 0.06
+        })
+        .min_by(|&a, &b| {
+            // The seed can be a band edge, several pixels away from the
+            // ink core. Distance only breaks near-ties; a strong penalty
+            // selects the antialiased edge instead of the actual core.
+            let score = |j: usize| value(colors[j]) + 0.00001 * (j as f32 - middle as f32).powi(2);
             score(a).total_cmp(&score(b))
-        },
-    )?;
+        })?;
     let ink = colors[core];
     let sides = [colors[0], *colors.last()?];
-    let dark = luma(ink);
-    if sides.iter().any(|&c| luma(c) - dark < 0.12) {
+    let dark = value(ink);
+    if sides.iter().any(|&c| value(c) - dark < 0.12) {
         return None;
     }
-    // Require an actual flat ink core, not the minimum of a smooth shadow.
-    if core == 0
-        || core + 1 >= colors.len()
-        || (luma(colors[core - 1]) - dark).max(luma(colors[core + 1]) - dark) > 0.06
-    {
-        return None;
-    }
-    let threshold = [0.5 * (dark + luma(sides[0])), 0.5 * (dark + luma(sides[1]))];
+    let threshold = [
+        0.5 * (dark + value(sides[0])),
+        0.5 * (dark + value(sides[1])),
+    ];
     let mut left = core;
-    while left > 0 && luma(colors[left]) < threshold[0] {
+    while left > 0 && value(colors[left]) < threshold[0] {
         left -= 1;
     }
     let mut right = core;
-    while right + 1 < colors.len() && luma(colors[right]) < threshold[1] {
+    while right + 1 < colors.len() && value(colors[right]) < threshold[1] {
         right += 1;
     }
     if left == 0 || right + 1 == colors.len() {
         return None;
     }
     let crossing = |a: usize, b: usize, threshold: f32| {
-        let t = (threshold - luma(colors[a])) / (luma(colors[b]) - luma(colors[a]));
+        let t = (threshold - value(colors[a])) / (value(colors[b]) - value(colors[a]));
         (a as f32 + t * (b as f32 - a as f32) - middle as f32) * 0.5
     };
     let low = crossing(left, left + 1, threshold[0]);
     let high = crossing(right - 1, right, threshold[1]);
     let width = high - low;
-    if !(1.5..=16.0).contains(&width) {
+    if !(1.5..=16.0).contains(&width) || low > 1.0 || high < -1.0 {
         return None;
     }
+    // A lightly shaded ink core is still an authored band when both of its
+    // transitions are sharp. A Gaussian shadow can have a flat minimum too,
+    // but its 20--80% transitions are much broader than raster antialiasing.
+    for (side, direction) in [(0, -1_isize), (1, 1)] {
+        let level = |fraction: f32| dark + fraction * (value(sides[side]) - dark);
+        let mut j = core;
+        let mut positions = [0.0; 2];
+        for (k, fraction) in [0.2, 0.8].into_iter().enumerate() {
+            while j > 0 && j + 1 < colors.len() && value(colors[j]) < level(fraction) {
+                j = (j as isize + direction) as usize;
+            }
+            if j == 0 || j + 1 == colors.len() {
+                return None;
+            }
+            let previous = (j as isize - direction) as usize;
+            positions[k] = crossing(previous, j, level(fraction));
+        }
+        if (positions[1] - positions[0]).abs() > (1.5 + 0.15 * width).min(3.0) {
+            return None;
+        }
+    }
     let center = offset(p, normal, 0.5 * (low + high));
-    let contrast = (luma(sides[0]) - dark).min(luma(sides[1]) - dark);
+    let contrast = (value(sides[0]) - dark).min(value(sides[1]) - dark);
     if [-1.0_f32, 1.0].iter().any(|&sign| {
-        luma(sample(
+        value(sample(
             image,
             offset(center, normal, sign * (0.25 * width - 0.5).max(0.25)),
         )) - dark
-            > 0.05 * contrast
+            > 0.10 * contrast
     }) {
         return None;
     }
+    // The extremum locates the band but is a biased ink estimate when its
+    // core has mild shading. Use the robust interior colour for the shared
+    // width/underpaint model rather than exporting its darkest/lightest pixel.
+    let core_colors: Vec<_> = (0..=8)
+        .map(|j| {
+            sample(
+                image,
+                offset(center, normal, (j as f32 / 8.0 - 0.5) * 0.5 * width),
+            )
+        })
+        .collect();
+    let ink = std::array::from_fn(|c| {
+        let mut values: Vec<_> = core_colors.iter().map(|color| color[c]).collect();
+        values.sort_by(f32::total_cmp);
+        values[values.len() / 2]
+    });
     Some(Profile {
+        bright,
         center,
         normal,
         width,
@@ -151,8 +203,8 @@ fn profile(image: &Raster, edge: &SourceEdge, i: usize) -> Option<Profile> {
     })
 }
 
-fn candidate(image: &Raster, profiles: Vec<Profile>) -> Option<StrokeCandidate> {
-    if profiles.len() < 12 {
+fn band_parameters(profiles: &[Profile]) -> Option<(f32, [f32; 3])> {
+    if profiles.len() < 3 {
         return None;
     }
     let mut widths: Vec<_> = profiles.iter().map(|p| p.width).collect();
@@ -175,13 +227,30 @@ fn candidate(image: &Raster, profiles: Vec<Profile>) -> Option<StrokeCandidate> 
     {
         return None;
     }
+    Some((width, color))
+}
+
+fn candidate(image: &Raster, profiles: Vec<Profile>) -> Option<StrokeCandidate> {
+    if profiles.len() < 12 {
+        return None;
+    }
+    let (width, color) = band_parameters(&profiles)?;
     let points: Vec<_> = profiles.iter().map(|p| p.center).collect();
     let length: f32 = points.windows(2).map(|p| p[0].distance(p[1])).sum();
     if length < (6.0 * width).max(16.0) {
         return None;
     }
     let mut updates = std::collections::BTreeMap::new();
+    let closed = points.first() == points.last();
     for (i, p) in profiles.iter().enumerate() {
+        // Keep a short original-Paint overlap at an open interval's ends.
+        // The butt-capped model does not fully cover their antialiased pixels.
+        if !closed
+            && (p.center.distance(points[0]) < 1.5
+                || p.center.distance(*points.last().unwrap()) < 1.5)
+        {
+            continue;
+        }
         // Diagonal samples are farther apart than horizontal samples. Cover
         // the interval between centres so original ink cannot survive in gaps.
         let previous = profiles[i.saturating_sub(1)].center;
@@ -223,8 +292,10 @@ fn candidate(image: &Raster, profiles: Vec<Profile>) -> Option<StrokeCandidate> 
     }
     Some((
         StructuralStroke {
+            path_data: Some(crate::geometry::fitted_structural_open_path_data(
+                &points, 0.75, 0.45,
+            )),
             points,
-            path_data: None,
             precise_points: None,
             color,
             width,
@@ -235,31 +306,191 @@ fn candidate(image: &Raster, profiles: Vec<Profile>) -> Option<StrokeCandidate> 
     ))
 }
 
-pub(super) fn recover(image: &Raster, edges: &[SourceEdge]) -> Recovery {
-    let candidates: Vec<_> = edges
-        .par_iter()
-        .flat_map_iter(|edge| {
-            let mut candidates = Vec::new();
-            if edge.points.len() < 12 || !matches!(edge.role, "ridge-on-boundary" | "dark-boundary")
-            {
-                return candidates;
-            }
-            let mut run = Vec::new();
-            for i in 0..edge.points.len() {
-                if let Some(p) = profile(image, edge, i) {
-                    run.push(p);
-                } else {
-                    if let Some(candidate) = candidate(image, std::mem::take(&mut run)) {
-                        candidates.push(candidate);
-                    }
-                }
-            }
-            if let Some(candidate) = candidate(image, run) {
-                candidates.push(candidate);
-            }
-            candidates
+fn profile_endpoint(run: &[Profile], start: bool) -> (&Profile, Point) {
+    let index = if start { 0 } else { run.len() - 1 };
+    let interior = if start {
+        3.min(run.len() - 1)
+    } else {
+        run.len().saturating_sub(4)
+    };
+    let point = &run[index];
+    let delta = Point {
+        x: point.center.x - run[interior].center.x,
+        y: point.center.y - run[interior].center.y,
+    };
+    let length = delta.x.hypot(delta.y).max(1e-6);
+    (
+        point,
+        Point {
+            x: delta.x / length,
+            y: delta.y / length,
+        },
+    )
+}
+
+fn supported_bridge(
+    image: &Raster,
+    a: (&Profile, Point),
+    b: (&Profile, Point),
+) -> Option<Vec<Profile>> {
+    let (first, outgoing) = a;
+    let (last, incoming) = b;
+    let length = first.center.distance(last.center);
+    if first.bright != last.bright
+        || distance(first.ink, last.ink) > 0.06
+        || (first.width - last.width).abs() > (0.1 * first.width).max(0.5)
+        || outgoing.x * incoming.x + outgoing.y * incoming.y > -0.94
+    {
+        return None;
+    }
+    if length < 0.25 {
+        return Some(Vec::new());
+    }
+    let direction = Point {
+        x: (last.center.x - first.center.x) / length,
+        y: (last.center.y - first.center.y) / length,
+    };
+    if outgoing.x * direction.x + outgoing.y * direction.y < 0.87
+        || incoming.x * direction.x + incoming.y * direction.y > -0.87
+    {
+        return None;
+    }
+    let count = (length / 0.5).ceil() as usize;
+    let points: Vec<_> = [-3.0, -2.0, -1.0]
+        .into_iter()
+        .chain((0..=count).map(|i| length * i as f32 / count as f32))
+        .chain([length + 1.0, length + 2.0, length + 3.0])
+        .map(|d| {
+            let p = offset(first.center, direction, d);
+            [p.x as f64, p.y as f64]
         })
         .collect();
+    let edge = SourceEdge {
+        points,
+        width: first.width as f64,
+        role: "band-boundary",
+        width_samples: Vec::new(),
+    };
+    let mut bridge = Vec::new();
+    for i in 1..count {
+        let p = profile(image, &edge, i + 3, first.bright)?;
+        let expected = offset(first.center, direction, length * i as f32 / count as f32);
+        if p.center.distance(expected) > 0.5
+            || distance(p.ink, first.ink) > 0.06
+            || (p.width - first.width).abs() > (0.1 * first.width).max(0.5)
+        {
+            return None;
+        }
+        bridge.push(p);
+    }
+    Some(bridge)
+}
+
+/// Join detector fragments only after every intervening cross-section proves
+/// the same band. Width/colour agreement and tangent continuity alone cannot
+/// distinguish an authored break from a missing graph sample.
+fn join_profile_runs(image: &Raster, runs: Vec<Vec<Profile>>) -> Vec<Vec<Profile>> {
+    let mut runs: Vec<_> = runs
+        .into_iter()
+        .filter(|r| r.len() >= 3)
+        .map(Some)
+        .collect();
+    for _ in 0..8 {
+        let mut endpoints = Vec::new();
+        let mut owners = Vec::new();
+        for (i, run) in runs.iter().enumerate() {
+            let Some(run) = run else {
+                continue;
+            };
+            if run[0].center == run.last().unwrap().center {
+                continue;
+            }
+            for start in [true, false] {
+                endpoints.push(profile_endpoint(run, start).0.center);
+                owners.push((i, start));
+            }
+        }
+        let mut pairs = super::nearby_point_pairs(&endpoints, 2.5);
+        pairs.sort_by(|&(a, b), &(c, d)| {
+            endpoints[a]
+                .distance(endpoints[b])
+                .total_cmp(&endpoints[c].distance(endpoints[d]))
+                .then((a, b).cmp(&(c, d)))
+        });
+        let mut changed = vec![false; runs.len()];
+        for (a, b) in pairs {
+            let (first, first_start) = owners[a];
+            let (last, last_start) = owners[b];
+            if first == last || changed[first] || changed[last] {
+                continue;
+            }
+            let (Some(left), Some(right)) = (&runs[first], &runs[last]) else {
+                continue;
+            };
+            let Some(bridge) = supported_bridge(
+                image,
+                profile_endpoint(left, first_start),
+                profile_endpoint(right, last_start),
+            ) else {
+                continue;
+            };
+            let mut joined = left.clone();
+            if first_start {
+                joined.reverse();
+            }
+            joined.extend(bridge);
+            if last_start {
+                joined.extend(right.iter().cloned());
+            } else {
+                joined.extend(right.iter().rev().cloned());
+            }
+            if band_parameters(&joined).is_none() {
+                continue;
+            }
+            runs[first] = Some(joined);
+            runs[last] = None;
+            changed[first] = true;
+            changed[last] = true;
+        }
+        if !changed.iter().any(|v| *v) {
+            break;
+        }
+    }
+    runs.into_iter().flatten().collect()
+}
+
+pub(super) fn recover(image: &Raster, edges: &[SourceEdge], boundaries: &[SourceEdge]) -> Recovery {
+    let runs: Vec<_> = edges
+        .par_iter()
+        .chain(boundaries.par_iter())
+        .flat_map_iter(|edge| {
+            let mut runs = Vec::new();
+            if edge.points.len() < 12 {
+                return runs;
+            }
+            for bright in [false, true] {
+                let mut run = Vec::new();
+                for i in 0..edge.points.len() {
+                    if let Some(p) = profile(image, edge, i, bright) {
+                        run.push(p);
+                    } else if !run.is_empty() {
+                        runs.push(std::mem::take(&mut run));
+                    }
+                }
+                if !run.is_empty() {
+                    runs.push(run);
+                }
+            }
+            runs
+        })
+        .collect();
+    let mut candidates: Vec<_> = join_profile_runs(image, runs)
+        .into_par_iter()
+        .filter_map(|run| candidate(image, run))
+        .collect();
+    // Let the most complete observation own a band before rejecting its
+    // opposite-edge duplicates. A short fragment must not veto a long fit.
+    candidates.sort_by_key(|(_, updates)| std::cmp::Reverse(updates.len()));
     let mut result = Recovery {
         strokes: Vec::new(),
         updates: Vec::new(),
@@ -441,6 +672,260 @@ mod tests {
         }
     }
 
+    fn wide_band(phase: f32, gap: bool, wobble: bool) -> (Raster, SourceEdge) {
+        let mut image = Raster::blank(240, 80, [1.0; 3]);
+        for y in 0..80 {
+            for x in 0..240 {
+                let d = y as f32 + 0.5 - (40.0 + phase);
+                let width = 12.0
+                    + if wobble {
+                        0.7 * (x as f32 * 0.09).sin()
+                    } else {
+                        0.0
+                    };
+                let coverage = if gap && (116..124).contains(&x) {
+                    0.0
+                } else {
+                    (0.5 * width + 0.5 - d.abs()).clamp(0.0, 1.0)
+                };
+                let paint = if d < 0.0 {
+                    [0.9, 0.8, 0.7]
+                } else {
+                    [0.6, 0.8, 1.0]
+                };
+                image.pixels[y * 240 + x] = paint.map(|v| 0.1 * coverage + v * (1.0 - coverage));
+            }
+        }
+        let seed = SourceEdge {
+            // A detector's 1.2px inset lies near the outside of a 12px band.
+            points: (12..228)
+                .map(|x| [x as f64 + 0.5, (34.5 + phase) as f64])
+                .collect(),
+            width: 1.2,
+            role: "dark-boundary",
+            width_samples: Vec::new(),
+        };
+        (image, seed)
+    }
+
+    fn render_recovered(
+        width: usize,
+        height: usize,
+        recovered: &Recovery,
+    ) -> resvg::tiny_skia::Pixmap {
+        let mut ink = super::super::StructuralInk::empty();
+        ink.strokes = recovered.strokes.clone();
+        let (svg, _) = crate::svg::serialize(width, height, &[], &[], &ink, 0.0, true);
+        let tree = resvg::usvg::Tree::from_str(&svg, &resvg::usvg::Options::default()).unwrap();
+        let mut pixels = resvg::tiny_skia::Pixmap::new(width as u32, height as u32).unwrap();
+        resvg::render(
+            &tree,
+            resvg::tiny_skia::Transform::identity(),
+            &mut pixels.as_mut(),
+        );
+        pixels
+    }
+
+    #[test]
+    fn outside_seeds_recover_one_complete_band_at_different_pixel_phases() {
+        for phase in [0.0, 0.25, 0.5, 0.75] {
+            let (image, seed) = wide_band(phase, false, false);
+            let mut opposite = seed.clone();
+            for p in &mut opposite.points {
+                p[1] += 11.0;
+            }
+            let recovered = recover(&image, &[seed, opposite], &[]);
+            assert_eq!(recovered.strokes.len(), 1, "phase {phase}");
+            let stroke = &recovered.strokes[0];
+            assert!((stroke.width - 12.0).abs() < 0.15);
+            assert!(stroke
+                .points
+                .iter()
+                .all(|p| (p.y - 40.0 - phase).abs() < 0.15));
+            assert!(stroke.path_data.as_ref().unwrap().contains(" L"));
+            for x in 20..220 {
+                for y in 35..45 {
+                    assert!(recovered.mask[y * 240 + x], "unremoved core at {x}, {y}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn recovered_width_is_uniform_and_original_paint_is_removed_under_it() {
+        let (image, seed) = wide_band(0.25, false, true);
+        let recovered = recover(&image, &[seed], &[]);
+        assert_eq!(recovered.strokes.len(), 1);
+        let raster = render_recovered(240, 80, &recovered);
+        let mut widths = Vec::new();
+        let mut paint = image.clone();
+        for &(i, color) in &recovered.updates {
+            paint.pixels[i] = color;
+        }
+        for x in 20..220 {
+            widths.push(
+                (20..60)
+                    .map(|y| raster.pixels()[y * 240 + x].alpha() as f32 / 255.0)
+                    .sum::<f32>(),
+            );
+            for y in 36..44 {
+                let expected = if (y as f32 + 0.5) < 40.25 {
+                    [0.9, 0.8, 0.7]
+                } else {
+                    [0.6, 0.8, 1.0]
+                };
+                assert!(
+                    distance(paint.pixels[y * 240 + x], expected) < 1e-5,
+                    "source ink remains under the fitted stroke"
+                );
+            }
+        }
+        let min = widths.iter().copied().fold(f32::INFINITY, f32::min);
+        let max = widths.iter().copied().fold(0.0_f32, f32::max);
+        assert!(
+            max - min < 0.05,
+            "rendered width still wobbles: {min}..{max}"
+        );
+        assert!((0.5 * (min + max) - 12.0).abs() < 0.2);
+    }
+
+    #[test]
+    fn mildly_shaded_core_uses_interior_colour_instead_of_the_extremum() {
+        let (mut image, seed) = wide_band(0.0, false, false);
+        for y in 0..80 {
+            let d = y as f32 + 0.5 - 40.0;
+            let coverage = (6.5 - d.abs()).clamp(0.0, 1.0);
+            for x in 0..240 {
+                image.pixels[y * 240 + x] =
+                    image.pixels[y * 240 + x].map(|v| v + 0.005 * d * coverage);
+            }
+        }
+        let recovered = recover(&image, &[seed], &[]);
+        assert_eq!(recovered.strokes.len(), 1);
+        for c in recovered.strokes[0].color {
+            assert!((c - 0.1).abs() < 0.005, "biased core colour {c}");
+        }
+    }
+
+    #[test]
+    fn bright_band_between_different_paints_uses_the_same_joint_model() {
+        let (mut image, seed) = wide_band(0.5, false, false);
+        for color in &mut image.pixels {
+            *color = color.map(|v| 1.0 - v);
+        }
+        let recovered = recover(&image, &[seed], &[]);
+        assert_eq!(recovered.strokes.len(), 1);
+        assert!(recovered.strokes[0]
+            .color
+            .iter()
+            .all(|v| (*v - 0.9).abs() < 1e-5));
+        assert!((recovered.strokes[0].width - 12.0).abs() < 0.15);
+        let mut roles = crate::edge::classify(&image);
+        let (_, ink) = super::super::analyse(&image, &mut roles);
+        assert!(
+            ink.strokes
+                .iter()
+                .any(|stroke| stroke.role == "boundary-stroke"
+                    && stroke.color.iter().all(|v| *v > 0.85)),
+            "unclassified source contours must supply the bright band"
+        );
+    }
+
+    #[test]
+    fn closed_circular_band_has_one_width_and_no_artificial_storage_gap() {
+        let mut image = Raster::blank(160, 160, [0.8; 3]);
+        for y in 0..160 {
+            for x in 0..160 {
+                let r = (x as f32 + 0.5 - 80.0).hypot(y as f32 + 0.5 - 80.0);
+                let coverage = (4.5 - (r - 50.0).abs()).clamp(0.0, 1.0);
+                let paint = if r < 50.0 { 0.6 } else { 0.8 };
+                image.pixels[y * 160 + x] = [0.1 * coverage + paint * (1.0 - coverage); 3];
+            }
+        }
+        let mut points: Vec<_> = (0..360)
+            .map(|i| {
+                let a = i as f64 * std::f64::consts::TAU / 360.0;
+                [80.0 + 46.5 * a.cos(), 80.0 + 46.5 * a.sin()]
+            })
+            .collect();
+        points.push(points[0]);
+        let seed = SourceEdge {
+            points,
+            width: 1.2,
+            role: "dark-boundary",
+            width_samples: Vec::new(),
+        };
+        let recovered = recover(&image, &[seed], &[]);
+        assert_eq!(recovered.strokes.len(), 1);
+        let stroke = &recovered.strokes[0];
+        assert!((stroke.width - 8.0).abs() < 0.2);
+        assert!(stroke.path_data.as_ref().unwrap().ends_with(" Z"));
+        let raster = render_recovered(160, 160, &recovered);
+        for degrees in 0..360 {
+            let a = degrees as f32 * std::f32::consts::TAU / 360.0;
+            let x = (80.0 + 50.0 * a.cos()).floor() as usize;
+            let y = (80.0 + 50.0 * a.sin()).floor() as usize;
+            assert!(raster.pixels()[y * 160 + x].alpha() > 250);
+            assert!(recovered.mask[y * 160 + x]);
+        }
+    }
+
+    #[test]
+    fn short_detector_fragments_join_only_over_source_supported_ink() {
+        let (image, seed) = wide_band(0.0, false, false);
+        let fragments: Vec<_> = seed
+            .points
+            .chunks(54)
+            .map(|points| SourceEdge {
+                points: points.to_vec(),
+                ..seed.clone()
+            })
+            .collect();
+        let recovered = recover(&image, &fragments, &[]);
+        assert_eq!(
+            recovered.strokes.len(),
+            1,
+            "four short fragments should become one editable stroke"
+        );
+        assert!(recovered.strokes[0].points.len() >= seed.points.len());
+        let mut broken = image.clone();
+        for y in 0..80 {
+            broken.pixels[y * 240 + 120] = if y < 40 {
+                [0.9, 0.8, 0.7]
+            } else {
+                [0.6, 0.8, 1.0]
+            };
+        }
+        let recovered = recover(&broken, &[seed], &[]);
+        assert_eq!(
+            recovered.strokes.len(),
+            2,
+            "a one-pixel source gap must veto joining"
+        );
+        let raster = render_recovered(240, 80, &recovered);
+        for y in 32..48 {
+            assert_eq!(raster.pixels()[y * 240 + 120].alpha(), 0);
+        }
+    }
+
+    #[test]
+    fn interval_caps_do_not_bridge_an_authored_gap() {
+        let (image, seed) = wide_band(0.0, true, false);
+        let recovered = recover(&image, &[seed], &[]);
+        assert_eq!(recovered.strokes.len(), 2);
+        let raster = render_recovered(240, 80, &recovered);
+        for y in 32..48 {
+            for x in 116..124 {
+                assert_eq!(
+                    raster.pixels()[y * 240 + x].alpha(),
+                    0,
+                    "invented ink in the gap at {x}, {y}"
+                );
+                assert!(!recovered.mask[y * 240 + x]);
+            }
+        }
+    }
+
     #[test]
     fn alpha_rim_uses_continuous_mask_curves_and_keeps_black_silhouettes() {
         let width = 96;
@@ -508,7 +993,7 @@ mod tests {
                 image.pixels[y * 64 + x] = paint.map(|v| 0.1 * coverage + v * (1.0 - coverage));
             }
         }
-        let recovered = recover(&image, &[edge(), edge()]);
+        let recovered = recover(&image, &[edge(), edge()], &[]);
         assert_eq!(
             recovered.strokes.len(),
             1,
@@ -547,10 +1032,17 @@ mod tests {
                     image.pixels[y * 64 + x] = [value; 3];
                 }
             }
-            assert!(
-                recover(&image, &[edge()]).strokes.is_empty(),
-                "shadow={shadow}"
-            );
+            for bright in [false, true] {
+                if bright {
+                    for color in &mut image.pixels {
+                        *color = color.map(|v| 1.0 - v);
+                    }
+                }
+                assert!(
+                    recover(&image, &[edge()], &[]).strokes.is_empty(),
+                    "shadow={shadow}, bright={bright}"
+                );
+            }
         }
     }
 
@@ -566,7 +1058,7 @@ mod tests {
         }
         let mut diagonal = edge();
         diagonal.points = (14..50).map(|x| [x as f64 + 0.5; 2]).collect();
-        let recovered = recover(&image, &[diagonal]);
+        let recovered = recover(&image, &[diagonal], &[]);
         assert_eq!(recovered.strokes.len(), 1);
         for x in 20..44 {
             for y in x - 1..=x + 1 {

@@ -777,11 +777,16 @@ pub(crate) fn serialize_filtered_with_alpha(
         if data.is_empty() {
             continue;
         }
-        let attributes = format!(
+        let mut attributes = format!(
             "data-structural-ink=\"line\" stroke=\"{}\" stroke-width=\"{}\"",
             rgb_hex(stroke.color),
             number(stroke.width)
         );
+        if stroke.role == "boundary-stroke" {
+            // Recovery owns a measured interval, not an inferred round cap.
+            // The original Paint retains its tips and intentional breaks.
+            attributes.push_str(" stroke-linecap=\"butt\"");
+        }
         let (geometry, operations) = optimize_path(&data, true, true).unwrap_or((
             OptimizedElement::Path { data, bbox: None },
             Default::default(),
