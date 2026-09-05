@@ -1,5 +1,12 @@
 # Outline recovery and bounded-CPU performance
 
+Whole-band recovery now requires a complete connected ink region, including
+consistent width and colour at every measured section. Partial outline
+networks remain filled regions whose shared contour segments are fitted to
+lines and arcs. See [complete-band acceptance](#complete-band-acceptance-and-contour-connections)
+for the current acceptance rules; earlier measurements below describe the
+broader interval recovery used at the time.
+
 The outline recovery pass measures both sides of a dark band before Paint
 segmentation. A supported interval becomes a centre-line with one width and
 ink colour; the two adjacent paints extend underneath it independently. This
@@ -402,3 +409,121 @@ change improves supported band representation at a runtime and file-size cost.
 
 Validation: 169 Rust tests pass (one manual large-sample regression ignored),
 9 Python evaluator tests pass, and Clippy, formatting and diff checks pass.
+
+## Car: coverage ownership and coloured contour continuity
+
+The right body contour and the upper panel seam in `car.png` exposed three
+ownership errors before and during shared-curve fitting. Removing the SVG
+structural-ink layer left the defects visible in Paint. The underpaint and
+smoothed RGB reference still had a continuous contour; the segmented labels
+first acquired the intermittent erosion.
+
+* Sleeve assignment used nearest-owner pixel distances as coverage. Those
+  distances depend on quantisation thickness and tie on diagonal steps. In the
+  reproduced input, one 42-pixel dark-red fragment was partly assigned to the
+  exterior despite its source colour. Accepted sleeves now use the existing
+  sRGB/linear-RGB two-parent mixture model and its half-coverage decision.
+  Topology still determines which two incident parents are eligible.
+* A repeated sleeve group could assign a small member to a parent belonging
+  to a different member, even when that parent was not incident to it. Removed
+  this group-wide owner override; each accepted member retains its local pair.
+* Dark ink protection relied on near-black lightness. A coloured line can be
+  clearly darker than both incident faces without being near black. A median
+  source lightness more than six units below both parents now rejects the
+  sleeve interpretation. This deliberately keeps ambiguous strong dark
+  extrema as Paint instead of assuming they are sharpening artifacts. Light
+  ringing and genuine two-parent coverage retain their absorption tests.
+
+The shared geometry continuity classes also used contact counts before colour
+consistency for coreless fragments. A change in raster phase could therefore
+attach the same coloured contour alternately to the surface and exterior,
+placing independent curve anchors on one visible outline. Incident colour
+consistency now takes precedence, with contact counts breaking colour ties.
+Paint labels and colours are not merged by this geometry classification.
+
+Validation includes 18 combinations of slope, subpixel phase and parent label
+order, coloured ink with a detector gap, light ringing beside retained ink,
+and a contour whose exterior contact count exceeds its surface contact count.
+The older medium-dark synthetic "ringing" fixture had no evidence distinguishing
+its dark red stripe from ink; it now asserts preservation. The distant-third-
+face topology fixture uses actual intermediate coverage so it still tests
+parent selection independently of ink protection. All 170 regular Rust tests
+pass (one manual large-sheet test remains ignored), as do Clippy and formatting.
+The native code-icon crop from `cliparts-6x6.png` was also converted and inspected.
+
+The car SVG was rendered at native size for measurements and at 5x directly
+from vector geometry for inspection. On rows 405--476, the rightmost crossing
+of R-G = 0.32 defines the outer coloured contour. The quadratic residual measures
+local contour fluctuation, not general image quality:
+
+| Measurement | Before | After |
+| --- | ---: | ---: |
+| Contour RMS about a quadratic (px) | 0.569 | 0.332 |
+| Maximum quadratic residual (px) | 1.253 | 0.956 |
+| Mean contour distance from source (px) | 0.544 | 0.372 |
+| Whole-image mean RGB error (8-bit units) | 2.333 | 2.303 |
+| SVG bytes | 940,809 | 965,998 |
+
+The source raster's own quadratic residual is 0.091 px. Diagnostic conversions
+were approximately 22.8 seconds before and 24.8 seconds after; these are single
+runs, not a controlled performance benchmark. No shared-loop fallback or
+whole-partition curve downgrade occurred in the final car conversion.
+
+`sample/comparison/car-lines.png` shows source / before / after. The larger
+staircase and seam-end protrusion are reduced, but coloured ink still has
+uneven width and some subpixel steps at short Paint junctions. The retained
+thin Paint fragments do not yet share one fitted centreline and width over the
+entire contour. These measurements are evidence of improvement, not a claim
+that every protrusion or line-width defect has been eliminated.
+
+Validation scope for the car measurements: the artifacts above use the earlier
+boundary-stroke recovery, and the 170-test result applies to the `segment.rs` /
+`geometry.rs` changes against HEAD. Subsequent combined-workspace validation,
+including the stricter stroke acceptance, is reported below.
+
+## Complete-band acceptance and contour connections
+
+The supplied `boy_and_turtle.svg` replaced short parts of a connected black
+outline with independent butt-capped strokes. The width test accepted the
+middle of a band while discarding local variations at its ends. Removing
+those pixels before Paint segmentation left separate stroke/Paint owners at
+the arm and shirt-hem junctions. A short retained overlap did not preserve
+their connections through subsequent contour fitting.
+
+Whole-band conversion remains automatic, with stricter acceptance:
+
+* Every measured width must be within 0.5 working pixels of the median, and
+  every ink colour within 0.08 RGB RMS distance. The former percentile rules
+  could hide short tapers, bulges and colour changes.
+* Before applying any Paint updates, an eight-connected traversal follows
+  source pixels matching the measured ink. Ink continuing beyond the proposed
+  footprint and a fixed three-pixel cap/antialias collar rejects the candidate.
+  The collar accommodates the retained 1.5-pixel Paint overlap and detector
+  spacing; it does not expand with the connected outline network.
+* Accepted centre-lines use a 0.35-pixel fitting tolerance and 0.25 smoothing
+  sigma instead of 0.75 and 0.45. Rejected regions retain both shared Paint
+  contours, including their existing segment-level line and arc fitting.
+
+No CLI or configuration switch is required. Complete isolated bands and
+closed circles remain eligible. An incomplete detector observation of an
+otherwise uniform band can conservatively remain in Paint.
+
+The regenerated 800 × 744 sample has zero recovered whole-band strokes,
+compared with 17 in the supplied working-tree SVG. Its Paint paths still
+contain 28 line commands and 126 circular-arc commands. The file changes
+from 148,860 to 135,569 bytes. The arm, cuff and hem connections were inspected
+in [source / before / after crops](../sample/comparison/boy_and_turtle-lines.png).
+
+In the source rectangle x=270..479, y=285..424, 3,983 pixels have a 3 × 3
+neighbourhood with every RGB channel below 32/255. Of these dark core pixels,
+10 had an output channel at least 100/255 before the change; none do afterwards.
+This local native-resolution check measures visible gaps in the outline core,
+not pixel-exact antialiasing or a whole-image quality score. Both SVGs were
+rendered over white with `rsvg-convert`.
+
+Regression tests cover partial intervals, branches, short width outliers,
+isolated straight and diagonal bands, automatic dark and bright circles, and
+authored gaps. A rendered pipeline test checks a filled outline with straight
+and circular sections, a tapered branch and an optional gap. Validation passes
+173 Rust tests (one existing manual sample test ignored), Clippy with warnings
+denied, formatting and diff checks.

@@ -210,7 +210,10 @@ fn band_parameters(profiles: &[Profile]) -> Option<(f32, [f32; 3])> {
     let mut widths: Vec<_> = profiles.iter().map(|p| p.width).collect();
     widths.sort_by(f32::total_cmp);
     let width = widths[widths.len() / 2];
-    if widths[widths.len() * 9 / 10] - widths[widths.len() / 10] > (0.25 * width).max(0.7) {
+    // A percentile test can hide a taper or a junction in the discarded
+    // tails. Every section must agree before a whole region loses its two
+    // independently fitted contours.
+    if widths.iter().any(|w| (w - width).abs() > 0.5) {
         return None;
     }
     let color = std::array::from_fn(|c| {
@@ -218,13 +221,7 @@ fn band_parameters(profiles: &[Profile]) -> Option<(f32, [f32; 3])> {
         values.sort_by(f32::total_cmp);
         values[values.len() / 2]
     });
-    if profiles
-        .iter()
-        .filter(|p| distance(p.ink, color) > 0.12)
-        .count()
-        * 10
-        > profiles.len()
-    {
+    if profiles.iter().any(|p| distance(p.ink, color) > 0.08) {
         return None;
     }
     Some((width, color))
@@ -293,7 +290,7 @@ fn candidate(image: &Raster, profiles: Vec<Profile>) -> Option<StrokeCandidate> 
     Some((
         StructuralStroke {
             path_data: Some(crate::geometry::fitted_structural_open_path_data(
-                &points, 0.75, 0.45,
+                &points, 0.35, 0.25,
             )),
             points,
             precise_points: None,
@@ -459,6 +456,48 @@ fn join_profile_runs(image: &Raster, runs: Vec<Vec<Profile>>) -> Vec<Vec<Profile
     runs.into_iter().flatten().collect()
 }
 
+/// A fitted interval must account for the complete connected ink region.
+/// Width/profile support alone accepts fragments of an outline network; its
+/// junctions then remain in Paint and can separate from the new stroke after
+/// segmentation. Follow the source ink before removing any pixels, and reject
+/// a model if that ink continues beyond its footprint and small AA/cap collar.
+fn owns_complete_band(image: &Raster, stroke: &StructuralStroke, updates: &[PaintUpdate]) -> bool {
+    use std::collections::HashSet;
+
+    let footprint: HashSet<_> = updates.iter().map(|&(i, _)| i).collect();
+    let ink = |i: usize| distance(image.pixels[i], stroke.color) <= 0.10;
+    let mut visited: HashSet<_> = footprint.iter().copied().filter(|&i| ink(i)).collect();
+    if visited.is_empty() {
+        return false;
+    }
+    let mut pending: Vec<_> = visited.iter().copied().collect();
+    while let Some(i) = pending.pop() {
+        let x = i % image.width;
+        let y = i / image.width;
+        for py in y.saturating_sub(1)..=(y + 1).min(image.height - 1) {
+            for px in x.saturating_sub(1)..=(x + 1).min(image.width - 1) {
+                let next = py * image.width + px;
+                if !ink(next) || !visited.insert(next) {
+                    continue;
+                }
+                // Three pixels allow the retained 1.5px end overlap, detector
+                // spacing and raster AA. This collar is bounded for a wide band;
+                // it cannot grow with the connected source outline.
+                if !footprint.contains(&next)
+                    && !(py.saturating_sub(3)..=(py + 3).min(image.height - 1)).any(|fy| {
+                        (px.saturating_sub(3)..=(px + 3).min(image.width - 1))
+                            .any(|fx| footprint.contains(&(fy * image.width + fx)))
+                    })
+                {
+                    return false;
+                }
+                pending.push(next);
+            }
+        }
+    }
+    true
+}
+
 pub(super) fn recover(image: &Raster, edges: &[SourceEdge], boundaries: &[SourceEdge]) -> Recovery {
     let runs: Vec<_> = edges
         .par_iter()
@@ -499,6 +538,9 @@ pub(super) fn recover(image: &Raster, edges: &[SourceEdge], boundaries: &[Source
     for (stroke, updates) in candidates {
         // Opposite detected edges can describe the same ink band.
         if updates.iter().filter(|(i, _)| result.mask[*i]).count() * 4 > updates.len() {
+            continue;
+        }
+        if !owns_complete_band(image, &stroke, &updates) {
             continue;
         }
         for &(i, _) in &updates {
@@ -679,11 +721,11 @@ mod tests {
                 let d = y as f32 + 0.5 - (40.0 + phase);
                 let width = 12.0
                     + if wobble {
-                        0.7 * (x as f32 * 0.09).sin()
+                        0.3 * (x as f32 * 0.09).sin()
                     } else {
                         0.0
                     };
-                let coverage = if gap && (116..124).contains(&x) {
+                let coverage = if !(12..228).contains(&x) || (gap && (116..124).contains(&x)) {
                     0.0
                 } else {
                     (0.5 * width + 0.5 - d.abs()).clamp(0.0, 1.0)
@@ -747,6 +789,69 @@ mod tests {
                 for y in 35..45 {
                     assert!(recovered.mask[y * 240 + x], "unremoved core at {x}, {y}");
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn partial_outline_intervals_keep_the_connected_region_in_paint() {
+        for bright in [false, true] {
+            let (mut image, seed) = wide_band(0.25, false, false);
+            if bright {
+                for pixel in &mut image.pixels {
+                    *pixel = pixel.map(|c| 1.0 - c);
+                }
+            }
+            assert_eq!(
+                recover(&image, std::slice::from_ref(&seed), &[])
+                    .strokes
+                    .len(),
+                1
+            );
+            let partial = SourceEdge {
+                points: seed.points[20..seed.points.len() - 20].to_vec(),
+                ..seed
+            };
+            let rejected = recover(&image, &[partial], &[]);
+            assert!(rejected.strokes.is_empty());
+            assert!(rejected.updates.is_empty());
+            assert!(rejected.mask.iter().all(|&owned| !owned));
+        }
+    }
+
+    #[test]
+    fn connected_branches_and_short_width_outliers_stay_in_paint() {
+        for bright in [false, true] {
+            for branch in [false, true] {
+                let (mut image, seed) = wide_band(0.0, false, false);
+                if branch {
+                    // A branch is part of the same ink region even when a
+                    // detector reports just the long horizontal interval.
+                    for y in 42..66 {
+                        for x in 118..124 {
+                            image.pixels[y * image.width + x] = [0.1; 3];
+                        }
+                    }
+                } else {
+                    // Fewer than 10% of sections widen. The previous
+                    // percentile gate discarded these observations.
+                    for y in 32..48 {
+                        for x in 214..224 {
+                            image.pixels[y * image.width + x] = [0.1; 3];
+                        }
+                    }
+                }
+                if bright {
+                    for pixel in &mut image.pixels {
+                        *pixel = pixel.map(|c| 1.0 - c);
+                    }
+                }
+                let recovered = recover(&image, &[seed], &[]);
+                assert!(
+                    recovered.strokes.is_empty(),
+                    "bright={bright}, branch={branch}"
+                );
+                assert!(recovered.updates.is_empty());
             }
         }
     }
@@ -821,14 +926,13 @@ mod tests {
             .all(|v| (*v - 0.9).abs() < 1e-5));
         assert!((recovered.strokes[0].width - 12.0).abs() < 0.15);
         let mut roles = crate::edge::classify(&image);
-        let (_, ink) = super::super::analyse(&image, &mut roles);
-        assert!(
-            ink.strokes
-                .iter()
-                .any(|stroke| stroke.role == "boundary-stroke"
-                    && stroke.color.iter().all(|v| *v > 0.85)),
-            "unclassified source contours must supply the bright band"
-        );
+        let (paint, ink) = super::super::analyse(&image, &mut roles);
+        // Here the detector fragments at the caps. The complete explicit
+        // seed above is recoverable; partial detector runs must keep Paint.
+        assert_eq!(ink.summary.recovered_boundary_strokes, 0);
+        let middle = 40 * image.width + 120;
+        assert_eq!(paint.pixels[middle], image.pixels[middle]);
+        assert!(!ink.paint_ownership_mask[middle]);
     }
 
     #[test]
@@ -859,6 +963,19 @@ mod tests {
         assert_eq!(recovered.strokes.len(), 1);
         let stroke = &recovered.strokes[0];
         assert!((stroke.width - 8.0).abs() < 0.2);
+        for bright in [false, true] {
+            let mut source = image.clone();
+            if bright {
+                for pixel in &mut source.pixels {
+                    *pixel = pixel.map(|c| 1.0 - c);
+                }
+            }
+            let (_, detected) = super::super::analyse(&source, &mut crate::edge::classify(&source));
+            assert!(
+                detected.summary.recovered_boundary_strokes > 0,
+                "complete circles should be detected automatically, bright={bright}"
+            );
+        }
         assert!(stroke.path_data.as_ref().unwrap().ends_with(" Z"));
         let raster = render_recovered(160, 160, &recovered);
         for degrees in 0..360 {
@@ -988,7 +1105,11 @@ mod tests {
         for y in 0..image.height {
             for x in 0..image.width {
                 let d = y as f32 + 0.5 - 20.5;
-                let coverage = (2.1 - d.abs()).clamp(0.0, 1.0);
+                let coverage = if (6..58).contains(&x) {
+                    (2.1 - d.abs()).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
                 let paint = paints[usize::from(d >= 0.0)];
                 image.pixels[y * 64 + x] = paint.map(|v| 0.1 * coverage + v * (1.0 - coverage));
             }
@@ -1052,12 +1173,18 @@ mod tests {
         for y in 0..64 {
             for x in 0..64 {
                 let d = (y as f32 - x as f32) * std::f32::consts::FRAC_1_SQRT_2;
-                let coverage = (2.1 - d.abs()).clamp(0.0, 1.0);
+                let coverage = if (28..=98).contains(&(x + y)) {
+                    (2.1 - d.abs()).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
                 image.pixels[y * 64 + x] = [1.0 - 0.9 * coverage; 3];
             }
         }
         let mut diagonal = edge();
-        diagonal.points = (14..50).map(|x| [x as f64 + 0.5; 2]).collect();
+        // Sample just inside the antialiased cap; its retained Paint fits
+        // within the bounded collar around the complete stroke model.
+        diagonal.points = (15..49).map(|x| [x as f64 + 0.5; 2]).collect();
         let recovered = recover(&image, &[diagonal], &[]);
         assert_eq!(recovered.strokes.len(), 1);
         for x in 20..44 {

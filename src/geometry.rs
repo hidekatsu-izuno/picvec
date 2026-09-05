@@ -4502,10 +4502,11 @@ fn contextual_continuity_classes(
     }
 
     // Propagate durable ownership through chains of coreless sleeves.  The
-    // strongest shared-boundary support wins; perceptual distance resolves
-    // only support ties.  Whether an antialias sleeve joins the first or the
-    // second parent, the remaining interface has the same pair of durable
-    // classes and can be fitted as one continuous curve.
+    // closest incident colour wins; shared-boundary support resolves ties.
+    // Contact counts fluctuate with raster phase and fragmentation, so making
+    // them authoritative alternately attaches one coloured outline to the
+    // surface and to its exterior. That changes which contour is fitted and
+    // creates anchored bumps even when the Paint ownership is unchanged.
     loop {
         let mut proposals = Vec::<(usize, i32)>::new();
         for label in 0..labs.len() {
@@ -4525,9 +4526,9 @@ fn contextual_continuity_classes(
             let selected = support_by_class.into_iter().min_by(
                 |(first_class, (first_support, first_delta)),
                  (second_class, (second_support, second_delta))| {
-                    second_support
-                        .cmp(first_support)
-                        .then_with(|| first_delta.total_cmp(second_delta))
+                    first_delta
+                        .total_cmp(second_delta)
+                        .then_with(|| second_support.cmp(first_support))
                         .then_with(|| first_class.cmp(second_class))
                 },
             );
@@ -7425,20 +7426,23 @@ mod tests {
                 b: 12.0,
             },
         ];
-        // The coreless cap touches two durable shades of one surface over
-        // nine edges and the exterior face over only two edges.
-        let adjacency = vec![
-            HashMap::from([(3, 2)]),
-            HashMap::from([(3, 5)]),
-            HashMap::from([(3, 4)]),
-            HashMap::from([(0, 2), (1, 5), (2, 4)]),
-        ];
+        // Quantisation can split the surface into more neighbours than the
+        // exterior, reversing the contact majority without changing material.
+        for exterior_contact in [2, 20] {
+            let adjacency = vec![
+                HashMap::from([(3, exterior_contact)]),
+                HashMap::from([(3, 5)]),
+                HashMap::from([(3, 4)]),
+                HashMap::from([(0, exterior_contact), (1, 5), (2, 4)]),
+            ];
 
-        let classes = contextual_continuity_classes(&labs, &adjacency, &[true, true, true, false]);
+            let classes =
+                contextual_continuity_classes(&labs, &adjacency, &[true, true, true, false]);
 
-        assert_eq!(classes[1], classes[2]);
-        assert_eq!(classes[3], classes[1]);
-        assert_ne!(classes[3], classes[0]);
+            assert_eq!(classes[1], classes[2]);
+            assert_eq!(classes[3], classes[1]);
+            assert_ne!(classes[3], classes[0]);
+        }
     }
 
     #[test]

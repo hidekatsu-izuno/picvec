@@ -130,13 +130,15 @@ controls total candidates, not CPU workers. The SVG byte budget is unchanged.
 When transparent refinements replace the entire canvas, the hidden base paths
 and their gradient definitions are omitted from the final SVG.
 
-Narrow, source-supported dark and bright outline bands can be represented by a
-centre-line and a jointly measured constant width before Paint segmentation. Both incident
-colours are reconstructed beneath the line, including boundaries between
-different materials. Only continuous intervals with a supported ink core and
-consistent width and colour are transferred; diffuse shadows and strongly
-varying bands retain their Paint representation. The existing residual line
-pass handles the remaining candidates. Diagnostic reports count these early
+Outline regions normally keep their filled contours, with supported portions
+of the shared boundary fitted to straight lines or circular arcs. A narrow
+dark or bright band can instead become a constant-width centre-line only when
+every measured section agrees in width and colour and the candidate covers
+the complete connected ink region. If the source ink continues beyond the
+candidate or branches into another outline, the region stays in Paint. This
+decision is automatic and requires no option. For accepted bands, both incident
+colours are reconstructed beneath the line. The existing residual line pass
+handles the remaining candidates. Diagnostic reports count accepted whole-band
 transfers in the base pass as `structural.recovered_boundary_strokes`.
 See [outline recovery and performance validation](docs/line-quality-performance.md)
 for the model's limits and comparison procedure.
@@ -228,7 +230,7 @@ separate SVG rasterization step currently uses `rsvg-convert`.
 1. Check the input size, choose a suitable base resolution, and resize the
    raster when needed.
 2. Detect colour regions, boundaries, shading, and thin structural lines.
-   Recover supported uniform-width outline bands and their two incident fills.
+   Recover complete, isolated uniform-width bands and their two incident fills.
    Correct antialias pixels and merge only neighbouring regions that can share
    one fill without losing a visible boundary.
 3. Fit each region with a solid colour or a linear/radial gradient. Neighbouring

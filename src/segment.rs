@@ -1269,6 +1269,7 @@ fn native_antialias_width(
 /// not make every coreless quantisation band between them a third Paint face.
 #[allow(clippy::too_many_arguments)]
 fn boundary_sleeve_assignment(
+    image: &Raster,
     component: &[usize],
     labels: &[u32],
     label: u32,
@@ -1430,16 +1431,44 @@ fn boundary_sleeve_assignment(
     }
     let (_, first, second) = best?;
 
+    // An ink extremum is not coverage between these faces. Use contrast
+    // relative to both incident paints: an absolute near-black threshold
+    // protects black outlines but deletes the same outline when it is red.
+    let minimum_parent = parent_lab[first as usize]
+        .l
+        .min(parent_lab[second as usize].l);
+    let mut lightness: Vec<_> = component
+        .iter()
+        .map(|&index| rgb_to_lab(image.pixels[index]).l)
+        .collect();
+    if median_channel(&mut lightness) + 6.0 < minimum_parent {
+        return None;
+    }
+
     let assignment = nearby
         .iter()
-        .map(|owners| match (owners.get(&first), owners.get(&second)) {
-            (Some(&(first_distance, _, _)), Some(&(second_distance, _, _))) => {
-                first_distance <= second_distance
-            }
-            (Some(_), None) => true,
-            (None, Some(_)) => false,
-            (None, None) => false,
-        })
+        .zip(component)
+        .map(
+            |(owners, &index)| match (owners.get(&first), owners.get(&second)) {
+                (Some(_), Some(_)) => {
+                    // Proximity identifies the incident faces, not their coverage.
+                    // Nearest-owner distances depend on quantisation thickness and
+                    // tie on diagonal steps; using them as coverage can erase a
+                    // saturated contour into a light face. Recover coverage from
+                    // the observed colour, including sharpened endpoint overshoot.
+                    let (amount, _, _) = pair_mixture(
+                        image.pixels[index],
+                        image.pixels[index],
+                        lab_to_rgb(parent_lab[first as usize]),
+                        lab_to_rgb(parent_lab[second as usize]),
+                    );
+                    amount >= 0.5
+                }
+                (Some(_), None) => true,
+                (None, Some(_)) => false,
+                (None, None) => false,
+            },
+        )
         .collect();
     Some((first, second, assignment))
 }
@@ -1613,6 +1642,7 @@ fn correct_antialias_partition(
             && native_antialias_width(component, labels, label as u32, image.width, image.height)
         {
             sleeve_candidates[label] = boundary_sleeve_assignment(
+                image,
                 component,
                 labels,
                 label as u32,
@@ -1718,7 +1748,6 @@ fn correct_antialias_partition(
         }
     }
     let mut sleeve_accepted = vec![false; count];
-    let mut sleeve_whole_owner = vec![None::<u32>; count];
     let mut sleeve_visited = vec![false; count];
     for start in 0..count {
         if sleeve_candidates[start].is_none() {
@@ -1781,7 +1810,6 @@ fn correct_antialias_partition(
             .filter(|&&index| source_lab[index].l < 25.0)
             .count();
         let mut accepted_labels = Vec::new();
-        let mut repeated_grey_chain = false;
         if area > 4 {
             if group_dark_boundary_support * 16 <= area && group_dark_extremum * 4 < area * 3 {
                 accepted_labels.extend(group.iter().copied());
@@ -1794,7 +1822,6 @@ fn correct_antialias_partition(
                 // Dark-boundary support also covers the grey antialias side
                 // of a black contour. A repeated non-black micro-chain is
                 // raster coverage, not another authored outline.
-                repeated_grey_chain = true;
                 accepted_labels.extend(group.iter().copied().filter(|&label| {
                     let component = &components[label];
                     let near_black = component
@@ -1830,35 +1857,6 @@ fn correct_antialias_partition(
                         && dark_extremum * 4 < component.len() * 3
                     {
                         accepted_labels.push(label);
-                    }
-                }
-            }
-        }
-        if repeated_grey_chain {
-            let group_pixels: Vec<usize> = group
-                .iter()
-                .flat_map(|&label| components[label].iter().copied())
-                .collect();
-            let source = median_lab(&source_lab, &group_pixels);
-            // The darkest candidate is not necessarily the contour: a dark
-            // coloured face can lie across a black boundary and would leak
-            // into the opposite side as isolated dots. Select the durable
-            // face whose colour best explains the original micro-chain.
-            let source_matched_parent = group
-                .iter()
-                .flat_map(|&label| {
-                    let pair = sleeve_pair(sleeve_candidates[label].as_ref().unwrap());
-                    [pair.0, pair.1]
-                })
-                .min_by(|&first, &second| {
-                    delta_e2000(source, parent_lab[first as usize])
-                        .total_cmp(&delta_e2000(source, parent_lab[second as usize]))
-                        .then(first.cmp(&second))
-                });
-            if let Some(owner) = source_matched_parent {
-                for &label in &accepted_labels {
-                    if components[label].len() <= GAP_COMPONENT_MAX_AREA {
-                        sleeve_whole_owner[label] = Some(owner);
                     }
                 }
             }
@@ -2272,13 +2270,11 @@ fn correct_antialias_partition(
         if sleeve_accepted[label] {
             if let Some((first, second, first_assignment)) = &sleeve_candidates[label] {
                 for (offset, &index) in component.iter().enumerate() {
-                    corrected[index] = sleeve_whole_owner[label].unwrap_or_else(|| {
-                        if first_assignment[offset] {
-                            *first
-                        } else {
-                            *second
-                        }
-                    });
+                    corrected[index] = if first_assignment[offset] {
+                        *first
+                    } else {
+                        *second
+                    };
                     antialias[index] = true;
                     paint_samples[index] = false;
                 }
@@ -4312,7 +4308,9 @@ mod tests {
             let colours = [
                 [0.91, 0.90, 0.89],
                 [0.96, 0.34, 0.30],
-                [0.82, 0.18, 0.16],
+                // Coverage between the first two faces, not a third ink
+                // extremum (which must be retained regardless of topology).
+                [0.935, 0.62, 0.595],
                 [0.58, 0.05, 0.04],
             ];
             let mut labels = vec![0_u32; width * height];
@@ -4346,6 +4344,7 @@ mod tests {
             roles.visible_ridge_centres.fill(false);
             let parent_lab = colours.map(rgb_to_lab);
             boundary_sleeve_assignment(
+                &image,
                 &component,
                 &labels,
                 2,
@@ -4420,6 +4419,66 @@ mod tests {
         );
         assert!(correction.paint_samples[distinct]);
         assert_eq!(correction.split_regions, 0);
+    }
+
+    #[test]
+    fn sleeve_coverage_is_independent_of_grid_phase_and_parent_label_order() {
+        let width = 48;
+        let height = 48;
+        let foreground = [0.85, 0.15, 0.14];
+        let background = [0.92; 3];
+        for slope in [0.12_f32, 0.55, 1.2] {
+            for phase in [0.1_f32, 0.45, 0.8] {
+                for reversed in [false, true] {
+                    let foreground_label = if reversed { 2 } else { 0 };
+                    let background_label = 2 - foreground_label;
+                    let mut image = Raster::blank(width, height, background);
+                    let mut labels = vec![background_label; width * height];
+                    let mut coverage = vec![0.0; labels.len()];
+                    for y in 0..height {
+                        for x in 0..width {
+                            let index = y * width + x;
+                            let amount =
+                                ((16.0 + slope * (y as f32 - 24.0) + phase - x as f32 - 0.5)
+                                    / (1.0 + slope * slope).sqrt()
+                                    + 0.5)
+                                    .clamp(0.0, 1.0);
+                            coverage[index] = amount;
+                            image.pixels[index] = std::array::from_fn(|c| {
+                                amount * foreground[c] + (1.0 - amount) * background[c]
+                            });
+                            labels[index] = if amount == 1.0 {
+                                foreground_label
+                            } else if amount == 0.0 {
+                                background_label
+                            } else {
+                                1
+                            };
+                        }
+                    }
+                    let mut roles = classify(&image);
+                    roles.visible_ridge_centres.fill(false);
+                    roles.dark_boundary.fill(false);
+                    let corrected = correct_antialias_partition(&image, &labels, 3, &roles);
+                    let first = corrected.labels[24 * width];
+                    let second = corrected.labels[24 * width + width - 1];
+                    assert_ne!(first, second);
+                    for y in 4..height - 4 {
+                        for x in 0..width {
+                            let index = y * width + x;
+                            if labels[index] == 1 && (coverage[index] - 0.5).abs() > 0.02 {
+                                assert_eq!(
+                                    corrected.labels[index],
+                                    if coverage[index] > 0.5 { first } else { second },
+                                    "slope={slope} phase={phase} reversed={reversed} at {x},{y}"
+                                );
+                                assert!(!corrected.paint_samples[index]);
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -4594,7 +4653,7 @@ mod tests {
     }
 
     #[test]
-    fn dark_outline_tail_does_not_preserve_coloured_sleeve_prefix() {
+    fn dark_outline_tail_keeps_coloured_ink_but_not_light_ringing_prefix() {
         let width = 7;
         let height = 31;
         let first = [0.78, 0.91, 0.95];
@@ -4635,10 +4694,16 @@ mod tests {
 
         let correction = correct_antialias_partition(&image, &labels, 5, &roles);
 
-        for y in 2..=25 {
+        for y in 2..=13 {
             let index = y * width + 3;
-            assert!(matches!(correction.labels[index], 0 | 4));
+            assert_eq!(correction.labels[index], correction.labels[y * width + 1]);
             assert!(!correction.paint_samples[index]);
+        }
+        for y in 14..=25 {
+            let index = y * width + 3;
+            assert_ne!(correction.labels[index], correction.labels[y * width + 1]);
+            assert_ne!(correction.labels[index], correction.labels[y * width + 5]);
+            assert!(correction.paint_samples[index]);
         }
         let outline_label = correction.labels[26 * width + 3];
         assert_ne!(outline_label, correction.labels[26 * width + 2]);
@@ -4648,7 +4713,7 @@ mod tests {
             assert_eq!(correction.labels[index], outline_label);
             assert!(correction.paint_samples[index]);
         }
-        assert_eq!(correction.split_regions, 2);
+        assert_eq!(correction.split_regions, 1);
     }
 
     #[test]
@@ -4972,7 +5037,7 @@ mod tests {
     }
 
     #[test]
-    fn medium_dark_ringing_is_not_promoted_to_a_black_outline() {
+    fn coloured_ink_extremum_is_not_erased_when_detector_has_a_gap() {
         let width = 7;
         let height = 9;
         let first = [0.78, 0.91, 0.95];
@@ -5002,10 +5067,11 @@ mod tests {
 
         for y in 2..=6 {
             let index = y * width + 3;
-            assert!(matches!(correction.labels[index], 0 | 2));
-            assert!(!correction.paint_samples[index]);
+            assert_ne!(correction.labels[index], correction.labels[y * width + 1]);
+            assert_ne!(correction.labels[index], correction.labels[y * width + 5]);
+            assert!(correction.paint_samples[index]);
         }
-        assert_eq!(correction.split_regions, 1);
+        assert_eq!(correction.split_regions, 0);
     }
 
     #[test]

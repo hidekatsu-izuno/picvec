@@ -1824,6 +1824,99 @@ mod tests {
     }
 
     #[test]
+    fn outline_contours_keep_line_arc_and_branch_connections() {
+        let directory = tempfile::tempdir().unwrap();
+        for gap in [false, true] {
+            // An eight-pixel outline separates two colours, turns through
+            // circular corners and joins a tapered branch. It must keep its
+            // filled contour even where a uniform centre-line would fit.
+            let source_svg = format!(
+                r##"<svg xmlns="http://www.w3.org/2000/svg" width="192" height="144">
+                <path fill="#3399cc" d="M0 0H192V144H0Z"/>
+                <path fill="#000000" d="M48 24H144A32 32 0 0 1 176 56V88A32 32 0 0 1 144 120H48A32 32 0 0 1 16 88V56A32 32 0 0 1 48 24Z"/>
+                <path fill="#eec488" d="M48 32H144A24 24 0 0 1 168 56V88A24 24 0 0 1 144 112H48A24 24 0 0 1 24 88V56A24 24 0 0 1 48 32Z"/>
+                <path fill="#000000" d="M76 116H86L110 140H106Z"/>
+                {}</svg>"##,
+                if gap {
+                    r##"<path fill="#3399cc" d="M88 22H94V34H88Z"/>"##
+                } else {
+                    ""
+                }
+            );
+            let source_tree = parse_svg_document(&source_svg).unwrap();
+            let mut source = resvg::tiny_skia::Pixmap::new(192, 144).unwrap();
+            resvg::render(
+                &source_tree,
+                resvg::tiny_skia::Transform::identity(),
+                &mut source.as_mut(),
+            );
+            let input = directory.path().join("outline.png");
+            let output = directory.path().join("outline.svg");
+            source.save_png(&input).unwrap();
+            let summary = vectorize(
+                &input,
+                &output,
+                &Config {
+                    maximum_dimension: 192,
+                    auto_dimension: false,
+                    adaptive_refinement: false,
+                    rayon_threads: 1,
+                    ..Config::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(summary.structural.recovered_boundary_strokes, 0);
+            let document = fs::read_to_string(&output).unwrap();
+            let paint = document
+                .split("id=\"paint-layer\"")
+                .nth(1)
+                .unwrap()
+                .split("</g>")
+                .next()
+                .unwrap();
+            assert!(
+                paint.contains('L'),
+                "straight spans must remain in Paint paths"
+            );
+            if !gap {
+                assert!(
+                    paint.contains('A'),
+                    "supported circular spans must remain in Paint paths"
+                );
+            }
+            let tree = parse_svg_document(&document).unwrap();
+            let mut rendered = resvg::tiny_skia::Pixmap::new(192, 144).unwrap();
+            resvg::render(
+                &tree,
+                resvg::tiny_skia::Transform::identity(),
+                &mut rendered.as_mut(),
+            );
+            // Inspect the whole dark interior, including both straight/arc
+            // joins and the branch junction. Ignore only the AA fringe.
+            for y in 2..142 {
+                for x in 2..190 {
+                    let core = (y - 1..=y + 1).all(|py| {
+                        (x - 1..=x + 1).all(|px| source.pixels()[py * 192 + px].red() < 20)
+                    });
+                    if core {
+                        let p = rendered.pixels()[y * 192 + x];
+                        assert!(
+                            p.red().max(p.green()).max(p.blue()) < 100,
+                            "broken outline at {x},{y}, gap={gap}: {p:?}"
+                        );
+                    }
+                }
+            }
+            if gap {
+                assert!(
+                    rendered.pixels()[28 * 192 + 91].blue() > 150,
+                    "the authored gap must stay open"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn native_alpha_white_rim_is_continuous_after_rendering() {
         use image::{ImageBuffer, Rgba};
         let directory = tempfile::tempdir().unwrap();
