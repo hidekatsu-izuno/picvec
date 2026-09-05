@@ -29,8 +29,8 @@ pub struct Config {
     pub adaptive_svg_budget_bytes: usize,
     /// Minimum local DeltaE00 reduction before a refined region is useful.
     pub adaptive_min_perceptual_gain: f32,
-    /// Minimum coarse perceptual-gain/model-cost ratio required before the
-    /// expensive source-resolution candidate is evaluated.
+    /// Minimum coarse perceptual gain divided by the square root of partition
+    /// cost required before the source-resolution candidate is evaluated.
     pub adaptive_min_predicted_rate: f32,
     /// DeltaE00 charged per added SVG byte/source-pixel. This is the common
     /// rate-distortion control for both flat artwork and photographic detail.

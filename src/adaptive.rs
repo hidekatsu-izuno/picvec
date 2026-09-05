@@ -94,6 +94,7 @@ fn object_regions(
     height: usize,
     maximum_dimension: usize,
 ) -> Vec<SourceRect> {
+    const PADDING: usize = 16;
     let mut pending = support.to_vec();
     let mut stack = Vec::new();
     let mut regions = Vec::new();
@@ -123,15 +124,12 @@ fn object_regions(
         if right - left > maximum_dimension || bottom - top > maximum_dimension {
             continue;
         }
-        regions.push(
-            SourceRect {
-                x: left,
-                y: top,
-                width: right - left,
-                height: bottom - top,
-            }
-            .expanded(16, width, height),
-        );
+        regions.push(SourceRect {
+            x: left,
+            y: top,
+            width: right - left,
+            height: bottom - top,
+        });
     }
     // Disconnected details inside/near another silhouette must share its fit.
     // Recheck after every union: a union's rectangle can enclose a third object.
@@ -140,10 +138,12 @@ fn object_regions(
         let mut i = 0;
         while i < merged.len() {
             let other = merged[i];
-            if region.x < other.x + other.width
-                && other.x < region.x + region.width
-                && region.y < other.y + other.height
-                && other.y < region.y + region.height
+            let padded = region.expanded(PADDING, width, height);
+            let other_padded = other.expanded(PADDING, width, height);
+            if padded.x < other_padded.x + other_padded.width
+                && other_padded.x < padded.x + padded.width
+                && padded.y < other_padded.y + other_padded.height
+                && other_padded.y < padded.y + padded.height
             {
                 let right = (region.x + region.width).max(other.x + other.width);
                 let bottom = (region.y + region.height).max(other.y + other.height);
@@ -158,6 +158,30 @@ fn object_regions(
             }
         }
         merged.push(region);
+    }
+    // An excluded large component (for example a sheet's separator grid)
+    // can lie inside the usual padding without touching the figure itself.
+    // Place the crop in the middle of the available background gap instead
+    // of discarding the whole figure or cutting the neighbouring component.
+    for region in &mut merged {
+        let mut padding = PADDING;
+        for distance in 1..=2 * PADDING {
+            let ring = region.expanded(distance, width, height);
+            let occupied = |x: usize, y: usize| support[y * width + x];
+            if (ring.x..ring.x + ring.width).any(|x| {
+                (ring.y < region.y && occupied(x, ring.y))
+                    || (ring.y + ring.height > region.y + region.height
+                        && occupied(x, ring.y + ring.height - 1))
+            }) || (ring.y..ring.y + ring.height).any(|y| {
+                (ring.x < region.x && occupied(ring.x, y))
+                    || (ring.x + ring.width > region.x + region.width
+                        && occupied(ring.x + ring.width - 1, y))
+            }) {
+                padding = (distance - 1) / 2;
+                break;
+            }
+        }
+        *region = region.expanded(padding, width, height);
     }
     merged.retain(|r| {
         if r.width < 64
@@ -455,7 +479,10 @@ pub(crate) fn plan_candidates<S: RasterSource + ?Sized>(
                 core,
                 baseline,
                 model_cost,
-                priority: baseline.combined / model_cost.max(1e-6),
+                // Match the square-root partition charge used after fitting.
+                // A linear charge rejects dense, repeated details before
+                // their actual SVG cost and quality gain can be measured.
+                priority: baseline.combined / model_cost.sqrt().max(1e-6),
             })
         })
         .collect::<Vec<_>>();
@@ -647,6 +674,19 @@ mod tests {
                 "keyed={}: too few intact figures",
                 alpha.is_some()
             );
+            if alpha.is_some() {
+                // Opaque support also contains faint, connected grid debris;
+                // keying separates these three figures from that network.
+                for (x, y) in [(2880, 2900), (3700, 2100), (430, 2100)] {
+                    assert!(
+                        regions.iter().any(|r| r.x <= x
+                            && x < r.x + r.width
+                            && r.y <= y
+                            && y < r.y + r.height),
+                        "missing keyed figure at {x}, {y}"
+                    );
+                }
+            }
             // All three cylinders and their common shading must share one fit.
             assert_eq!(
                 regions
@@ -710,6 +750,55 @@ mod tests {
             }
         }
         assert_eq!(object_regions(&support, 240, 240, 220).len(), 1);
+    }
+
+    #[test]
+    fn nearby_oversized_separator_leaves_a_whole_figure_candidate() {
+        let mut support = vec![false; 400 * 240];
+        // This grid line exceeds the crop limit and stays in the base.
+        for x in 0..400 {
+            support[40 * 400 + x] = true;
+        }
+        // A separate figure has a narrow but valid background gap above it.
+        for y in 54..180 {
+            for x in 100..220 {
+                support[y * 400 + x] = true;
+            }
+        }
+        let regions = object_regions(&support, 400, 240, 200);
+        assert_eq!(regions.len(), 1);
+        let r = regions[0];
+        assert!(r.x < 100 && r.x + r.width > 220);
+        assert!(r.y > 42 && r.y < 54 && r.y + r.height > 180);
+        // A genuinely connected figure must still stay with the large grid.
+        for y in 40..54 {
+            support[y * 400 + 160] = true;
+        }
+        assert!(object_regions(&support, 400, 240, 200).is_empty());
+    }
+
+    #[test]
+    fn dense_visible_detail_reaches_measured_refinement_evaluation() {
+        let mut source = Raster::blank(160, 160, [1.0; 3]);
+        for y in 32..128 {
+            for x in 32..128 {
+                source.pixels[y * 160 + x] = if (x / 4 + y / 4) % 2 == 0 {
+                    [0.2; 3]
+                } else {
+                    [0.4; 3]
+                };
+            }
+        }
+        let base = Raster::blank(40, 40, [0.3; 3]);
+        let labels: Vec<_> = (0..1600).map(|i| i as u32).collect();
+        let config = crate::Config::default();
+        let candidates = plan_candidates(&source, None, &base, &labels, 160, 64, 0.75);
+        assert_eq!(candidates.len(), 1);
+        let candidate = &candidates[0];
+        assert!(candidate.priority >= config.adaptive_min_predicted_rate);
+        assert!(
+            candidate.baseline.combined / candidate.model_cost < config.adaptive_min_predicted_rate
+        );
     }
 
     #[test]

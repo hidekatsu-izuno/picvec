@@ -678,11 +678,11 @@ fn adaptively_refine(
             );
         }
     }
-    // The coarse error/model-cost ratio is an optimistic rate bound. Regions
-    // below it cannot beat the full candidate's stricter measured SVG-byte
-    // charge often enough to justify running another complete pipeline. The
-    // same bound retains compact icon features and rejects costly stochastic
-    // photo texture without identifying either content type.
+    // Estimate the available gain using the same square-root partition
+    // charge as the measured acceptance rule below. Actual SVG bytes are
+    // unknown here, so this is only a prefilter, not a bound on the final
+    // rate. Dense repeated details must get a chance to demonstrate their
+    // measured gain and representation cost.
     let predicted_rate_threshold =
         config.adaptive_min_predicted_rate * config.adaptive_complexity_penalty.sqrt();
     candidates.retain(|candidate| candidate.priority >= predicted_rate_threshold);
@@ -761,13 +761,28 @@ fn adaptively_refine(
                 )?;
                 let refined =
                     perceptual_score(reference_source, candidate.core, &child_render, expanded);
-                if !refinement_boundary_matches(
+                let boundary_matches = refinement_boundary_matches(
                     &base_render,
                     &child_render,
                     whole,
                     candidate.core,
                     expanded,
-                ) {
+                );
+                #[cfg(feature = "diagnostics")]
+                if config.retain_diagnostics {
+                    eprintln!(
+                        "picvec adaptive evaluated {} {} {} {}: baseline={:?} refined={:?} boundary_matches={} bytes={}",
+                        candidate.core.x,
+                        candidate.core.y,
+                        candidate.core.width,
+                        candidate.core.height,
+                        candidate.baseline,
+                        refined,
+                        boundary_matches,
+                        child.svg.bytes,
+                    );
+                }
+                if !boundary_matches {
                     return Ok(RefinementOutcome::QualityRejected);
                 }
                 let combined_gain = candidate.baseline.combined - refined.combined;

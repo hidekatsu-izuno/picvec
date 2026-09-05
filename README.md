@@ -118,6 +118,12 @@ the base SVG across the surrounding background. A rendered boundary check
 rejects replacements that disagree with the retained base. The byte budget and
 thresholds above control the quality/size tradeoff; `--no-adaptive-refinement`
 restores single-resolution processing.
+Crop padding fits inside the available background gap, including beside a
+large separator grid. The preliminary cost estimate uses the same square-root
+partition penalty as measured acceptance, so dense repeated details can be
+evaluated before their actual SVG size is known. See
+[clip-art detail refinement](docs/clipart-detail-refinement.md) for the server
+rack and portrait regressions.
 Independent refinement regions run concurrently. The job count is bounded by
 the selected worker count and by a conservative estimate derived from the
 largest crop and currently available memory; `--verbose` reports the selected
