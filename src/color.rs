@@ -243,7 +243,25 @@ pub fn delta_e94_local(first: Lab, second: Lab) -> f32 {
 
 /// CIEDE2000, used for the fidelity report and perceptual merge gates.
 pub fn delta_e2000(first: Lab, second: Lab) -> f32 {
-    delta_e2000_pairs(&[first], &[second])[0]
+    // Scalar callers need no temporary Vecs and can evaluate both hues in
+    // one SIMD vector. Keep the batch path's operations and rounding exactly.
+    let c1 = first.a.hypot(first.b);
+    let c2 = second.a.hypot(second.b);
+    let c_bar = (c1 + c2) * 0.5;
+    let g = 0.5 * (1.0 - (c_bar.powi(7) / (c_bar.powi(7) + 25_f32.powi(7))).sqrt());
+    let a1p = (1.0 + g) * first.a;
+    let a2p = (1.0 + g) * second.a;
+    let c1p = a1p.hypot(first.b);
+    let c2p = a2p.hypot(second.b);
+    let [atan_first, atan_second] =
+        crate::elementary::atan2_f32_pair([first.b, second.b], [a1p, a2p]);
+    const RAD2DEG: f32 = 180.0_f32 / std::f32::consts::PI;
+    const DEG2RAD: f32 = std::f32::consts::PI / 180.0_f32;
+    let h1p = (atan_first * RAD2DEG) % 360.0;
+    let h1p = if h1p < 0.0 { h1p + 360.0 } else { h1p };
+    let h2p = (atan_second * RAD2DEG) % 360.0;
+    let h2p = if h2p < 0.0 { h2p + 360.0 } else { h2p };
+    delta_e2000_after_hue(first, second, c1p, c2p, h1p, h2p, DEG2RAD)
 }
 
 /// CIEDE2000 over contiguous pairs, evaluating `atan2` in portable SIMD
@@ -302,6 +320,13 @@ pub(crate) fn delta_e2000_nearest(
         // regardless of its ordering among rejected colours.
         let l_bar = (value.l + second.l) * 0.5;
         let l_offset = l_bar - 50.0;
+        // S_L <= 1 + 0.015 * |L_bar - 50|. Reject clearly distant
+        // lightness values before paying for the tighter bound's square root.
+        // The extra margin also keeps rounding at the acceptance boundary safe.
+        let loose_sl = 1.0 + 0.015 * l_offset.abs();
+        if (value.l - second.l).abs() > (maximum_distance + 2e-4) * loose_sl {
+            continue;
+        }
         let sl = 1.0 + 0.015 * l_offset.powi(2) / (20.0 + l_offset.powi(2)).sqrt();
         let lightness_lower_bound = (value.l - second.l).abs() / sl;
         if lightness_lower_bound > maximum_distance + 1e-4 {
@@ -504,6 +529,43 @@ mod tests {
     }
 
     #[test]
+    fn scalar_ciede2000_is_bit_exact_to_batch_for_gamut_and_neutral_pairs() {
+        let mut values = Vec::new();
+        for r in 0..=8 {
+            for g in 0..=8 {
+                for b in 0..=8 {
+                    values.push(rgb_to_lab([r as f32 / 8.0, g as f32 / 8.0, b as f32 / 8.0]));
+                }
+            }
+        }
+        values.extend([
+            Lab {
+                l: 50.0,
+                a: 0.0,
+                b: 0.0,
+            },
+            Lab {
+                l: 50.0,
+                a: -0.0,
+                b: -0.0,
+            },
+        ]);
+        for offset in [0, 1, 7, 131, 397] {
+            let others: Vec<_> = (0..values.len())
+                .map(|i| values[(i + offset) % values.len()])
+                .collect();
+            let batch = delta_e2000_pairs(&values, &others);
+            for ((&first, second), expected) in values.iter().zip(others).zip(batch) {
+                assert_eq!(
+                    delta_e2000(first, second).to_bits(),
+                    expected.to_bits(),
+                    "{first:?} {second:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn reusable_nearest_matches_common_reference_batch() {
         let reference = rgb_to_lab([0.37, 0.21, 0.82]);
         let values: Vec<Lab> = (0..33)
@@ -562,6 +624,54 @@ mod tests {
             delta_e2000_nearest(&values, reference, radius, &mut workspace),
             expected
         );
+    }
+
+    #[test]
+    fn loose_lightness_precheck_keeps_tight_radius_candidates() {
+        let values: Vec<_> = (-20..=120)
+            .map(|i| Lab {
+                l: i as f32,
+                a: (i % 37) as f32 - 18.0,
+                b: (i % 29) as f32 - 14.0,
+            })
+            .collect();
+        let mut workspace = DeltaE2000Workspace::default();
+        for value in values.iter().step_by(11).copied() {
+            let reference = Lab {
+                l: value.l + 0.31,
+                a: value.a + 0.07,
+                b: value.b - 0.19,
+            };
+            let distances = delta_e2000_to_many(&values, reference);
+            let mut radii = vec![0.0, 0.1, 2.5, 5.0, 35.0, f32::INFINITY];
+            for (index, &distance) in distances.iter().enumerate().step_by(17) {
+                assert_eq!(
+                    delta_e2000_nearest(
+                        &values[index..=index],
+                        reference,
+                        distance,
+                        &mut workspace
+                    ),
+                    Some((0, distance)),
+                );
+                radii.push(distance);
+                if distance > 0.0 {
+                    radii.push(f32::from_bits(distance.to_bits() - 1));
+                }
+            }
+            for radius in radii {
+                let expected = distances
+                    .iter()
+                    .copied()
+                    .enumerate()
+                    .filter(|&(_, distance)| distance <= radius)
+                    .min_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
+                assert_eq!(
+                    delta_e2000_nearest(&values, reference, radius, &mut workspace),
+                    expected
+                );
+            }
+        }
     }
 
     #[test]

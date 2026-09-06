@@ -1,8 +1,10 @@
 //! Automatic constant-colour keying for the six saturated RGB cube corners.
 //!
 //! A single backing image does not uniquely determine foreground colour and
-//! coverage in the general matting equation.  The restricted inputs handled
-//! here use the classical colour-difference assumption: at least one of the
+//! coverage in the general matting equation. Distinct, spatially supported
+//! interiors are treated as opaque, with nearby colours guiding edge coverage.
+//! Unsupported thin details use the classical colour-difference assumption:
+//! at least one of the
 //! backing's low channels remains no brighter than the foreground while every
 //! high channel participates in the key.  This is the six-corner analogue of
 //! the Vlahos form discussed by Smith and Blinn, "Blue Screen Matting",
@@ -25,6 +27,9 @@ const KEY_CORNERS: [[f32; 3]; 6] = [
     [0.0, 1.0, 1.0],
 ];
 const KEY_SAMPLE_DISTANCE: f32 = 56.0 / 255.0;
+// Background colour variation must not become an opaque foreground anchor.
+const KEY_FOREGROUND_DISTANCE: f32 = 64.0 / 255.0;
+const KEY_FRINGE_RESIDUAL: f32 = 12.0 / 255.0;
 const MINIMUM_BORDER_COVERAGE: f32 = 0.20;
 const MAXIMUM_BORDER_BAND_DEPTH: usize = 64;
 const BACKGROUND_OWNERSHIP_ALPHA: f32 = 0.50;
@@ -225,14 +230,65 @@ fn coverage(pixel: [f32; 3], key: ChromaKey) -> f32 {
     (1.0 - signal / key_signal).clamp(0.0, 1.0)
 }
 
-/// Pull a soft matte from an already keyed opaque raster.  The raster itself
-/// remains on its detected backing throughout vectorization; only matching
-/// vector regions are omitted from the final SVG.
+/// Pull a soft matte from an already keyed opaque raster, preserving distinct
+/// opaque interiors and estimating key contamination at their edges.
 pub(crate) fn pull_matte<R: RasterSource + ?Sized>(image: &R, key: ChromaKey) -> AlphaMatte {
-    let len = image.width() * image.height();
+    let width = image.width();
+    let height = image.height();
+    let len = width * height;
+    // Colour-difference coverage assumes neutral foreground channels. An
+    // opaque green object on a green backing violates that assumption. Use
+    // a spatially supported, differently coloured interior as opaque evidence;
+    // reserve colour-difference inference for unsupported thin details.
+    let distinct: Vec<bool> = (0..len)
+        .map(|index| {
+            squared_distance(image.get(index % width, index / width), key.sampled)
+                > KEY_FOREGROUND_DISTANCE.powi(2)
+        })
+        .collect();
+    let interior = crate::edge::erode(&distinct, width, height, 2);
     let mut values = Vec::with_capacity(len);
     for index in 0..len {
-        let alpha = coverage(image.get(index % image.width(), index / image.width()), key);
+        let x = index % width;
+        let y = index / width;
+        let pixel = image.get(x, y);
+        let mut alpha = coverage(pixel, key);
+        if interior[index] {
+            alpha = 1.0;
+        } else if squared_distance(pixel, key.sampled) > KEY_FRINGE_RESIDUAL.powi(2) && alpha < 1.0
+        {
+            // Fit the fringe against nearby opaque colour, rather than
+            // interpreting that colour's own key hue as transparency.
+            let observed = [0, 1, 2].map(|c| pixel[c] - key.sampled[c]);
+            let mut best = f32::INFINITY;
+            for py in y.saturating_sub(3)..=(y + 3).min(height - 1) {
+                for px in x.saturating_sub(3)..=(x + 3).min(width - 1) {
+                    if !interior[py * width + px] {
+                        continue;
+                    }
+                    let foreground = image.get(px, py);
+                    let direction = [0, 1, 2].map(|c| foreground[c] - key.sampled[c]);
+                    let denominator = direction.iter().map(|v| v * v).sum::<f32>();
+                    let candidate = (observed
+                        .iter()
+                        .zip(direction)
+                        .map(|(a, b)| a * b)
+                        .sum::<f32>()
+                        / denominator.max(1e-8))
+                    .clamp(0.0, 1.0);
+                    let residual = [0, 1, 2]
+                        .iter()
+                        .map(|&c| (observed[c] - candidate * direction[c]).powi(2))
+                        .sum::<f32>();
+                    let distance = (x.abs_diff(px).pow(2) + y.abs_diff(py).pow(2)) as f32;
+                    let score = residual + distance * 1e-6;
+                    if residual <= KEY_FRINGE_RESIDUAL.powi(2) && score < best {
+                        best = score;
+                        alpha = coverage(pixel, key).max(candidate);
+                    }
+                }
+            }
+        }
         values.push((alpha * 65_535.0).round() as u16);
     }
     AlphaMatte {
@@ -1156,6 +1212,93 @@ mod tests {
             pull_matte(&source, key).iter().collect::<Vec<_>>(),
             vec![1.0, 1.0]
         );
+    }
+
+    #[test]
+    fn same_hue_opaque_objects_keep_colour_and_antialias_coverage() {
+        for corner in KEY_CORNERS {
+            let key = ChromaKey {
+                corner,
+                sampled: corner,
+                border_coverage: 1.0,
+            };
+            let foreground = corner.map(|channel| if channel > 0.5 { 0.78 } else { 0.16 });
+            let mut source = Raster::blank(32, 32, corner);
+            for y in 5..27 {
+                for x in 5..27 {
+                    let alpha = if (6..26).contains(&x) && (6..26).contains(&y) {
+                        1.0
+                    } else {
+                        0.4
+                    };
+                    source.pixels[y * 32 + x] =
+                        [0, 1, 2].map(|c| foreground[c] * alpha + corner[c] * (1.0 - alpha));
+                }
+            }
+            // An enclosed piece of the true backing must still disappear.
+            for y in 14..18 {
+                for x in 14..18 {
+                    source.pixels[y * 32 + x] = corner;
+                }
+            }
+            let matte = pull_matte(&source, key);
+            let separated = separate_foreground(&source, &matte, corner);
+            for y in 6..26 {
+                for x in 6..26 {
+                    let i = y * 32 + x;
+                    if (14..18).contains(&x) && (14..18).contains(&y) {
+                        assert_eq!(matte.get(i), 0.0);
+                    } else {
+                        assert!(
+                            (matte.get(i) - 1.0).abs() < 1e-4,
+                            "lost {corner:?} foreground at ({x}, {y})"
+                        );
+                        assert!(separated.pixels[i]
+                            .iter()
+                            .zip(foreground)
+                            .all(|(actual, expected)| (actual - expected).abs() < 1e-4));
+                    }
+                }
+            }
+            assert!((matte.get(5 * 32 + 16) - 0.4).abs() < 1e-4);
+            assert_eq!(matte.get(0), 0.0);
+        }
+    }
+
+    #[test]
+    fn background_colour_variation_does_not_create_opaque_islands() {
+        for corner in KEY_CORNERS {
+            let key = ChromaKey {
+                corner,
+                sampled: corner,
+                border_coverage: 1.0,
+            };
+            let mut source = Raster::blank(40, 40, corner);
+            // Broad backing variations must not become opaque just because
+            // erosion leaves an interior. These include the reported green
+            // gap samples (0,242,0) and (0,239,0), plus channel contamination.
+            for (channel_shift, contamination) in
+                [(13.0, 0.0), (16.0, 0.0), (32.0, 16.0), (40.0, 16.0)]
+            {
+                for y in 4..36 {
+                    for x in 4..36 {
+                        source.pixels[y * 40 + x] = corner.map(|channel| {
+                            if channel > 0.5 {
+                                1.0 - channel_shift / 255.0
+                            } else {
+                                contamination / 255.0
+                            }
+                        });
+                    }
+                }
+                let matte = pull_matte(&source, key);
+                assert!(matte.iter().all(|alpha| alpha < BACKGROUND_OWNERSHIP_ALPHA));
+                assert!(separate_foreground(&source, &matte, corner)
+                    .pixels
+                    .iter()
+                    .all(|pixel| *pixel == corner));
+            }
+        }
     }
 
     #[test]

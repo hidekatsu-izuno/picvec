@@ -1793,7 +1793,8 @@ fn fit_region_samples(
             .and_then(|value| value.parse::<usize>().ok())
             == Some(label);
     let small_region = area < config.minimum_gradient_area as usize;
-    let minimum_improvement = 0.25 * 2.3;
+    let tone_scale = config.tonal_detail_scale(rgb_to_lab(solid_color).l);
+    let minimum_improvement = 0.25 * 2.3 * tone_scale;
     // Every candidate error is non-negative. If even a hypothetical perfect
     // gradient cannot clear the existing promotion charge, no emitted
     // gradient can win. This proof applies to normal as well as small faces
@@ -1822,7 +1823,7 @@ fn fit_region_samples(
     // low-chroma shading: on light monochrome artwork it can make a visibly
     // modelled ramp look flat after vectorization. The improvement and
     // complexity gates below still prevent gratuitous SVG gradients.
-    if perceptual_range <= config.solid_color_max_delta_e {
+    if perceptual_range <= config.solid_color_max_delta_e * tone_scale {
         return (
             Paint::Solid { color: solid_color },
             solid_error.mean,
@@ -2073,15 +2074,70 @@ fn paint_stats(source: &Raster, samples: &[usize], paint: &Paint) -> ErrorStats 
     })
 }
 
+// Merge candidates share the same source observations. This deliberately
+// caches preprocess-Lab, not the different Lab transform used by Paint fitting.
+struct MergePaintSamples<'a> {
+    source: &'a Raster,
+    indices: &'a [usize],
+    labs: Vec<Lab>,
+}
+
+impl<'a> MergePaintSamples<'a> {
+    fn new(source: &'a Raster, indices: &'a [usize]) -> Self {
+        Self {
+            source,
+            indices,
+            labs: preprocess_color_values(
+                indices.iter().map(|&index| source.pixels[index]).collect(),
+            ),
+        }
+    }
+
+    fn error(&self, rendered: Vec<[f32; 3]>) -> ErrorStats {
+        if self.indices.is_empty() {
+            return ErrorStats {
+                mean: 0.0,
+                percentile: 0.0,
+            };
+        }
+        let rendered_labs = preprocess_color_values(rendered);
+        let errors = delta_e2000_pairs(&self.labs, &rendered_labs);
+        ErrorStats {
+            mean: numpy_sum_f32(&errors) / errors.len() as f32,
+            percentile: percentile(errors, 0.90),
+        }
+    }
+
+    fn paint_stats(&self, paint: &Paint) -> ErrorStats {
+        self.error(
+            self.indices
+                .iter()
+                .map(|&index| paint_at(paint, index, self.source.width))
+                .collect(),
+        )
+    }
+
+    fn gradient_error(&self, parameters: &[f32], stops: &[ColorStop]) -> ErrorStats {
+        assert_eq!(self.indices.len(), parameters.len());
+        self.error(
+            parameters
+                .iter()
+                .map(|&parameter| interpolate(stops, parameter))
+                .collect(),
+        )
+    }
+}
+
 fn expand_merge_stops(
-    source: &Raster,
-    samples: &[usize],
+    observations: &MergePaintSamples<'_>,
     parameters: &[f32],
     template: &Paint,
     initial_stops: Vec<ColorStop>,
     initial_stats: ErrorStats,
     maximum: usize,
 ) -> (Paint, ErrorStats) {
+    let source = observations.source;
+    let samples = observations.indices;
     let trace = cfg!(feature = "diagnostics")
         && std::env::var("PICVEC_TRACE_FIT_SAMPLES")
             .ok()
@@ -2111,7 +2167,7 @@ fn expand_merge_stops(
             proposed.push(offset);
             proposed.sort_by(f64::total_cmp);
             let stops = fitted_stops_direct(source, samples, parameters, &proposed);
-            let stats = gradient_error(source, samples, parameters, &stops);
+            let stats = observations.gradient_error(parameters, &stops);
             let candidate = objective(stats);
             if trace {
                 eprintln!(
@@ -2265,9 +2321,10 @@ fn fit_merge_paint(
                 requested == samples
             })
             .unwrap_or(false);
+    let observations = MergePaintSamples::new(source, samples);
     let solid_color = mean_color(source, samples);
     let solid = Paint::Solid { color: solid_color };
-    let solid_stats = paint_stats(source, samples, &solid);
+    let solid_stats = observations.paint_stats(&solid);
     let mut candidates = Vec::<(f32, Paint, Vec<f32>, ErrorStats)>::new();
     for preset in [
         LinearPreset::LeftToRight,
@@ -2287,7 +2344,7 @@ fn fit_merge_paint(
             end,
             stops,
         };
-        let stats = paint_stats(source, samples, &paint);
+        let stats = observations.paint_stats(&paint);
         candidates.push((
             paint_rgb_mse(source, samples, &paint),
             paint,
@@ -2314,7 +2371,7 @@ fn fit_merge_paint(
             radius,
             stops,
         };
-        let stats = paint_stats(source, samples, &paint);
+        let stats = observations.paint_stats(&paint);
         candidates.push((
             paint_rgb_mse(source, samples, &paint),
             paint,
@@ -2362,8 +2419,7 @@ fn fit_merge_paint(
             Paint::Solid { .. } | Paint::Layered { .. } => unreachable!(),
         };
         expand_merge_stops(
-            source,
-            samples,
+            &observations,
             parameters,
             template,
             initial_stops,
@@ -2852,6 +2908,12 @@ fn merge_proposal(
     } else {
         config.gradient_merge_error
     };
+    // Check the darker and lighter child separately: an average midtone must
+    // not loosen the budget for an incident shadow or highlight face.
+    let tone_scale = config
+        .tonal_detail_scale(rgb_to_lab(first_mean).l)
+        .min(config.tonal_detail_scale(rgb_to_lab(second_mean).l));
+    let limit = limit * tone_scale;
     let solid = Paint::Solid {
         color: mean_color(source, &quick_samples),
     };
@@ -2904,7 +2966,7 @@ fn merge_proposal(
                 .max(objective(paint_stats(source, &second_samples, &paint)));
         }
     }
-    if hard_edge && score > limit {
+    if score > limit {
         score = f32::INFINITY;
     }
     if trace_pair {
@@ -5692,6 +5754,42 @@ fn save_paint_details(path: &str, paints: &[Paint]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cached_merge_observations_keep_both_error_statistics_exact() {
+        let source = Raster::new(
+            8,
+            8,
+            (0..64)
+                .map(|i| [i as f32 / 64.0, (i % 7) as f32 / 7.0, 0.3])
+                .collect(),
+        );
+        for samples in [vec![], vec![0], (0..64).step_by(3).collect()] {
+            let cached = MergePaintSamples::new(&source, &samples);
+            let paint = Paint::Solid {
+                color: [0.2, 0.5, 0.8],
+            };
+            let expected = paint_stats(&source, &samples, &paint);
+            let actual = cached.paint_stats(&paint);
+            assert_eq!(actual.mean.to_bits(), expected.mean.to_bits());
+            assert_eq!(actual.percentile.to_bits(), expected.percentile.to_bits());
+            let stops = vec![
+                ColorStop {
+                    offset: 0.0,
+                    color: [0.1, 0.3, 0.7],
+                },
+                ColorStop {
+                    offset: 1.0,
+                    color: [0.9, 0.6, 0.2],
+                },
+            ];
+            let parameters: Vec<_> = samples.iter().map(|&i| i as f32 / 63.0).collect();
+            let expected = gradient_error(&source, &samples, &parameters, &stops);
+            let actual = cached.gradient_error(&parameters, &stops);
+            assert_eq!(actual.mean.to_bits(), expected.mean.to_bits());
+            assert_eq!(actual.percentile.to_bits(), expected.percentile.to_bits());
+        }
+    }
 
     #[test]
     fn cached_solid_lab_preserves_paint_error_exactly() {

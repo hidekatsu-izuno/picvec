@@ -3208,8 +3208,9 @@ fn adaptive_tolerance(lightness: f32, config: &Config) -> f32 {
     let amount = ((lightness - config.dark_knee_lstar) / (100.0 - config.dark_knee_lstar).max(1.0))
         .clamp(0.0, 1.0);
     let smooth = amount * amount * (3.0 - 2.0 * amount);
-    config.smoothing_dark_delta_e
-        + (config.smoothing_light_delta_e - config.smoothing_dark_delta_e) * smooth
+    (config.smoothing_dark_delta_e
+        + (config.smoothing_light_delta_e - config.smoothing_dark_delta_e) * smooth)
+        * config.tonal_detail_scale(lightness)
 }
 
 /// Calculate one shifted bilateral range plane immediately before it is

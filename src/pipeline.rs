@@ -9,7 +9,7 @@ use tempfile::{Builder as TemporaryFileBuilder, NamedTempFile};
 use std::collections::HashMap;
 
 use crate::adaptive::{
-    compose_refinements, perceptual_score, plan_candidates, refinement_boundary_matches,
+    compose_refinements, matching_refinement_core, perceptual_score, plan_candidates,
     refinements_cover_canvas, AdaptiveRefinementSummary, EmbeddedRefinement, SourceRect,
 };
 use crate::chroma::{self, AlphaMatte, AlphaTransparencySummary, ChromaKeySummary};
@@ -759,24 +759,28 @@ fn adaptively_refine(
                     child.processing_reference.height,
                     core.preview_background,
                 )?;
-                let refined =
-                    perceptual_score(reference_source, candidate.core, &child_render, expanded);
-                let boundary_matches = refinement_boundary_matches(
+                let matched_core = matching_refinement_core(
                     &base_render,
                     &child_render,
                     whole,
                     candidate.core,
                     expanded,
+                    source_matte,
                 );
+                let core = matched_core.unwrap_or(candidate.core);
+                let baseline = if core == candidate.core { candidate.baseline }
+                    else { perceptual_score(reference_source, core, &base_render, whole) };
+                let refined = perceptual_score(reference_source, core, &child_render, expanded);
+                let boundary_matches = matched_core.is_some();
                 #[cfg(feature = "diagnostics")]
                 if config.retain_diagnostics {
                     eprintln!(
                         "picvec adaptive evaluated {} {} {} {}: baseline={:?} refined={:?} boundary_matches={} bytes={}",
-                        candidate.core.x,
-                        candidate.core.y,
-                        candidate.core.width,
-                        candidate.core.height,
-                        candidate.baseline,
+                        core.x,
+                        core.y,
+                        core.width,
+                        core.height,
+                        baseline,
                         refined,
                         boundary_matches,
                         child.svg.bytes,
@@ -785,16 +789,16 @@ fn adaptively_refine(
                 if !boundary_matches {
                     return Ok(RefinementOutcome::QualityRejected);
                 }
-                let combined_gain = candidate.baseline.combined - refined.combined;
+                let combined_gain = baseline.combined - refined.combined;
                 if combined_gain < config.adaptive_min_perceptual_gain
-                    || refined.p90_delta_e > candidate.baseline.p90_delta_e + 0.25
+                    || refined.p90_delta_e > baseline.p90_delta_e + 0.25
                     || refined.missing_edge_fraction
-                        > candidate.baseline.missing_edge_fraction + 0.025
+                        > baseline.missing_edge_fraction + 0.025
                 {
                     return Ok(RefinementOutcome::QualityRejected);
                 }
                 let bytes_per_source_pixel =
-                    child.svg.bytes as f32 / candidate.core.area().max(1) as f32;
+                    child.svg.bytes as f32 / core.area().max(1) as f32;
                 let complexity_charge = config.adaptive_complexity_penalty
                     * candidate.model_cost.sqrt()
                     * bytes_per_source_pixel;
@@ -804,16 +808,16 @@ fn adaptively_refine(
                 let child_svg_bytes = child.svg.bytes.max(1);
                 Ok(RefinementOutcome::Accepted(Box::new(EvaluatedRefinement {
                     embedded: EmbeddedRefinement {
-                        core: candidate.core,
+                        core,
                         expanded,
                         document: child.document,
                         processing_width: child.processing_reference.width,
                         processing_height: child.processing_reference.height,
                     },
                     svg: child.svg,
-                    baseline_mean: candidate.baseline.mean_delta_e,
+                    baseline_mean: baseline.mean_delta_e,
                     refined_mean: refined.mean_delta_e,
-                    rate: combined_gain * candidate.core.area() as f32 / child_svg_bytes as f32,
+                    rate: combined_gain * core.area() as f32 / child_svg_bytes as f32,
                 })))
             })
             .collect::<Result<Vec<_>>>()?;
@@ -1241,7 +1245,7 @@ fn vectorize_processing(
         &paint_reference,
         &mut segmentation,
         &structural_candidates.paint_ownership_mask,
-        &structural_candidates.source_line_mask,
+        &structural_candidates.residual_source_line_mask(),
     );
     save_label_diagnostic(
         "thin-labels",
@@ -1280,9 +1284,10 @@ fn vectorize_processing(
         processing.width,
         processing.height,
     );
-    // Paint residuals are represented as transparent layers on their owning
-    // face.  Splitting those residuals into ordinary labels would turn a
-    // smooth tone correction back into a hard shared-boundary staircase.
+    // Long connected colour bands can span unrelated illumination fields.
+    // Fit source-smooth bands locally and retain their shared paint keys so
+    // the continuity solver can join the resulting gradients.
+    crate::segment::split_adaptive_paint_patches(&paint_reference, &processing, &mut segmentation);
     save_label_diagnostic(
         "final-labels",
         &segmentation.labels,
@@ -2189,6 +2194,151 @@ mod tests {
             }
         }
         assert_eq!(pixmap.pixels()[73 * 96 + 47].alpha(), 0);
+    }
+
+    #[test]
+    #[ignore = "renders the full-size car sample"]
+    fn car_front_fender_highlight_keeps_local_shading() {
+        let input = Path::new(env!("CARGO_MANIFEST_DIR")).join("sample/input/car.png");
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("car.svg");
+        let summary = vectorize(&input, &output, &Config::default()).unwrap();
+        assert_eq!(
+            (summary.processing_width, summary.processing_height),
+            (1254, 1254)
+        );
+        let source = image::open(input).unwrap().to_rgb8();
+        let tree = parse_svg_document(&fs::read_to_string(output).unwrap()).unwrap();
+        let mut pixmap = resvg::tiny_skia::Pixmap::new(1254, 1254).unwrap();
+        // Match the opaque source/browser background instead of measuring
+        // premultiplied RGB against transparent black at antialiased edges.
+        pixmap.fill(resvg::tiny_skia::Color::WHITE);
+        resvg::render(
+            &tree,
+            resvg::tiny_skia::Transform::identity(),
+            &mut pixmap.as_mut(),
+        );
+        let mut error = 0_u64;
+        let mut channels = 0_u64;
+        // The curved highlight above the front wheel, excluding the lamp.
+        // The previous whole-face fit has >4 levels of mean RGB error here.
+        for y in 565..645 {
+            for x in 320..530 {
+                let reference = source.get_pixel(x, y).0;
+                if reference[0] <= 190 || reference[1] >= 160 {
+                    continue;
+                }
+                let pixel = pixmap.pixels()[(y * 1254 + x) as usize];
+                for (expected, actual) in
+                    reference
+                        .into_iter()
+                        .zip([pixel.red(), pixel.green(), pixel.blue()])
+                {
+                    error += u64::from(expected.abs_diff(actual));
+                    channels += 1;
+                }
+            }
+        }
+        assert!(channels > 40_000);
+        let mean_error = error as f64 / channels as f64;
+        assert!(
+            mean_error < 3.5,
+            "front fender highlight error: {mean_error}, regions: {}, output: {}",
+            summary.geometry.regions,
+            directory.keep().display()
+        );
+    }
+
+    #[test]
+    #[ignore = "renders the full-size cliparts sample"]
+    fn cliparts_penguin_inner_foot_outlines_remain_continuous() {
+        let input = Path::new(env!("CARGO_MANIFEST_DIR")).join("sample/input/cliparts.png");
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("cliparts.svg");
+        let summary = vectorize(&input, &output, &Config::default()).unwrap();
+        assert_eq!(
+            (summary.processing_width, summary.processing_height),
+            (1600, 1200)
+        );
+        let source = image::open(input).unwrap().to_rgb8();
+        let tree = parse_svg_document(&fs::read_to_string(output).unwrap()).unwrap();
+        let mut pixmap = resvg::tiny_skia::Pixmap::new(1600, 1200).unwrap();
+        pixmap.fill(resvg::tiny_skia::Color::WHITE);
+        resvg::render(
+            &tree,
+            resvg::tiny_skia::Transform::identity(),
+            &mut pixmap.as_mut(),
+        );
+        // Follow the source's dark centre on each side of the white gap.
+        // Permit one pixel of fitting displacement, but never a missing row.
+        for (left, right) in [(989, 998), (1000, 1018)] {
+            for y in 685..723 {
+                let x = (left..right)
+                    .min_by_key(|&x| *source.get_pixel(x, y).0.iter().max().unwrap())
+                    .unwrap();
+                assert!(
+                    (x - 1..=x + 1).any(|sample_x| {
+                        let p = pixmap.pixels()[(y * 1600 + sample_x) as usize];
+                        p.red().max(p.green()).max(p.blue()) <= 128
+                    }),
+                    "penguin foot outline lost at ({x}, {y})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn tonal_details_survive_rendering_with_authored_gaps() {
+        use image::{ImageBuffer, Rgb};
+
+        for (background, detail) in [
+            ([238_u8, 238, 242], [228_u8, 228, 232]),
+            ([24, 24, 28], [32, 32, 36]),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let input = directory.path().join("faint-seam.png");
+            let output = directory.path().join("faint-seam.svg");
+            let mut image = ImageBuffer::from_pixel(96, 96, Rgb(background));
+            for y in 8..88 {
+                if (43..53).contains(&y) {
+                    continue;
+                }
+                for x in 46..50 {
+                    image.put_pixel(x, y, Rgb(detail));
+                }
+            }
+            image.save(&input).unwrap();
+            vectorize(
+                &input,
+                &output,
+                &Config {
+                    maximum_dimension: 96,
+                    auto_dimension: false,
+                    adaptive_refinement: false,
+                    rayon_threads: 1,
+                    ..Config::default()
+                },
+            )
+            .unwrap();
+            let tree = parse_svg_document(&fs::read_to_string(output).unwrap()).unwrap();
+            let mut pixmap = resvg::tiny_skia::Pixmap::new(96, 96).unwrap();
+            resvg::render(
+                &tree,
+                resvg::tiny_skia::Transform::identity(),
+                &mut pixmap.as_mut(),
+            );
+            for y in (12..39).chain(57..84) {
+                let wall = pixmap.pixels()[y * 96 + 40].red();
+                let seam = pixmap.pixels()[y * 96 + 48].red();
+                assert!(
+                    wall.abs_diff(seam) >= 4,
+                    "faint seam lost at {y}: wall={wall}, seam={seam}"
+                );
+            }
+            let wall = pixmap.pixels()[48 * 96 + 40].red();
+            let gap = pixmap.pixels()[48 * 96 + 48].red();
+            assert!(wall.abs_diff(gap) <= 2, "authored seam gap was filled");
+        }
     }
 
     #[test]

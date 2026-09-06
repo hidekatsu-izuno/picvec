@@ -306,6 +306,71 @@ pub(crate) fn refinement_boundary_matches(
     true
 }
 
+/// Move a rejected replacement boundary inward only through source pixels
+/// that are fully transparent, or outward through the same background support
+/// used by planning. The rendered join retains the existing tolerance.
+pub(crate) fn matching_refinement_core(
+    base: &Raster,
+    child: &Raster,
+    whole: SourceRect,
+    mut core: SourceRect,
+    expanded: SourceRect,
+    matte: Option<&crate::chroma::AlphaMatte>,
+) -> Option<SourceRect> {
+    let original = core;
+    for inset in 0..=4 {
+        if refinement_boundary_matches(base, child, whole, core, expanded) {
+            return Some(core);
+        }
+        let matte = matte?;
+        if inset == 4 || core.width <= 2 || core.height <= 2 {
+            break;
+        }
+        let clear = |x: usize, y: usize| matte.get(y * whole.width + x) <= 0.0;
+        if !(core.x..core.x + core.width)
+            .all(|x| clear(x, core.y) && clear(x, core.y + core.height - 1))
+            || !(core.y..core.y + core.height)
+                .all(|y| clear(core.x, y) && clear(core.x + core.width - 1, y))
+        {
+            break;
+        }
+        core = SourceRect {
+            x: core.x + 1,
+            y: core.y + 1,
+            width: core.width - 2,
+            height: core.height - 2,
+        };
+    }
+    // A faint source halo cannot be trimmed. Include it instead, staying
+    // inside the already fitted child and outside foreign foreground.
+    let matte = matte?;
+    core = original;
+    for _ in 0..4 {
+        let larger = core.expanded(1, whole.width, whole.height);
+        if larger == core
+            || larger.x < expanded.x
+            || larger.y < expanded.y
+            || larger.x + larger.width > expanded.x + expanded.width
+            || larger.y + larger.height > expanded.y + expanded.height
+        {
+            break;
+        }
+        let background = |x: usize, y: usize| matte.get(y * whole.width + x) < 1.0 / 16.0;
+        if !(larger.x..larger.x + larger.width)
+            .all(|x| background(x, larger.y) && background(x, larger.y + larger.height - 1))
+            || !(larger.y..larger.y + larger.height)
+                .all(|y| background(larger.x, y) && background(larger.x + larger.width - 1, y))
+        {
+            break;
+        }
+        core = larger;
+        if refinement_boundary_matches(base, child, whole, core, expanded) {
+            return Some(core);
+        }
+    }
+    None
+}
+
 /// Compare one source-space region with a raster that represents a possibly
 /// larger source rectangle.  The local tail prevents small icon details from
 /// disappearing into a large flat background; only source edges not present
@@ -798,6 +863,51 @@ mod tests {
         assert!(candidate.priority >= config.adaptive_min_predicted_rate);
         assert!(
             candidate.baseline.combined / candidate.model_cost < config.adaptive_min_predicted_rate
+        );
+    }
+
+    #[test]
+    fn rejected_border_can_move_only_through_fully_transparent_source() {
+        let whole = SourceRect {
+            x: 0,
+            y: 0,
+            width: 12,
+            height: 12,
+        };
+        let core = SourceRect {
+            x: 1,
+            y: 1,
+            width: 10,
+            height: 10,
+        };
+        let base = Raster::new(12, 12, vec![[0.0, 1.0, 0.0]; 144]);
+        let mut child = base.clone();
+        child.pixels[12 + 5] = [1.0, 1.0, 1.0];
+        let mut alpha = vec![0; 144];
+        alpha[6 * 12 + 6] = 255;
+        let matte = AlphaMatte::from_u8(12, 12, alpha.clone());
+        assert_eq!(
+            matching_refinement_core(&base, &child, whole, core, whole, Some(&matte)),
+            Some(SourceRect {
+                x: 2,
+                y: 2,
+                width: 8,
+                height: 8
+            })
+        );
+        assert!(matching_refinement_core(&base, &child, whole, core, whole, None).is_none());
+        for coverage in [1, 255] {
+            alpha[12 + 5] = coverage;
+            let matte = AlphaMatte::from_u8(12, 12, alpha.clone());
+            assert_eq!(
+                matching_refinement_core(&base, &child, whole, core, whole, Some(&matte)),
+                Some(whole)
+            );
+        }
+        alpha[5] = 255;
+        let matte = AlphaMatte::from_u8(12, 12, alpha);
+        assert!(
+            matching_refinement_core(&base, &child, whole, core, whole, Some(&matte)).is_none()
         );
     }
 

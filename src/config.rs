@@ -90,7 +90,7 @@ impl Default for Config {
             adaptive_refinement: true,
             adaptive_tile_dimension: 1400,
             adaptive_max_patches: 64,
-            adaptive_svg_budget_bytes: 24 * 1024 * 1024,
+            adaptive_svg_budget_bytes: 32 * 1024 * 1024,
             adaptive_min_perceptual_gain: 0.75,
             adaptive_min_predicted_rate: 2.5,
             adaptive_complexity_penalty: 1.0,
@@ -124,6 +124,26 @@ impl Default for Config {
 }
 
 impl Config {
+    /// Preserve tonal detail near black and white without tightening the
+    /// midtone budget. Use one continuous response across smoothing,
+    /// quantization and Paint merging so later passes cannot erase it again.
+    pub(crate) fn tonal_detail_scale(&self, lightness: f32) -> f32 {
+        let lightness = lightness.clamp(0.0, 100.0);
+        let (distance, endpoint) = if lightness < self.dark_knee_lstar {
+            (
+                (self.dark_knee_lstar - lightness) / self.dark_knee_lstar.max(1.0),
+                0.50,
+            )
+        } else {
+            (
+                (lightness - self.dark_knee_lstar) / (100.0 - self.dark_knee_lstar).max(1.0),
+                0.30,
+            )
+        };
+        let smooth = distance * distance * (3.0 - 2.0 * distance);
+        1.0 + (endpoint - 1.0) * smooth
+    }
+
     /// Reject invalid programmatic or deserialized settings before conversion
     /// allocates memory or creates output directories.
     pub fn validate(&self) -> crate::Result<()> {
@@ -291,6 +311,34 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tonal_budgets_tighten_smoothly_toward_both_extremes() {
+        let config = Config::default();
+        let knee = config.dark_knee_lstar;
+        assert_eq!(config.tonal_detail_scale(knee), 1.0);
+        assert!(config.tonal_detail_scale(0.0) < config.tonal_detail_scale(20.0));
+        assert!(config.tonal_detail_scale(20.0) < config.tonal_detail_scale(knee));
+        assert!(config.tonal_detail_scale(100.0) < config.tonal_detail_scale(80.0));
+        assert!(config.tonal_detail_scale(80.0) < config.tonal_detail_scale(knee));
+        for lightness in 0..100 {
+            assert!(
+                (config.tonal_detail_scale(lightness as f32 + 1.0)
+                    - config.tonal_detail_scale(lightness as f32))
+                .abs()
+                    < 0.03
+            );
+        }
+        for dark_knee_lstar in [0.0, 100.0] {
+            let config = Config {
+                dark_knee_lstar,
+                ..Config::default()
+            };
+            for lightness in [0.0, 50.0, 100.0] {
+                assert!((0.19..=1.0).contains(&config.tonal_detail_scale(lightness)));
+            }
+        }
+    }
 
     #[test]
     fn default_configuration_is_valid() {

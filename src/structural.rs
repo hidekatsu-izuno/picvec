@@ -62,6 +62,17 @@ pub struct StructuralInk {
 }
 
 impl StructuralInk {
+    /// Only lines eligible for residual tracing may surrender their Paint
+    /// coverage. `source_line_mask` also protects silhouette faces during
+    /// regularization, but those faces are excluded from residual tracing.
+    pub(crate) fn residual_source_line_mask(&self) -> Vec<bool> {
+        self.role_line_mask
+            .iter()
+            .zip(&self.legacy_line_mask)
+            .map(|(&role, &legacy)| role && legacy)
+            .collect()
+    }
+
     /// A supported Paint ellipse deliberately replaces raster-scale outline
     /// deviations. Do not add those same deviations back as residual ink.
     /// Require the complete stroke to follow one contour and find its colour
@@ -1383,6 +1394,16 @@ pub fn analyse(source: &Raster, roles: &mut EdgeRoles) -> (Raster, StructuralInk
         *line &= !silhouette;
     }
     let legacy_line_mask = classified_lines.clone();
+    // A ridge detector can find a short interval inside a Paint-owned
+    // silhouette. Keep that face intact: removing only the interval leaves
+    // independently fitted Paint and stroke endpoints at its two ends.
+    for (ridge, &silhouette) in roles
+        .visible_ridge_coverage
+        .iter_mut()
+        .zip(&classified_silhouettes)
+    {
+        *ridge &= !silhouette;
+    }
     let shading_corridor = dilate_square(&roles.shading, source.width, source.height, 1);
     // Only a profile-confirmed medial ridge has the same Paint owner on both
     // sides and may be removed before quantization.  Other structural
@@ -1399,11 +1420,17 @@ pub fn analyse(source: &Raster, roles: &mut EdgeRoles) -> (Raster, StructuralInk
             "{prefix}-nearest-underpaint.png"
         )));
     }
-    let antialias_ownership = unmix_structural_antialias(
+    let mut antialias_ownership = unmix_structural_antialias(
         source,
         &mut paint_reference,
         &original_visible_ridge_coverage,
     );
+    for (index, &silhouette) in classified_silhouettes.iter().enumerate() {
+        if silhouette {
+            paint_reference.pixels[index] = source.pixels[index];
+            antialias_ownership[index] = false;
+        }
+    }
     let antialias_unmixed_pixels = antialias_ownership.iter().filter(|&&value| value).count();
     // Python's structural_prequantization_mask returns the ridge coverage
     // array by reference.  Extending that mask with source-modelled AA
@@ -4361,6 +4388,44 @@ pub fn select_missing_with_junctions(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn partial_ridge_detection_keeps_a_connected_silhouette_in_paint() {
+        let mut source = Raster::blank(64, 64, [1.0; 3]);
+        for y in 8..56 {
+            for x in 8..32 {
+                source.pixels[y * 64 + x] = [0.0; 3];
+            }
+        }
+        for y in 30..32 {
+            for x in 32..56 {
+                source.pixels[y * 64 + x] = [0.0; 3];
+            }
+        }
+        let mut roles = crate::edge::classify(&source);
+        // Model a detector that recognizes only the middle of the thin arm.
+        roles.visible_ridge_coverage.fill(false);
+        roles.dark_boundary_graph.clear();
+        roles.band_boundary_graph.clear();
+        for y in 30..32 {
+            for x in 38..44 {
+                roles.visible_ridge_coverage[y * 64 + x] = true;
+            }
+        }
+        let (paint, ink) = analyse(&source, &mut roles);
+        let residual = ink.residual_source_line_mask();
+        for y in 30..32 {
+            for x in 32..56 {
+                let i = y * 64 + x;
+                assert_eq!(
+                    paint.pixels[i], source.pixels[i],
+                    "silhouette removed at ({x}, {y})"
+                );
+                assert!(!ink.paint_ownership_mask[i]);
+                assert!(!residual[i]);
+            }
+        }
+    }
 
     fn horizontal_boundary_stroke(last_x: usize) -> StructuralStroke {
         StructuralStroke {

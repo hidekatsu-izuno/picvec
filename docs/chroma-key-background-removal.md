@@ -61,8 +61,23 @@ matching band samples becomes the actual backing colour; this tolerates a
 narrow neutral frame as well as small quantisation, JPEG, or capture
 variation.
 
-For a selected corner, let `H` be its channels equal to `FF` and `L` its
-channels equal to `00`. The soft colour-difference matte is
+Opaque anchor detection uses an RGB distance of `64/255` from the sampled
+backing. Pixels beyond that distance whose neighbours within a two-pixel radius
+are also distinct are opaque foreground anchors. Their source colour is retained,
+even when it has the same hue as the key. For example, a green object with
+RGB `(50,213,86)` is distinct from a `(0,255,0)` backing.
+Smaller backing variations, such as `(0,239,0)`, do not become opaque anchors
+even when they occupy a broad patch. The anchor threshold is separate from
+the tighter edge-fitting tolerance so that suppressing backing variation does
+not loosen the fit of antialiased edges.
+
+At the fringe, anchors within three pixels provide candidate foreground
+colours. Projecting `C - K` onto `F - K` estimates coverage; candidates must
+reconstruct the observed colour within `12/255`. Exact backing pixels remain
+clear, including enclosed holes.
+
+For unsupported details, let `H` be the selected corner's channels equal to
+`FF` and `L` its channels equal to `00`. The fallback colour-difference matte is
 
 ```text
 d(C)     = min(C[h] for h in H) - max(C[l] for l in L)
@@ -70,7 +85,8 @@ alpha(C) = clamp(1 - d(C) / d(Ckey), 0, 1)
 ```
 
 This is a symmetric six-corner extension of the classic colour-difference
-keyer. The matte is not converted to a white-backed raster. At the 0.5 matte
+keyer. Accepted local estimates can raise this fallback coverage, while opaque
+anchors have coverage one. The matte is not converted to a white-backed raster. At the 0.5 matte
 crossing, background-side pixels are normalized to the key colour. On the
 foreground side, key contamination is removed by solving the compositing
 equation for `F`; ordinary segmentation then sees a clean foreground-to-key
@@ -101,7 +117,9 @@ Porter and Duff establish the alpha/coverage compositing model and the need to
 preserve fractional coverage at antialiased boundaries:
 [Compositing Digital Images, SIGGRAPH 1984](https://keithp.com/~keithp/porterduff/p253-porter.pdf).
 
-The unavoidable consequence is that opaque foreground content which itself
-looks like an inferred chroma key can be removed. Exact source alpha does not
+Foreground indistinguishable from the sampled key can still be removed, and
+thin details without nearby opaque anchors retain the colour-difference
+assumption. Broad translucent areas can be interpreted as opaque under the
+distinct-interior model. Exact source alpha does not
 have that inference ambiguity: its visibility is represented by the
 independent two-bit vector mask rather than by colour classification.

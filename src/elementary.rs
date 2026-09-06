@@ -56,6 +56,16 @@ pub fn pow_f32_in_place(values: &mut [f32], exponent: f32) {
     }
 }
 
+/// Two angles through the same portable SIMD kernel, without heap buffers.
+pub(crate) fn atan2_f32_pair(y: [f32; 2], x: [f32; 2]) -> [f32; 2] {
+    let mut ys = [1.0; F32_LANES];
+    let mut xs = [1.0; F32_LANES];
+    ys[..2].copy_from_slice(&y);
+    xs[..2].copy_from_slice(&x);
+    let result = f32x8::new(ys).atan2(f32x8::new(xs)).to_array();
+    [result[0], result[1]]
+}
+
 pub fn atan2_f32(first: &[f32], second: &[f32]) -> Vec<f32> {
     assert_eq!(first.len(), second.len());
     let mut result = Vec::with_capacity(first.len());

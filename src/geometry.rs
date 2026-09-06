@@ -2491,6 +2491,44 @@ fn sample_open_catmull(points: &[Point], spacing: f32) -> Vec<Point> {
     result
 }
 
+// Acceptance-only checks can stop at the first supporting sample. Keep the
+// distance operation identical to the scored path, including boundary rounding.
+fn samples_within_corridor(query: &[Point], reference: &[Point], maximum: f32) -> bool {
+    if query.is_empty() || reference.is_empty() {
+        return false;
+    }
+    let cell = maximum.max(0.25);
+    let key = |p: Point| ((p.x / cell).floor() as i32, (p.y / cell).floor() as i32);
+    let mut buckets = HashMap::<(i32, i32), Vec<Point>>::new();
+    for &point in reference {
+        buckets.entry(key(point)).or_default().push(point);
+    }
+    // Consecutive contour samples often share support. Recheck that exact
+    // sample before consulting the spatial index; never skip a query point.
+    let mut previous: Option<Point> = None;
+    query.iter().all(|&point| {
+        if previous.is_some_and(|candidate| point.distance(candidate) <= maximum) {
+            return true;
+        }
+        let (x, y) = key(point);
+        (-1..=1).any(|dy| {
+            (-1..=1).any(|dx| {
+                buckets.get(&(x + dx, y + dy)).is_some_and(|values| {
+                    if let Some(&candidate) = values
+                        .iter()
+                        .find(|&&candidate| point.distance(candidate) <= maximum)
+                    {
+                        previous = Some(candidate);
+                        true
+                    } else {
+                        false
+                    }
+                })
+            })
+        })
+    })
+}
+
 fn nearest_sample_distances(
     query: &[Point],
     reference: &[Point],
@@ -2522,11 +2560,13 @@ fn nearest_sample_distances(
             for dx in -1_i32..=1 {
                 if let Some(values) = buckets.get(&(key.0 + dx, key.1 + dy)) {
                     for &candidate in values {
-                        nearest = nearest.min(point.distance(candidate));
+                        nearest = nearest
+                            .min((point.x - candidate.x).powi(2) + (point.y - candidate.y).powi(2));
                     }
                 }
             }
         }
+        let nearest = nearest.sqrt();
         if nearest > maximum {
             return None;
         }
@@ -2645,8 +2685,8 @@ pub fn bounded_fairing_open(points: &[Point], tolerance: f32) -> Vec<Point> {
             else {
                 continue;
             };
-            if nearest_sample_distances(&source, &candidate_samples, maximum).is_none()
-                || nearest_sample_distances(&candidate_samples, &source, maximum).is_none()
+            if !samples_within_corridor(&source, &candidate_samples, maximum)
+                || !samples_within_corridor(&candidate_samples, &source, maximum)
             {
                 continue;
             }
@@ -2905,8 +2945,8 @@ pub(crate) fn fitted_structural_open_path_data_with_tangents(
     );
     let fitted_samples = sample_curve_sequence(&fitted, 0.35);
     let fitted_supported = !fitted.is_empty()
-        && nearest_sample_distances(&fitted_samples, &raw, tolerance.max(0.25)).is_some()
-        && nearest_sample_distances(&raw, &fitted_samples, tolerance.max(0.25)).is_some();
+        && samples_within_corridor(&fitted_samples, &raw, tolerance.max(0.25))
+        && samples_within_corridor(&raw, &fitted_samples, tolerance.max(0.25));
     let mut baseline = if fitted_supported {
         fitted
     } else if closed {
@@ -2985,8 +3025,8 @@ pub(crate) fn fitted_structural_open_path_data_with_tangents(
             else {
                 continue;
             };
-            if nearest_sample_distances(&source_samples, &candidate_samples, maximum).is_none()
-                || nearest_sample_distances(&candidate_samples, &source_samples, maximum).is_none()
+            if !samples_within_corridor(&source_samples, &candidate_samples, maximum)
+                || !samples_within_corridor(&candidate_samples, &source_samples, maximum)
                 || source_corners.iter().any(|&point| {
                     nearest_point(&candidate_samples, point).1
                         > (baseline_corner_error + 0.125).max(0.25)
@@ -3109,8 +3149,8 @@ fn boundary_corridor_supported(source: &[Point], curves: &[CurveSegment], maximu
     }
     let source_samples = sample_polyline_segments(source, 0.25);
     let rendered = sample_curve_sequence(curves, 0.25);
-    nearest_sample_distances(&source_samples, &rendered, maximum).is_some()
-        && nearest_sample_distances(&rendered, &source_samples, maximum).is_some()
+    samples_within_corridor(&source_samples, &rendered, maximum)
+        && samples_within_corridor(&rendered, &source_samples, maximum)
 }
 
 fn simplify_polyline(points: &[Point], tolerance: f32, closed: bool) -> Vec<Point> {
@@ -3209,6 +3249,50 @@ fn cubic_is_linear(curve: CurveSegment, tolerance: f32) -> bool {
     first.distance(expected_first) <= tolerance && second.distance(expected_second) <= tolerance
 }
 
+// Exact nearest sample with an x-sorted branch-and-bound search.
+fn nearest_fairing_sample(
+    reference: &[Point],
+    reference_by_x: &[usize],
+    x: f64,
+    y: f64,
+) -> Option<Point> {
+    let split = reference_by_x.partition_point(|&i| (reference[i].x as f64) < x);
+    let mut left = split;
+    let mut right = split;
+    let mut best = (f64::INFINITY, usize::MAX);
+    // Visit nearby x coordinates first. A candidate whose horizontal
+    // distance exceeds the best Euclidean distance cannot win. Preserve
+    // original index order for equal distances, just like Iterator::min_by.
+    while left > 0 || right < reference_by_x.len() {
+        let dl = if left > 0 {
+            (x - reference[reference_by_x[left - 1]].x as f64).abs()
+        } else {
+            f64::INFINITY
+        };
+        let dr = if right < reference_by_x.len() {
+            (x - reference[reference_by_x[right]].x as f64).abs()
+        } else {
+            f64::INFINITY
+        };
+        if dl.min(dr) > best.0 {
+            break;
+        }
+        let candidate = if dl <= dr {
+            left -= 1;
+            reference_by_x[left]
+        } else {
+            let candidate = reference_by_x[right];
+            right += 1;
+            candidate
+        };
+        let distance = (x - reference[candidate].x as f64).hypot(y - reference[candidate].y as f64);
+        if distance < best.0 || (distance == best.0 && candidate < best.1) {
+            best = (distance, candidate);
+        }
+    }
+    reference.get(best.1).copied()
+}
+
 fn fairing_candidate_segments(
     reference: &[Point],
     tolerance: f32,
@@ -3247,18 +3331,13 @@ fn fairing_candidate_segments(
             )
         })
         .collect();
+    let mut reference_by_x: Vec<usize> = (0..reference.len()).collect();
+    reference_by_x
+        .sort_unstable_by(|&a, &b| reference[a].x.total_cmp(&reference[b].x).then(a.cmp(&b)));
     for index in 0..fair_samples.len() {
-        let nearest = reference
-            .iter()
-            .copied()
-            .min_by(|first, second| {
-                let first_distance = (fair_samples[index].0 - first.x as f64)
-                    .hypot(fair_samples[index].1 - first.y as f64);
-                let second_distance = (fair_samples[index].0 - second.x as f64)
-                    .hypot(fair_samples[index].1 - second.y as f64);
-                first_distance.total_cmp(&second_distance)
-            })
-            .unwrap_or(samples[index]);
+        let (x, y) = fair_samples[index];
+        let nearest =
+            nearest_fairing_sample(reference, &reference_by_x, x, y).unwrap_or(samples[index]);
         let dx = fair_samples[index].0 - nearest.x as f64;
         let dy = fair_samples[index].1 - nearest.y as f64;
         let distance = dx.hypot(dy);
@@ -3399,8 +3478,8 @@ fn raster_boundary_supported(source: &[Point], rendered: &[Point], maximum: f32)
         })
         .collect();
     let source_samples = sample_polyline_segments(source, 0.25);
-    nearest_sample_distances(&observations, rendered, maximum).is_some()
-        && nearest_sample_distances(rendered, &source_samples, maximum).is_some()
+    samples_within_corridor(&observations, rendered, maximum)
+        && samples_within_corridor(rendered, &source_samples, maximum)
 }
 
 fn nearest_point(reference: &[Point], point: Point) -> (usize, f32) {
@@ -7115,6 +7194,79 @@ mod tests {
     use crate::color::rgb_to_lab;
     use crate::raster::Raster;
     use crate::segment::{RegionStats, Segmentation, SegmentationSummary};
+
+    #[test]
+    fn sorted_fairing_search_matches_exhaustive_hypot_and_ties() {
+        let mut reference: Vec<Point> = (0..180)
+            .map(|i| Point {
+                x: ((i * 37) % 31) as f32 - 15.0,
+                y: ((i * 13) % 47) as f32 - 23.0,
+            })
+            .collect();
+        reference.extend([Point { x: -1.0, y: 0.0 }, Point { x: 1.0, y: 0.0 }]);
+        let mut order: Vec<_> = (0..reference.len()).collect();
+        order.sort_unstable_by(|&a, &b| reference[a].x.total_cmp(&reference[b].x).then(a.cmp(&b)));
+        for i in 0..1000 {
+            let x = (i % 37) as f64 * 1.31 - 24.0;
+            let y = (i / 37) as f64 * 2.17 - 30.0;
+            let expected = reference.iter().copied().min_by(|a, b| {
+                (x - a.x as f64)
+                    .hypot(y - a.y as f64)
+                    .total_cmp(&(x - b.x as f64).hypot(y - b.y as f64))
+            });
+            assert_eq!(nearest_fairing_sample(&reference, &order, x, y), expected);
+        }
+        let ties = [Point { x: 1.0, y: 0.0 }, Point { x: -1.0, y: 0.0 }];
+        assert_eq!(
+            nearest_fairing_sample(&ties, &[1, 0], 0.0, 0.0),
+            Some(ties[0])
+        );
+        assert_eq!(nearest_fairing_sample(&[], &[], 0.0, 0.0), None);
+    }
+
+    #[test]
+    fn corridor_queries_match_exhaustive_distances() {
+        let reference: Vec<Point> = (0..200)
+            .map(|i| Point {
+                x: (i % 20) as f32 * 0.31 - 3.0,
+                y: (i / 20) as f32 * 0.27 - 1.5,
+            })
+            .collect();
+        for maximum in [0.0, 0.25, 0.5, std::f32::consts::SQRT_2, 2.0] {
+            for i in 0..300 {
+                let p = Point {
+                    x: (i % 30) as f32 * 0.3 - 4.0,
+                    y: (i / 30) as f32 * 0.4 - 2.0,
+                };
+                let nearest = reference
+                    .iter()
+                    .map(|&q| p.distance(q))
+                    .fold(f32::INFINITY, f32::min);
+                assert_eq!(
+                    samples_within_corridor(&[p], &reference, maximum),
+                    nearest <= maximum
+                );
+                assert_eq!(
+                    nearest_sample_distances(&[p], &reference, maximum),
+                    (nearest <= maximum).then_some((nearest, nearest))
+                );
+            }
+        }
+        let mut queries = reference.clone();
+        assert!(samples_within_corridor(&queries, &reference, 0.5));
+        queries.push(Point { x: 100.0, y: 100.0 });
+        assert!(!samples_within_corridor(&queries, &reference, 0.5));
+        let p = Point { x: -0.25, y: 0.0 };
+        let q = Point { x: 0.25, y: 0.0 };
+        assert!(samples_within_corridor(&[p], &[q], 0.5));
+        assert!(!samples_within_corridor(
+            &[p],
+            &[q],
+            f32::from_bits(0.5_f32.to_bits() - 1)
+        ));
+        assert!(!samples_within_corridor(&[], &[q], 1.0));
+        assert!(!samples_within_corridor(&[p], &[], 1.0));
+    }
 
     #[test]
     fn alpha_fairing_retains_rectangle_corners_and_small_islands() {

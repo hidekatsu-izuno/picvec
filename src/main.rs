@@ -41,7 +41,7 @@ struct Arguments {
     #[arg(long, default_value_t = 64)]
     adaptive_max_patches: usize,
     /// Maximum additional SVG size accepted for adaptive regions, in MiB.
-    #[arg(long, default_value_t = 24)]
+    #[arg(long, default_value_t = Config::default().adaptive_svg_budget_bytes / (1024 * 1024))]
     adaptive_svg_budget_mib: usize,
     /// Minimum local DeltaE00 reduction required from a refinement.
     #[arg(long, default_value_t = 0.75)]
@@ -54,13 +54,16 @@ struct Arguments {
     adaptive_complexity_penalty: f32,
     #[arg(long, default_value_t = 24)]
     segmentation_min_size: u32,
+    /// Base dark palette tolerance, tightened further toward black.
     #[arg(long, default_value_t = 2.5)]
     quantization_dark_delta_e: f32,
+    /// Base light palette tolerance, tightened further toward white.
     #[arg(long, default_value_t = 5.0)]
     quantization_light_delta_e: f32,
+    /// Base Paint merge error budget before lightness adjustment.
     #[arg(long, default_value_t = 2.3)]
     gradient_merge_error: f32,
-    /// Maximum within-region DeltaE00 range treated unconditionally as Solid.
+    /// Base solid-fill colour range, tightened in shadows and highlights.
     #[arg(long, default_value_t = 1.5)]
     solid_color_max_delta_e: f32,
     /// Samples used by the inexpensive Paint coherence gate.

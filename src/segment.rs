@@ -196,8 +196,9 @@ fn adaptive_tolerance(lightness: f32, config: &Config) -> f32 {
     let amount = ((lightness - config.dark_knee_lstar) / (100.0 - config.dark_knee_lstar).max(1.0))
         .clamp(0.0, 1.0);
     let amount = amount * amount * (3.0 - 2.0 * amount);
-    config.quantization_dark_delta_e
-        + (config.quantization_light_delta_e - config.quantization_dark_delta_e) * amount
+    (config.quantization_dark_delta_e
+        + (config.quantization_light_delta_e - config.quantization_dark_delta_e) * amount)
+        * config.tonal_detail_scale(lightness)
 }
 
 fn effective_minimum_area(config: &Config, width: usize, height: usize) -> usize {
@@ -2993,8 +2994,11 @@ pub fn split_adaptive_paint_patches(
         let _ = std::fs::write(path, serde_json::to_vec_pretty(&value).unwrap_or_default());
     }
     let candidate_count = candidates.len();
-    let patch_span = 128_usize.max(
-        (0.20 * segmentation.width.max(segmentation.height) as f64).round_ties_even() as usize,
+    // A fifth of the canvas can still span several differently oriented
+    // highlights. Limit each fit's reach while the shared paint key below
+    // preserves continuity across these source-smooth subdivisions.
+    let patch_span = 64_usize.max(
+        (0.05 * segmentation.width.max(segmentation.height) as f64).round_ties_even() as usize,
     );
     let source_paint_keys = if segmentation.paint_keys.len() == count {
         segmentation.paint_keys.clone()

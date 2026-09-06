@@ -63,10 +63,18 @@ be accepted immediately as a solid fill. Lower values retain more subtle
 shading as gradients; higher values favour simpler SVG output. The default is
 1.5.
 
+Error tolerances tighten smoothly toward black and white to retain shadow
+and highlight detail. This applies to smoothing, colour quantization, Paint
+merging, and gradient promotion; the default effective palette tolerance is
+1.25 DeltaE00 at black, 2.5 at L*=45, and 1.5 at white. The default adaptive
+SVG budget is 32 MiB. See [tonal detail thresholds](docs/tonal-detail-thresholds.md).
+
 `--remove-chroma-key-background` detects a near-saturated red, green, blue,
 cyan, magenta, or yellow backing colour in a shallow outer band. It removes
 every matching region, including enclosed and disconnected regions, and
-uses a soft colour-difference matte for antialiased edge pixels. White and
+preserves distinct opaque interiors even when they share the backing hue.
+Nearby foreground colours guide antialiased edge coverage, with a soft
+colour-difference matte as a fallback for unsupported thin details. White and
 black are deliberately not treated as automatic key colours. Without this
 option, opaque input does not use automatic chroma-key removal.
 
@@ -186,6 +194,16 @@ RGB8 when it came directly from the decoder and as Q0.16 RGB only when matte or
 chroma processing produced fractional channels. Working crops are expanded to
 `f32`, so filtering and perceptual calculations do not use fixed-point
 arithmetic.
+
+Contour fairing uses an exact spatial search to avoid scanning the entire
+reference contour for every sample. Corridor validation reuses nearby support
+without reducing sampling density or relaxing error limits. See
+[geometry performance validation](docs/geometry-performance.md) for timings
+and byte-identical SVG comparisons.
+Scalar colour comparisons also avoid temporary heap buffers, and merge-model
+candidates share their reference colour conversion. See
+[colour-processing performance](docs/color-performance.md) for additional
+measurements with the same worker count and unchanged SVG output.
 
 The default worker count leaves thermal and interactive headroom: it uses half
 of the detected logical CPUs, capped at four workers and with a minimum of one.
