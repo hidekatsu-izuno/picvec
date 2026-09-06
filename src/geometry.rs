@@ -5258,7 +5258,7 @@ fn fit_adaptive_boundary_geometry(
     }
     face_jobs.sort_by_key(|job| (job.3, job.0));
     jobs.extend(face_jobs);
-    for (class_pair, edges, contour_junctions, contour_weight) in jobs {
+    for (_class_pair, edges, contour_junctions, contour_weight) in jobs {
         let class_junctions = contour_junctions.as_ref().unwrap_or(&class_junctions);
         let edges = &edges;
         let mut fitting_tracks = Vec::<(Vec<u64>, bool)>::new();
@@ -5267,7 +5267,7 @@ fn fit_adaptive_boundary_geometry(
         if continuity_diagnostics_enabled {
             continuity_diagnostics.push(serde_json::json!({
                 "kind": "tracks",
-                "class_pair": [class_pair.0, class_pair.1],
+                "class_pair": [_class_pair.0, _class_pair.1],
                 "edge_count": edges.len(),
                 "tracks": traced_tracks.iter().map(|track| serde_json::json!({
                     "length": track.len(),
@@ -5293,7 +5293,7 @@ fn fit_adaptive_boundary_geometry(
                 if continuity_diagnostics_enabled {
                     continuity_diagnostics.push(serde_json::json!({
                         "kind": "split",
-                        "class_pair": [class_pair.0, class_pair.1],
+                        "class_pair": [_class_pair.0, _class_pair.1],
                         "lengths": split_tracks.iter().map(Vec::len).collect::<Vec<_>>(),
                     }));
                 }
@@ -5577,6 +5577,21 @@ fn fit_adaptive_boundary_geometry(
                 } else {
                     &baseline
                 };
+                // Continuity masters bypass the later colour-pair primitive
+                // pass. Regularize here, while the complete source interval
+                // and its shared endpoint tangents are still available.
+                // Do not rank analytic models by their cubic count: one arc
+                // can require more serialization pieces than a free curve.
+                let regularized_master = geometry_primitives::regularize(
+                    &raw,
+                    selected_master,
+                    continuity_raster_corridor,
+                    start_tangent,
+                    end_tangent,
+                );
+                #[cfg(feature = "diagnostics")]
+                let primitive_regularized = &regularized_master != selected_master;
+                let selected_master = &regularized_master;
                 let master_supported = raster_boundary_supported(
                     &raw,
                     &sample_curve_sequence(selected_master, 0.25),
@@ -5654,12 +5669,13 @@ fn fit_adaptive_boundary_geometry(
                     };
                     continuity_diagnostics.push(serde_json::json!({
                         "kind": "fit",
-                        "class_pair": [class_pair.0, class_pair.1],
+                        "class_pair": [_class_pair.0, _class_pair.1],
                         "closed_track": closed_track,
                         "source_len": raw.len(),
                         "baseline_len": baseline.len(),
                         "candidate_len": fair_candidate_len,
-                        "result_len": fair.len(),
+                        "result_len": selected_master.len(),
+                        "primitive_regularized": primitive_regularized,
                         "candidate_raster_error": fair_raster_error,
                         "uncertain_edges": uncertain_edges,
                         "raster_corridor": continuity_raster_corridor,
@@ -5674,7 +5690,7 @@ fn fit_adaptive_boundary_geometry(
                         "start_connection_spans": start_connection_spans,
                         "source": raw.iter().map(|point| [point.x, point.y]).collect::<Vec<_>>(),
                         "baseline": baseline.iter().map(&encode_curve).collect::<Vec<_>>(),
-                        "result": fair.iter().map(&encode_curve).collect::<Vec<_>>(),
+                        "result": selected_master.iter().map(&encode_curve).collect::<Vec<_>>(),
                     }));
                 }
                 // Validate the selected master against the original raster
@@ -5737,8 +5753,18 @@ fn fit_adaptive_boundary_geometry(
             .iter()
             .map(|&v| point_from_vertex(v, stride))
             .collect();
-        let corridor = fairing_raster_corridor();
-        let Some(curves) = geometry_ellipse::fit_closed(&source, corridor) else {
+        let corridor = geometry_ellipse::closed_corridor(&source, fairing_raster_corridor());
+        let fitted = geometry_ellipse::fit_closed(&source, corridor);
+        #[cfg(feature = "diagnostics")]
+        if continuity_diagnostics_enabled {
+            continuity_diagnostics.push(serde_json::json!({
+                "kind": "ellipse_candidate",
+                "source": source.iter().map(|p| [p.x, p.y]).collect::<Vec<_>>(),
+                "supported": fitted.is_some(),
+                "corridor": corridor,
+            }));
+        }
+        let Some(curves) = fitted else {
             continue;
         };
         let Some(mapping) = geometry_mapping::map(&source, &curves, corridor, &mut next_master_id)
@@ -7743,6 +7769,80 @@ mod tests {
         assert!(arcs
             .iter()
             .any(|arc| is_shallow_continuity_arc(arc, stride)));
+    }
+
+    #[test]
+    fn shaded_diagonal_continuity_master_keeps_analytic_lines() {
+        let width = 128;
+        let colours = [[0.95; 3], [0.8, 0.1, 0.1], [0.82, 0.11, 0.1]];
+        let labels: Vec<u32> = (0..width * width)
+            .map(|i| {
+                let (x, y) = (i % width, i / width);
+                if x < y {
+                    0
+                } else {
+                    1 + (y / 16 % 2) as u32
+                }
+            })
+            .collect();
+        let regions = colours
+            .iter()
+            .enumerate()
+            .map(|(id, &rgb)| RegionStats {
+                id: id as u32,
+                area: labels.iter().filter(|&&label| label == id as u32).count(),
+                min_x: 0,
+                min_y: 0,
+                max_x: width,
+                max_y: width,
+                mean_rgb: rgb,
+                mean_lab: rgb_to_lab(rgb),
+            })
+            .collect();
+        let segmentation = Segmentation {
+            width,
+            height: width,
+            canonical: Raster::new(
+                width,
+                width,
+                labels.iter().map(|&v| colours[v as usize]).collect(),
+            ),
+            labels,
+            paint_keys: vec![0, 1, 2],
+            paint_samples: vec![true; width * width],
+            regions,
+            summary: SegmentationSummary::default(),
+        };
+        let stride = width + 1;
+        let (edges, _) = region_boundary_edges(&segmentation, stride, None);
+        let pairs = pair_boundary_edges(&segmentation, stride, None);
+        let (chains, lookup, ..) = build_shared_chains(&segmentation, stride, &edges, &pairs);
+        let mut checked = HashSet::new();
+        let mut lines = 0;
+        for (&pair, edges) in &pairs {
+            if pair.0 != 0 || pair.1 < 1 {
+                continue;
+            }
+            for edge in edges {
+                let id = lookup[edge].0;
+                if !checked.insert(id) {
+                    continue;
+                }
+                for curve in &chains[id].segments {
+                    let middle = interpolate_point(curve.start(), curve.end(), 0.5);
+                    if !(20.0..108.0).contains(&middle.y) {
+                        continue;
+                    }
+                    assert!(matches!(curve, CurveSegment::Line { .. }), "{curve:?}");
+                    assert!((middle.x - middle.y + 0.5).abs() < 0.75);
+                    lines += 1;
+                }
+            }
+        }
+        assert!(lines >= 4, "must exercise multiple Paint pairs");
+        let (_, summary) = build(&segmentation);
+        assert_eq!(summary.shared_loop_fallbacks, 0);
+        assert_eq!(summary.shared_curve_downgrades, 0);
     }
 
     #[test]

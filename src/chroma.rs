@@ -490,6 +490,19 @@ pub(crate) fn separate_compact_foreground(
 }
 
 impl AlphaMatte {
+    pub(crate) fn cleared(&self, indices: &[usize]) -> Self {
+        let mut values: Vec<u16> = (0..self.len())
+            .map(|i| (self.get(i).clamp(0.0, 1.0) * 65535.0).round() as u16)
+            .collect();
+        for &i in indices {
+            values[i] = 0;
+        }
+        Self {
+            width: self.width,
+            height: self.height,
+            values: AlphaValues::Unorm16(values),
+        }
+    }
     #[cfg(test)]
     pub(crate) fn new(width: usize, height: usize, values: Vec<f32>) -> Self {
         assert_eq!(values.len(), width * height);

@@ -1,5 +1,9 @@
 # Ellipses across shaded Paint regions
 
+The later [lock and gear extension](lock-gear-refinement.md) adds fixed-endpoint
+elliptical arcs and a capped size-dependent corridor for large closed loops.
+The measurements below document the initial whole-contour implementation.
+
 The window buttons in `cliparts-6x6` were fitted as several free curves even
 though their complete outlines support an ellipse. The source-boundary
 primitive fitter supported lines and circular arcs, while the ellipse output

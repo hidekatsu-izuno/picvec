@@ -127,11 +127,17 @@ rejects replacements that disagree with the retained base. The byte budget and
 thresholds above control the quality/size tradeoff; `--no-adaptive-refinement`
 restores single-resolution processing.
 Crop padding fits inside the available background gap, including beside a
-large separator grid. The preliminary cost estimate uses the same square-root
-partition penalty as measured acceptance, so dense repeated details can be
-evaluated before their actual SVG size is known. See
+large separator grid. The preliminary cost estimate uses a square-root
+partition penalty. Once a candidate is encoded, acceptance and budget ordering
+use its measured quality gain per SVG byte; the partition estimate is no longer
+charged on top of those bytes. See
 [clip-art detail refinement](docs/clipart-detail-refinement.md) for the server
 rack and portrait regressions.
+Replacement boundaries are checked against a source-scale render of the
+actual base vectors, avoiding false mismatches from enlarging the coarse
+preview. A thin pale separator crossing a foreground figure in keyed input
+can be retained as one source-fitted background band, so the figure remains
+independently refinable and the separator does not change at crop joins.
 Independent refinement regions run concurrently. The job count is bounded by
 the selected worker count and by a conservative estimate derived from the
 largest crop and currently available memory; `--verbose` reports the selected
@@ -175,6 +181,10 @@ bound. Straight spans retain SVG line commands; circular fits pass through the
 existing analytic-arc normalization. This removes some raster-scale waviness,
 but does not turn variable-width Paint bands or fragmented shading into a
 single uniform stroke.
+The same regularization runs on complete shared continuity contours before
+they are sliced at colour junctions, including when a circular model needs
+more cubic serialization pieces than the original free curve. See
+[connected sphere refinement](docs/connected-sphere-refinement.md).
 
 Closed material contours are also fitted as complete, potentially rotated
 ellipses before their colour boundaries are sliced. This lets shaded buttons
@@ -188,6 +198,11 @@ and branches remain eligible. Narrow colour-correction strokes can follow the
 same ellipse with their existing width, subject to the source-error bound.
 Diagnostic reports count these contours as `geometry.fitted_ellipse_contours`.
 See [ellipse contour fitting and validation](docs/ellipse-contours.md).
+Open arches and rims can also use elliptical arcs with fixed shared endpoints
+and supported tangents. Large closed ellipses allow a bounded localization
+error proportional to their span, while corner, winding and graph-order
+checks protect non-elliptical shapes. See
+[lock and gear refinement](docs/lock-gear-refinement.md).
 
 Full-resolution source data waiting for adaptive refinement remains packed as
 RGB8 when it came directly from the decoder and as Q0.16 RGB only when matte or

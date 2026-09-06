@@ -54,8 +54,18 @@ pub(crate) struct PerceptualScore {
 pub(crate) struct RefinementCandidate {
     pub core: SourceRect,
     pub baseline: PerceptualScore,
+    #[cfg(any(test, feature = "diagnostics"))]
     pub model_cost: f32,
     pub priority: f32,
+}
+
+impl RefinementCandidate {
+    /// Once encoded, bytes replace the partition-cost estimate. Charging
+    /// both would penalize fragmented shading twice, even when its measured
+    /// quality gain per byte is better than another candidate's.
+    pub(crate) fn measured_rate(&self, gain: f32, area: usize, bytes: usize) -> f32 {
+        gain * area as f32 / bytes.max(1) as f32
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -95,6 +105,12 @@ fn object_regions(
     maximum_dimension: usize,
 ) -> Vec<SourceRect> {
     const PADDING: usize = 16;
+    // A thin canvas-spanning separator is background structure, even when
+    // it touches a figure. Ignore it for grouping only; the source, matte,
+    // and final rendered-join validation still retain every one of its pixels.
+    let original_support = support;
+    let support = grouping_support_without_separators(support, width, height, maximum_dimension);
+    let support = support.as_slice();
     let mut pending = support.to_vec();
     let mut stack = Vec::new();
     let mut regions = Vec::new();
@@ -163,7 +179,20 @@ fn object_regions(
     // can lie inside the usual padding without touching the figure itself.
     // Place the crop in the middle of the available background gap instead
     // of discarding the whole figure or cutting the neighbouring component.
-    for region in &mut merged {
+    let crossed_separators: Vec<bool> = merged
+        .iter()
+        .map(|r| {
+            let separator =
+                |x: usize, y: usize| original_support[y * width + x] && !support[y * width + x];
+            (r.x..r.x + r.width).any(|x| separator(x, r.y) || separator(x, r.y + r.height - 1))
+                || (r.y..r.y + r.height)
+                    .any(|y| separator(r.x, y) || separator(r.x + r.width - 1, y))
+        })
+        .collect();
+    for (region, &crosses) in merged.iter_mut().zip(&crossed_separators) {
+        // Nearby separators still constrain padding. Only a separator that
+        // actually crosses this figure's bounds may enter its native crop.
+        let support = if crosses { support } else { original_support };
         let mut padding = PADDING;
         for distance in 1..=2 * PADDING {
             let ring = region.expanded(distance, width, height);
@@ -183,7 +212,14 @@ fn object_regions(
         }
         *region = region.expanded(padding, width, height);
     }
+    let mut region_index = 0;
     merged.retain(|r| {
+        let support = if crossed_separators[region_index] {
+            support
+        } else {
+            original_support
+        };
+        region_index += 1;
         if r.width < 64
             || r.height < 64
             || r.width > maximum_dimension
@@ -203,6 +239,61 @@ fn object_regions(
     });
     merged.sort_by_key(|r| (r.y, r.x));
     merged
+}
+
+fn grouping_support_without_separators(
+    support: &[bool],
+    width: usize,
+    height: usize,
+    maximum_dimension: usize,
+) -> Vec<bool> {
+    let mut result = support.to_vec();
+    let max_band = (width.min(height) / 256).clamp(2, 16);
+    for vertical in [false, true] {
+        let (along, across) = if vertical {
+            (height, width)
+        } else {
+            (width, height)
+        };
+        if along <= maximum_dimension {
+            continue;
+        }
+        let counts: Vec<usize> = (0..across)
+            .map(|i| {
+                (0..along)
+                    .filter(|&j| {
+                        let (x, y) = if vertical { (i, j) } else { (j, i) };
+                        support[y * width + x]
+                    })
+                    .count()
+            })
+            .collect();
+        let mut i = 0;
+        while i < across {
+            if counts[i] * 5 < along * 4 {
+                i += 1;
+                continue;
+            }
+            let start = i;
+            while i < across && counts[i] * 5 >= along * 4 {
+                i += 1;
+            }
+            if i - start > max_band {
+                continue;
+            }
+            // Remove the antialias shoulders from grouping too. Leaving a
+            // one-pixel shoulder breaks a long grid into short components
+            // which then spuriously merge neighbouring figures together.
+            let shoulder = (max_band / 4).clamp(1, 3);
+            for k in start.saturating_sub(shoulder)..(i + shoulder).min(across) {
+                for j in 0..along {
+                    let (x, y) = if vertical { (k, j) } else { (j, k) };
+                    result[y * width + x] = false;
+                }
+            }
+        }
+    }
+    result
 }
 
 /// A flat border colour can provide separation evidence even for opaque
@@ -280,12 +371,13 @@ fn mapped_sample(
 pub(crate) fn refinement_boundary_matches(
     base: &Raster,
     child: &Raster,
+    base_source: SourceRect,
     whole: SourceRect,
     core: SourceRect,
     expanded: SourceRect,
 ) -> bool {
     let matches = |x: usize, y: usize| {
-        mapped_sample(base, whole, x as f32, y as f32)
+        mapped_sample(base, base_source, x as f32, y as f32)
             .iter()
             .zip(mapped_sample(child, expanded, x as f32, y as f32))
             .all(|(&a, b)| (a - b).abs() <= 2.0 / 255.0)
@@ -309,9 +401,11 @@ pub(crate) fn refinement_boundary_matches(
 /// Move a rejected replacement boundary inward only through source pixels
 /// that are fully transparent, or outward through the same background support
 /// used by planning. The rendered join retains the existing tolerance.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn matching_refinement_core(
     base: &Raster,
     child: &Raster,
+    base_source: SourceRect,
     whole: SourceRect,
     mut core: SourceRect,
     expanded: SourceRect,
@@ -319,7 +413,7 @@ pub(crate) fn matching_refinement_core(
 ) -> Option<SourceRect> {
     let original = core;
     for inset in 0..=4 {
-        if refinement_boundary_matches(base, child, whole, core, expanded) {
+        if refinement_boundary_matches(base, child, base_source, whole, core, expanded) {
             return Some(core);
         }
         let matte = matte?;
@@ -364,7 +458,7 @@ pub(crate) fn matching_refinement_core(
             break;
         }
         core = larger;
-        if refinement_boundary_matches(base, child, whole, core, expanded) {
+        if refinement_boundary_matches(base, child, base_source, whole, core, expanded) {
             return Some(core);
         }
     }
@@ -543,10 +637,11 @@ pub(crate) fn plan_candidates<S: RasterSource + ?Sized>(
             Some(RefinementCandidate {
                 core,
                 baseline,
+                #[cfg(any(test, feature = "diagnostics"))]
                 model_cost,
-                // Match the square-root partition charge used after fitting.
-                // A linear charge rejects dense, repeated details before
-                // their actual SVG cost and quality gain can be measured.
+                // Estimate cost only until the actual SVG byte count is
+                // available. A linear charge rejects dense repeated details
+                // before their measured gain and representation cost are known.
                 priority: baseline.combined / model_cost.sqrt().max(1e-6),
             })
         })
@@ -719,6 +814,73 @@ mod tests {
     use super::*;
 
     #[test]
+    fn thin_spanning_separator_does_not_hide_a_touching_figure() {
+        let (width, height) = (320, 240);
+        let mut support = vec![false; width * height];
+        for y in 80..82 {
+            for x in 0..width {
+                support[y * width + x] = true;
+            }
+        }
+        for y in 74..160 {
+            for x in 110..180 {
+                support[y * width + x] = true;
+            }
+        }
+        let regions = object_regions(&support, width, height, 140);
+        assert_eq!(regions.len(), 1);
+        let r = regions[0];
+        assert!(r.x < 110 && r.y < 74 && r.x + r.width > 180 && r.y + r.height > 160);
+        assert!(support[80 * width], "planning must not erase source ink");
+        for y in 82..90 {
+            for x in 0..width {
+                support[y * width + x] = true;
+            }
+        }
+        assert!(
+            object_regions(&support, width, height, 140).is_empty(),
+            "a thick connected object must not be split as a separator"
+        );
+    }
+
+    #[test]
+    fn measured_refinement_rate_replaces_the_partition_estimate() {
+        let mut candidate = RefinementCandidate {
+            core: SourceRect {
+                x: 0,
+                y: 0,
+                width: 550,
+                height: 650,
+            },
+            baseline: PerceptualScore::default(),
+            model_cost: 1.0,
+            priority: 1.0,
+        };
+        let rate = candidate.measured_rate(5.8, candidate.core.area(), 1_080_000);
+        assert!(
+            rate > 1.0,
+            "useful native shading must fit the byte-rate budget"
+        );
+        candidate.model_cost = 4.3;
+        assert_eq!(
+            candidate.measured_rate(5.8, candidate.core.area(), 1_080_000),
+            rate
+        );
+        assert!(
+            rate / candidate.model_cost.sqrt() < 1.0,
+            "the former double charge rejected the same measured result"
+        );
+        assert!(
+            candidate.measured_rate(5.8, candidate.core.area(), 3_000_000) < 1.0,
+            "expensive detail must still pay for its actual bytes"
+        );
+        assert_eq!(
+            candidate.measured_rate(5.8, 2 * candidate.core.area(), 2_160_000),
+            rate
+        );
+    }
+
+    #[test]
     #[ignore = "full-size sample regression"]
     fn clipart_sheet_refines_whole_figures_with_and_without_keying() {
         let path = std::path::Path::new("sample/input/cliparts-6x6.png");
@@ -731,7 +893,16 @@ mod tests {
         .unwrap();
         let key = crate::chroma::detect(&source).unwrap();
         let matte = crate::chroma::pull_matte(&source, key);
-        for alpha in [Some(&matte), None] {
+        let separated = crate::chroma::separate_compact_foreground(&source, &matte, key.sampled);
+        let (bands, cleaned) = crate::separators::extract(&separated, &matte, 1400);
+        assert!(
+            bands
+                .iter()
+                .any(|band| band.rect[1] > 3330.0 && band.rect[1] < 3350.0),
+            "the separator touching the lock must have one source model"
+        );
+        let cleaned = cleaned.unwrap();
+        for alpha in [Some(&cleaned), None] {
             let support = foreground_support(&source, alpha);
             let regions = object_regions(&support, source.width, source.height, 1400);
             assert!(
@@ -742,7 +913,13 @@ mod tests {
             if alpha.is_some() {
                 // Opaque support also contains faint, connected grid debris;
                 // keying separates these three figures from that network.
-                for (x, y) in [(2880, 2900), (3700, 2100), (430, 2100)] {
+                for (x, y) in [
+                    (2880, 2900),
+                    (3700, 2100),
+                    (430, 2100),
+                    (1250, 3700),
+                    (2060, 3670),
+                ] {
                     assert!(
                         regions.iter().any(|r| r.x <= x
                             && x < r.x + r.width
@@ -751,6 +928,13 @@ mod tests {
                         "missing keyed figure at {x}, {y}"
                     );
                 }
+                assert!(
+                    regions.iter().any(|r| r.x < 1100
+                        && r.x + r.width > 1450
+                        && r.y < 3337
+                        && r.y + r.height > 3970),
+                    "the lock must retain its cap above the separator"
+                );
             }
             // All three cylinders and their common shading must share one fit.
             assert_eq!(
@@ -887,7 +1071,7 @@ mod tests {
         alpha[6 * 12 + 6] = 255;
         let matte = AlphaMatte::from_u8(12, 12, alpha.clone());
         assert_eq!(
-            matching_refinement_core(&base, &child, whole, core, whole, Some(&matte)),
+            matching_refinement_core(&base, &child, whole, whole, core, whole, Some(&matte)),
             Some(SourceRect {
                 x: 2,
                 y: 2,
@@ -895,19 +1079,20 @@ mod tests {
                 height: 8
             })
         );
-        assert!(matching_refinement_core(&base, &child, whole, core, whole, None).is_none());
+        assert!(matching_refinement_core(&base, &child, whole, whole, core, whole, None).is_none());
         for coverage in [1, 255] {
             alpha[12 + 5] = coverage;
             let matte = AlphaMatte::from_u8(12, 12, alpha.clone());
             assert_eq!(
-                matching_refinement_core(&base, &child, whole, core, whole, Some(&matte)),
+                matching_refinement_core(&base, &child, whole, whole, core, whole, Some(&matte)),
                 Some(whole)
             );
         }
         alpha[5] = 255;
         let matte = AlphaMatte::from_u8(12, 12, alpha);
         assert!(
-            matching_refinement_core(&base, &child, whole, core, whole, Some(&matte)).is_none()
+            matching_refinement_core(&base, &child, whole, whole, core, whole, Some(&matte))
+                .is_none()
         );
     }
 
@@ -929,11 +1114,11 @@ mod tests {
         let mut child = Raster::blank(60, 60, [1.0; 3]);
         child.pixels[30 * 60 + 30] = [0.0; 3];
         assert!(refinement_boundary_matches(
-            &base, &child, whole, core, core
+            &base, &child, whole, whole, core, core
         ));
         child.pixels[30 * 60] = [0.9; 3];
         assert!(!refinement_boundary_matches(
-            &base, &child, whole, core, core
+            &base, &child, whole, whole, core, core
         ));
     }
 

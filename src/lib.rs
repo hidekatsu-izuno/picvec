@@ -20,6 +20,7 @@ pub mod pipeline;
 pub mod raster;
 pub mod ridge;
 pub mod segment;
+mod separators;
 pub mod structural;
 pub mod svg;
 mod union_find;

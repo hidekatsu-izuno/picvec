@@ -461,17 +461,29 @@ fn render_svg_document_on(
     background: [f32; 3],
 ) -> Result<Raster> {
     let tree = parse_svg_document(document)?;
+    render_svg_tree_on(
+        &tree,
+        width,
+        height,
+        resvg::tiny_skia::Transform::identity(),
+        background,
+    )
+}
+
+fn render_svg_tree_on(
+    tree: &resvg::usvg::Tree,
+    width: usize,
+    height: usize,
+    transform: resvg::tiny_skia::Transform,
+    background: [f32; 3],
+) -> Result<Raster> {
     let width = u32::try_from(width)
         .map_err(|_| -> Error { "SVG preview width exceeds the renderer limit".into() })?;
     let height = u32::try_from(height)
         .map_err(|_| -> Error { "SVG preview height exceeds the renderer limit".into() })?;
     let mut pixmap = resvg::tiny_skia::Pixmap::new(width, height)
         .ok_or_else(|| -> Error { "could not allocate the SVG preview raster".into() })?;
-    resvg::render(
-        &tree,
-        resvg::tiny_skia::Transform::identity(),
-        &mut pixmap.as_mut(),
-    );
+    resvg::render(tree, transform, &mut pixmap.as_mut());
     let pixels = pixmap
         .pixels()
         .iter()
@@ -678,8 +690,8 @@ fn adaptively_refine(
             );
         }
     }
-    // Estimate the available gain using the same square-root partition
-    // charge as the measured acceptance rule below. Actual SVG bytes are
+    // Estimate the available gain using a square-root partition
+    // charge. Actual SVG bytes are
     // unknown here, so this is only a prefilter, not a bound on the final
     // rate. Dense repeated details must get a chance to demonstrate their
     // measured gain and representation cost.
@@ -705,6 +717,10 @@ fn adaptively_refine(
     let parallel_jobs =
         adaptive_parallel_jobs(&candidates, (input_width, input_height), execution_threads);
     summary.parallel_jobs = parallel_jobs;
+    // Compare the actual vector join at source resolution. Upsampling the
+    // coarse preview invents an antialias halo across otherwise clear gaps.
+    // Parse once; render only the small child bounds, not a full-size sheet.
+    let base_tree = parse_svg_document(&core.document)?;
     for batch in candidates.chunks(parallel_jobs) {
         let outcomes = batch
             .par_iter()
@@ -759,9 +775,21 @@ fn adaptively_refine(
                     child.processing_reference.height,
                     core.preview_background,
                 )?;
+                let boundary_base = render_svg_tree_on(
+                    &base_tree,
+                    expanded.width,
+                    expanded.height,
+                    resvg::tiny_skia::Transform::from_row(
+                        input_width as f32 / base_tree.size().width(), 0.0,
+                        0.0, input_height as f32 / base_tree.size().height(),
+                        -(expanded.x as f32), -(expanded.y as f32),
+                    ),
+                    core.preview_background,
+                )?;
                 let matched_core = matching_refinement_core(
-                    &base_render,
+                    &boundary_base,
                     &child_render,
+                    expanded,
                     whole,
                     candidate.core,
                     expanded,
@@ -797,15 +825,10 @@ fn adaptively_refine(
                 {
                     return Ok(RefinementOutcome::QualityRejected);
                 }
-                let bytes_per_source_pixel =
-                    child.svg.bytes as f32 / core.area().max(1) as f32;
-                let complexity_charge = config.adaptive_complexity_penalty
-                    * candidate.model_cost.sqrt()
-                    * bytes_per_source_pixel;
-                if combined_gain < complexity_charge {
+                let rate = candidate.measured_rate(combined_gain, core.area(), child.svg.bytes);
+                if rate < config.adaptive_complexity_penalty {
                     return Ok(RefinementOutcome::ComplexityRejected);
                 }
-                let child_svg_bytes = child.svg.bytes.max(1);
                 Ok(RefinementOutcome::Accepted(Box::new(EvaluatedRefinement {
                     embedded: EmbeddedRefinement {
                         core,
@@ -817,7 +840,7 @@ fn adaptively_refine(
                     svg: child.svg,
                     baseline_mean: baseline.mean_delta_e,
                     refined_mean: refined.mean_delta_e,
-                    rate: combined_gain * core.area() as f32 / child_svg_bytes as f32,
+                    rate,
                 })))
             })
             .collect::<Result<Vec<_>>>()?;
@@ -929,32 +952,37 @@ fn vectorize_inner(
     let input_width = decoded.width;
     let input_height = decoded.height;
     let source_has_alpha = decoded_alpha.is_some();
-    let (source, source_reference, input_matte, preview_background, detected_key, alpha_backing) =
-        if let Some(alpha) = decoded_alpha {
-            let matte = AlphaMatte::from_u8(input_width, input_height, alpha);
-            let backing = chroma::select_alpha_backing(&decoded, &matte);
-            let source = chroma::prepare_compact_source_alpha(&decoded, &matte);
-            let reference =
-                chroma::composite_source_over(&source, &matte.quantized_2bit(), backing);
-            (source, reference, Some(matte), backing, None, Some(backing))
-        } else if let Some(key) = config
-            .remove_chroma_key_background
-            .then(|| chroma::detect(&decoded))
-            .flatten()
-        {
-            let matte = chroma::pull_matte(&decoded, key);
-            let separated = chroma::separate_compact_foreground(&decoded, &matte, key.sampled);
-            (
-                separated.clone(),
-                separated,
-                Some(matte),
-                key.sampled,
-                Some(key),
-                None,
-            )
-        } else {
-            (decoded.clone(), decoded, None, [1.0; 3], None, None)
-        };
+    let (
+        mut source,
+        mut source_reference,
+        mut input_matte,
+        preview_background,
+        detected_key,
+        alpha_backing,
+    ) = if let Some(alpha) = decoded_alpha {
+        let matte = AlphaMatte::from_u8(input_width, input_height, alpha);
+        let backing = chroma::select_alpha_backing(&decoded, &matte);
+        let source = chroma::prepare_compact_source_alpha(&decoded, &matte);
+        let reference = chroma::composite_source_over(&source, &matte.quantized_2bit(), backing);
+        (source, reference, Some(matte), backing, None, Some(backing))
+    } else if let Some(key) = config
+        .remove_chroma_key_background
+        .then(|| chroma::detect(&decoded))
+        .flatten()
+    {
+        let matte = chroma::pull_matte(&decoded, key);
+        let separated = chroma::separate_compact_foreground(&decoded, &matte, key.sampled);
+        (
+            separated.clone(),
+            separated,
+            Some(matte),
+            key.sampled,
+            Some(key),
+            None,
+        )
+    } else {
+        (decoded.clone(), decoded, None, [1.0; 3], None, None)
+    };
     let complexity = if config.auto_dimension {
         estimate_dimension(&source_reference, config)
     } else {
@@ -965,6 +993,33 @@ fn vectorize_inner(
             ..ComplexityProbe::default()
         }
     };
+    let mut separators = Vec::new();
+    let mut separator_quality_reference = None;
+    if config.adaptive_refinement && detected_key.is_some() {
+        if let Some(matte) = &input_matte {
+            let (bands, cleaned) =
+                crate::separators::extract(&source, matte, config.adaptive_tile_dimension as usize);
+            if let Some(cleaned) = cleaned {
+                if config.compute_quality_metrics {
+                    separator_quality_reference =
+                        Some(source_reference.resize_max(complexity.selected_dimension.max(64)));
+                }
+                // Keep the keyed-source convention for hidden colours. The
+                // pale band returns as one vector backdrop after refinement;
+                // opaque foreground at its crossings remains in this matte.
+                source = SourceRaster::from_unorm16_fn(input_width, input_height, |i| {
+                    if cleaned.get(i) == 0.0 {
+                        preview_background
+                    } else {
+                        source.get(i % input_width, i / input_width)
+                    }
+                });
+                source_reference = source.clone();
+                input_matte = Some(cleaned);
+                separators = bands;
+            }
+        }
+    }
     let processing = source.resize_max(complexity.selected_dimension.max(64));
     let processing_matte = input_matte
         .as_ref()
@@ -999,6 +1054,25 @@ fn vectorize_inner(
         config,
         execution_threads,
     )?;
+    crate::separators::prepend(
+        &mut core.document,
+        &separators,
+        [
+            processing_width as f32 / input_width as f32,
+            processing_height as f32 / input_height as f32,
+        ],
+    );
+    core.svg.rect_elements += separators.len();
+    core.svg.bytes = core.document.len();
+    if let Some(reference) = separator_quality_reference {
+        let rendered = render_svg_document_on(
+            &core.document,
+            processing_width,
+            processing_height,
+            preview_background,
+        )?;
+        core.quality = Some(crate::metrics::compare(&reference, &rendered));
+    }
     let to_u8 =
         |color: [f32; 3]| color.map(|channel| (channel.clamp(0.0, 1.0) * 255.0).round() as u8);
     let source_alpha = AlphaTransparencySummary {
@@ -1499,6 +1573,68 @@ mod tests {
     use std::collections::HashSet;
     use std::sync::{Arc, Barrier};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn native_vector_join_does_not_inherit_coarse_preview_blur() {
+        let document = r#"<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><path d="M0 8H32V8.5H0Z"/><circle cx="16" cy="16" r="5"/></svg>"#;
+        let tree = parse_svg_document(document).unwrap();
+        let coarse = render_svg_document_on(document, 32, 32, [1.0; 3]).unwrap();
+        let whole = SourceRect {
+            x: 0,
+            y: 0,
+            width: 128,
+            height: 128,
+        };
+        let expanded = SourceRect {
+            x: 32,
+            y: 28,
+            width: 64,
+            height: 64,
+        };
+        let core = SourceRect {
+            x: 40,
+            y: 36,
+            width: 48,
+            height: 52,
+        };
+        let native = render_svg_tree_on(
+            &tree,
+            64,
+            64,
+            resvg::tiny_skia::Transform::from_row(4.0, 0.0, 0.0, 4.0, -32.0, -28.0),
+            [1.0; 3],
+        )
+        .unwrap();
+        assert!(!crate::adaptive::refinement_boundary_matches(
+            &coarse, &native, whole, whole, core, expanded
+        ));
+        assert!(crate::adaptive::refinement_boundary_matches(
+            &native, &native, expanded, whole, core, expanded
+        ));
+        let mut damaged = native.clone();
+        damaged.pixels[(core.y - expanded.y) * 64 + 25] = [0.0; 3];
+        assert!(!crate::adaptive::refinement_boundary_matches(
+            &native, &damaged, expanded, whole, core, expanded
+        ));
+    }
+
+    #[test]
+    fn factored_separator_stays_behind_foreground_and_leaves_background_clear() {
+        let mut document = r##"<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><rect x="14" y="6" width="4" height="20" fill="#202020"/></svg>"##.to_owned();
+        crate::separators::prepend(
+            &mut document,
+            &[crate::separators::Separator {
+                rect: [0.0, 32.0, 128.0, 6.0],
+                color: [1.0; 3],
+                opacity: 1.0,
+            }],
+            [0.25, 0.25],
+        );
+        let raster = render_svg_document_on(&document, 32, 32, [0.0, 1.0, 0.0]).unwrap();
+        assert_eq!(raster.get(0, 8), [1.0; 3]);
+        assert_eq!(raster.get(16, 8), [32.0 / 255.0; 3]);
+        assert_eq!(raster.get(0, 0), [0.0, 1.0, 0.0]);
+    }
 
     #[test]
     fn exact_final_paint_merge_compacts_adjacent_equal_owners() {

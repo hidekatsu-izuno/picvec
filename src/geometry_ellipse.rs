@@ -1,6 +1,6 @@
-//! Whole-contour ellipse fitting, before colour-pair boundaries are sliced.
-//! The storage anchor is not a geometric constraint: all incident faces must
-//! use the same projected graph nodes, including that arbitrary first vertex.
+//! Whole ellipses and fixed-endpoint elliptical arcs, before shared slicing.
+//! A closed loop's storage anchor is not a geometric constraint: incident
+//! faces share its projected graph nodes. Open arcs retain both graph ends.
 
 use super::{resample_open_polyline, CurveSegment, Point};
 
@@ -160,6 +160,114 @@ impl Ellipse {
     }
 }
 
+/// A partial ellipse is useful for arches and shaded rims. A similarity
+/// transform of the fitted conic fixes both shared endpoints without turning
+/// its ends into independently fitted cubics. Validate again after that
+/// correction; short or nearly closed chords are ill-conditioned.
+pub(super) fn fit_open(source: &[Point], corridor: f32) -> Option<Vec<CurveSegment>> {
+    if source.len() < 24 || source.first() == source.last() {
+        return None;
+    }
+    let length: f32 = source.windows(2).map(|p| p[0].distance(p[1])).sum();
+    if length < 32.0 || source[0].distance(*source.last()?) > 0.92 * length {
+        return None;
+    }
+    let points = resample_open_polyline(source, 1.0);
+    let mut ellipse = Ellipse::fit(&points)?;
+    let start = source[0];
+    let end = *source.last()?;
+    let a = ellipse.point(ellipse.angle(start));
+    let b = ellipse.point(ellipse.angle(end));
+    let chord = a.distance(b);
+    if chord < 16.0_f32.max(ellipse.radii[0] as f32 * 0.5) {
+        return None;
+    }
+    let scale = start.distance(end) as f64 / chord as f64;
+    if !(0.9..=1.1).contains(&scale) {
+        return None;
+    }
+    let rotation =
+        (end.y - start.y).atan2(end.x - start.x) as f64 - (b.y - a.y).atan2(b.x - a.x) as f64;
+    let (sin, cos) = rotation.sin_cos();
+    let x = (ellipse.centre.x - a.x) as f64;
+    let y = (ellipse.centre.y - a.y) as f64;
+    ellipse.centre = Point {
+        x: (start.x as f64 + scale * (cos * x - sin * y)) as f32,
+        y: (start.y as f64 + scale * (sin * x + cos * y)) as f32,
+    };
+    ellipse.radii.iter_mut().for_each(|r| *r *= scale);
+    ellipse.rotation += rotation;
+    let first = ellipse.angle(start);
+    let mut previous = first;
+    let (mut sweep, mut travel, mut error) = (0.0_f64, 0.0_f64, 0.0_f64);
+    for &point in &points {
+        let angle = ellipse.angle(point);
+        let distance = point.distance(ellipse.point(angle));
+        if distance > corridor {
+            return None;
+        }
+        error += (distance as f64).powi(2);
+        let step = (angle - previous + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU)
+            - std::f64::consts::PI;
+        sweep += step;
+        travel += step.abs();
+        previous = angle;
+    }
+    if sweep.abs() < std::f64::consts::FRAC_PI_2
+        || sweep.abs() > 1.5 * std::f64::consts::PI
+        || (travel - sweep.abs()) * ellipse.radii[0] > 0.5
+        || error / points.len() as f64 > (0.55 * corridor as f64).powi(2)
+    {
+        return None;
+    }
+    let mut curves = ellipse.curves(first, sweep);
+    // Remove floating-point endpoint drift only. The graph owns these knots.
+    if let CurveSegment::Cubic {
+        start: p, first, ..
+    } = &mut curves[0]
+    {
+        first.x += start.x - p.x;
+        first.y += start.y - p.y;
+        *p = start;
+    }
+    if let CurveSegment::Cubic { end: p, second, .. } = curves.last_mut()? {
+        second.x += end.x - p.x;
+        second.y += end.y - p.y;
+        *p = end;
+    }
+    super::raster_boundary_supported(
+        source,
+        &super::sample_curve_sequence(&curves, 0.25),
+        corridor,
+    )
+    .then_some(curves)
+}
+
+/// A large, segmented rim carries more than one pixel of localization error
+/// even when its complete shape is an ellipse. Allow two percent of its span,
+/// capped at 4.5 working pixels; small contours keep the original bound.
+pub(super) fn closed_corridor(source: &[Point], minimum: f32) -> f32 {
+    let (mut lo, mut hi) = (
+        Point {
+            x: f32::INFINITY,
+            y: f32::INFINITY,
+        },
+        Point {
+            x: f32::NEG_INFINITY,
+            y: f32::NEG_INFINITY,
+        },
+    );
+    for p in source {
+        lo.x = lo.x.min(p.x);
+        lo.y = lo.y.min(p.y);
+        hi.x = hi.x.max(p.x);
+        hi.y = hi.y.max(p.y);
+    }
+    (0.02 * (hi.x - lo.x).max(hi.y - lo.y))
+        .max(minimum)
+        .min(4.5_f32.max(minimum))
+}
+
 pub(super) fn fit_closed(source: &[Point], corridor: f32) -> Option<Vec<CurveSegment>> {
     if source.len() < 24 || source.first() != source.last() {
         return None;
@@ -286,6 +394,61 @@ pub(super) fn align_stroke(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn open_rotated_ellipse_keeps_shared_endpoints_and_one_model() {
+        let ellipse = Ellipse {
+            centre: Point { x: 100.0, y: 90.0 },
+            radii: [32.0, 65.0],
+            rotation: 0.45,
+        };
+        for direction in [-1.0, 1.0] {
+            let source: Vec<_> = (0..=240)
+                .map(|i| {
+                    let t = i as f64 / 240.0;
+                    let mut p = ellipse.point(0.3 + direction * std::f64::consts::PI * t);
+                    p.x += (0.1 * (t * 24.0 * std::f64::consts::PI).sin()) as f32;
+                    p
+                })
+                .collect();
+            let curves = super::super::geometry_primitives::fit(&source, 0.85, None, None)
+                .expect("a noncircular arch must have an analytic model");
+            assert_eq!(curves[0].start(), source[0]);
+            assert_eq!(curves.last().unwrap().end(), *source.last().unwrap());
+            for p in super::super::sample_curve_sequence(&curves, 0.25) {
+                assert!(p.distance(ellipse.point(ellipse.angle(p))) < 0.3);
+            }
+            assert!(fit_open(&source[..20], 0.85).is_none());
+            let mut retraced = source.clone();
+            retraced.extend(source.iter().rev().skip(1));
+            assert!(fit_open(&retraced, 0.85).is_none());
+        }
+    }
+
+    #[test]
+    fn large_ellipse_localization_budget_is_bounded_and_retains_dents() {
+        let ellipse = Ellipse {
+            centre: Point { x: 300.0, y: 300.0 },
+            radii: [180.0, 210.0],
+            rotation: 0.2,
+        };
+        let mut source: Vec<_> = (0..=720)
+            .map(|i| {
+                let a = i as f64 / 720.0 * std::f64::consts::TAU;
+                let mut p = ellipse.point(a);
+                p.x += (1.8 * (a * 20.0).sin()) as f32;
+                p
+            })
+            .collect();
+        source[720] = source[0];
+        let corridor = closed_corridor(&source, super::super::fairing_raster_corridor());
+        assert_eq!(corridor, 4.5);
+        assert!(fit_closed(&source, corridor).is_some());
+        for p in &mut source[170..190] {
+            p.x += 12.0;
+        }
+        assert!(fit_closed(&source, corridor).is_none());
+    }
 
     #[test]
     fn noisy_rotated_ellipses_keep_one_smooth_closed_model() {

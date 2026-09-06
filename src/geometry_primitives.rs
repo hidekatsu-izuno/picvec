@@ -1,9 +1,10 @@
-//! Source-supported lines and circular arcs, fitted before SVG normalization.
+//! Source-supported lines, circular arcs and elliptical arcs.
 //!
 //! Endpoints belong to the shared graph and are never projected independently.
 //! An open circle therefore has only one free parameter: its centre lies on
 //! the chord's perpendicular bisector. A closed circle passes through its
 //! storage anchor. Fits use equally spaced observations, not raster step counts.
+//! Elliptical arcs use a conic with a similarity correction fixing both ends.
 
 use super::{
     boundary_corridor_supported, normalized, persistent_open_corners, resample_open_polyline,
@@ -212,7 +213,9 @@ pub(super) fn fit(
         return None;
     }
     let points = resample_open_polyline(source, 1.0);
-    let candidate = line(&points, tolerance).or_else(|| circle(&points, tolerance))?;
+    let candidate = line(&points, tolerance)
+        .or_else(|| circle(&points, tolerance))
+        .or_else(|| super::geometry_ellipse::fit_open(&points, tolerance))?;
     if !supports_tangents(&candidate, start, end)
         || !boundary_corridor_supported(source, &candidate, tolerance + 0.15)
     {
