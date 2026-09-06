@@ -18,6 +18,10 @@ use crate::raster::{percentile, Raster};
 use crate::segment::{replace_merged_labels, replace_source_supported_paint_labels, Segmentation};
 use crate::union_find::UnionFind;
 
+#[path = "gradient_coherent.rs"]
+mod coherent;
+pub(crate) use coherent::reconstruct as reconstruct_coherent_domains;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ColorStop {
     pub offset: f64,
@@ -113,6 +117,7 @@ pub struct GradientSummary {
     pub low_range_solid_regions: usize,
     /// Faces for which linear/radial gradient models were actually fitted.
     pub gradient_model_search_regions: usize,
+    pub coherent_field_regions: usize,
     pub full_fit_regions: usize,
 }
 
@@ -678,6 +683,7 @@ struct ErrorStats {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RegionFitWork {
     PrimarySolid,
+    CoherentField,
     GainBoundSolid,
     LowRangeSolid,
     GradientModelSearch,
@@ -2822,8 +2828,22 @@ fn fit_like_merge_paint(
         Paint::Solid { .. } | Paint::Layered { .. } => {
             return (solid.clone(), solid_stats);
         }
-        Paint::Linear { preset, .. } => {
-            let (start, end) = linear_geometry(*preset, region_bounds);
+        Paint::Linear {
+            preset,
+            start: previous_start,
+            end: previous_end,
+            ..
+        } => {
+            let (start, end) = if *preset == LinearPreset::Fitted {
+                canonical_direction((
+                    previous_end.x - previous_start.x,
+                    previous_end.y - previous_start.y,
+                ))
+                .map(|direction| extended_linear_geometry(samples, source.width, direction))
+                .unwrap_or_else(|| linear_geometry(*preset, region_bounds))
+            } else {
+                linear_geometry(*preset, region_bounds)
+            };
             let parameters: Vec<f32> = samples
                 .iter()
                 .map(|&index| linear_parameter(index, source.width, start, end).clamp(0.0, 1.0))
@@ -2836,8 +2856,27 @@ fn fit_like_merge_paint(
                 stops,
             }
         }
-        Paint::Radial { origin, .. } => {
-            let (center, radius) = radial_geometry(*origin, region_bounds);
+        Paint::Radial {
+            origin,
+            center: previous_center,
+            radius: previous_radius,
+            ..
+        } => {
+            let (center, radius) = if *origin == RadialOrigin::Fitted {
+                let extent = samples
+                    .iter()
+                    .map(|&i| radial_parameter(i, source.width, *previous_center, *previous_radius))
+                    .fold(1.0_f32, f32::max);
+                (
+                    *previous_center,
+                    Point {
+                        x: previous_radius.x * extent,
+                        y: previous_radius.y * extent,
+                    },
+                )
+            } else {
+                radial_geometry(*origin, region_bounds)
+            };
             let parameters: Vec<f32> = samples
                 .iter()
                 .map(|&index| radial_parameter(index, source.width, center, radius))
@@ -3538,6 +3577,56 @@ struct SmoothPaintBoundary {
     gradient_sample_fraction: f32,
     median_gradient_discontinuity: f32,
     percentile_gradient_discontinuity: f32,
+    material_step_fraction: f32,
+}
+
+// Resolve blurred steps over several pixels. A one-pixel slope can look
+// continuous even when it connects two distinct, nearly flat colour fields.
+fn boundary_material_step(labs: &[Lab], segmentation: &Segmentation, point: Point) -> bool {
+    let horizontal = point.x.fract() != 0.0;
+    let x = point.x.floor() as isize;
+    let y = point.y.floor() as isize;
+    [4_isize, 8].into_iter().any(|radius| {
+        let mut indices = [0; 4];
+        for (slot, offset) in [-3 * radius, -radius, radius, 3 * radius]
+            .into_iter()
+            .enumerate()
+        {
+            let px = x + if horizontal { offset } else { 0 };
+            let py = y + if horizontal { 0 } else { offset };
+            if px < 0
+                || py < 0
+                || px >= segmentation.width as isize
+                || py >= segmentation.height as isize
+            {
+                return false;
+            }
+            indices[slot] = py as usize * segmentation.width + px as usize;
+        }
+        let values = indices.map(|i| labs[i]);
+        let centre = delta_e2000(values[1], values[2]);
+        let outside = 0.5 * (delta_e2000(values[0], values[1]) + delta_e2000(values[2], values[3]));
+        centre >= 3.0 && centre > 3.0 * outside.max(0.25)
+    })
+}
+
+fn boundary_has_material_step(boundary: &SmoothPaintBoundary) -> bool {
+    boundary.length >= 32 && boundary.material_step_fraction >= 0.5
+}
+
+fn measure_boundary_material_step(
+    labs: &[Lab],
+    segmentation: &Segmentation,
+    boundary: &mut SmoothPaintBoundary,
+) {
+    if boundary.length >= 32 {
+        boundary.material_step_fraction = boundary
+            .points
+            .iter()
+            .filter(|&&point| boundary_material_step(labs, segmentation, point))
+            .count() as f32
+            / boundary.points.len().max(1) as f32;
+    }
 }
 
 /// Relative change of the colour slope across four consecutive samples.
@@ -3598,7 +3687,8 @@ fn boundary_gradient_discontinuity(
 }
 
 fn boundary_has_quantized_shading(boundary: &SmoothPaintBoundary) -> bool {
-    boundary.gradient_sample_fraction >= 1.0 / 3.0
+    !boundary_has_material_step(boundary)
+        && boundary.gradient_sample_fraction >= 1.0 / 3.0
         && boundary.length >= 32
         && boundary.median_delta_e <= 0.75
         && boundary.percentile_delta_e <= 8.0
@@ -3607,6 +3697,9 @@ fn boundary_has_quantized_shading(boundary: &SmoothPaintBoundary) -> bool {
 }
 
 fn boundary_has_continuous_gradient(boundary: &SmoothPaintBoundary) -> bool {
+    if boundary_has_material_step(boundary) {
+        return false;
+    }
     let consistent_slope = boundary.gradient_sample_fraction >= 1.0 / 3.0
         && boundary.median_delta_e <= 12.0
         && boundary.percentile_delta_e <= 18.0
@@ -3620,11 +3713,14 @@ fn boundary_has_continuous_gradient(boundary: &SmoothPaintBoundary) -> bool {
 }
 
 fn boundary_has_low_source_delta(boundary: &SmoothPaintBoundary) -> bool {
-    boundary.median_delta_e <= 1.5 && boundary.percentile_delta_e <= 3.0
+    !boundary_has_material_step(boundary)
+        && boundary.median_delta_e <= 1.5
+        && boundary.percentile_delta_e <= 3.0
 }
 
 fn boundary_is_smooth(boundary: &SmoothPaintBoundary) -> bool {
-    boundary_has_low_source_delta(boundary) || boundary_has_continuous_gradient(boundary)
+    !boundary_has_material_step(boundary)
+        && (boundary_has_low_source_delta(boundary) || boundary_has_continuous_gradient(boundary))
 }
 
 fn paint_at_point(paint: &Paint, point: Point) -> [f32; 3] {
@@ -3839,6 +3935,7 @@ fn smooth_paint_boundaries(
                 gradient_sample_fraction,
                 median_gradient_discontinuity: gradient_median,
                 percentile_gradient_discontinuity: gradient_p90,
+                material_step_fraction: 0.0,
             };
             if include_non_smooth || boundary_is_smooth(&boundary) {
                 result.push(boundary);
@@ -4744,6 +4841,9 @@ fn couple_adjacent_paints(
         .collect();
     let mut candidates = Vec::<CouplingBoundary>::new();
     for boundary in paint_boundaries.iter().cloned() {
+        if boundary_has_material_step(&boundary) {
+            continue;
+        }
         let left = boundary.left;
         let right = boundary.right;
         if left == background
@@ -5125,6 +5225,81 @@ pub(crate) struct SupportedPaintMergeReport {
     pub boundary_edges_removed: usize,
 }
 
+type PaintMergePairIdentity = ((usize, usize), (usize, usize));
+
+fn supported_merge_error_gate(
+    labs: &[Lab],
+    width: usize,
+    faces: [(&[usize], &Paint); 2],
+    candidate: &Paint,
+) -> u8 {
+    let mut baseline_errors = Vec::new();
+    let mut candidate_errors = Vec::new();
+    for (samples, baseline) in faces {
+        let before = paint_stats_against_labs(labs, samples, width, baseline);
+        let after = paint_stats_against_labs(labs, samples, width, candidate);
+        if after.mean > before.mean + 0.30 || after.percentile > before.percentile + 0.75 {
+            return 1;
+        }
+        baseline_errors.extend(errors_for_indices(labs, samples, width, baseline));
+        candidate_errors.extend(errors_for_indices(labs, samples, width, candidate));
+    }
+    let before = numpy_sum_f32(&baseline_errors) / baseline_errors.len().max(1) as f32;
+    let after = numpy_sum_f32(&candidate_errors) / candidate_errors.len().max(1) as f32;
+    if after > before + 0.01
+        || percentile(candidate_errors, 0.90) > percentile(baseline_errors, 0.90) + 0.04
+    {
+        return 2;
+    }
+    0
+}
+
+fn quick_supported_merge(
+    source: &Raster,
+    left: &MergeRegion,
+    right: &MergeRegion,
+) -> MergeProposal {
+    let samples = balanced_samples(
+        &left.samples,
+        &right.samples,
+        left.pixels.len(),
+        right.pixels.len(),
+        256,
+    );
+    let solid = Paint::Solid {
+        color: mean_color(source, &samples),
+    };
+    let solid_stats = paint_stats(source, &samples, &solid);
+    let mut candidates = vec![solid.clone(), left.paint.clone(), right.paint.clone()];
+    for template in [&left.paint, &right.paint] {
+        candidates.push(
+            fit_like_merge_paint(
+                source,
+                &samples,
+                union_bounds(left.bounds, right.bounds),
+                template,
+                &solid,
+                solid_stats,
+            )
+            .0,
+        );
+    }
+    let mut best = MergeProposal {
+        samples,
+        paint: solid,
+        score: f32::INFINITY,
+    };
+    for paint in candidates {
+        let score = objective(paint_stats(source, &left.samples, &paint))
+            .max(objective(paint_stats(source, &right.samples, &paint)));
+        if score < best.score {
+            best.paint = paint;
+            best.score = score;
+        }
+    }
+    best
+}
+
 /// Remove a final Paint interface only when both its geometry and colour are
 /// unsupported by the native source.
 ///
@@ -5142,6 +5317,39 @@ pub(crate) fn merge_source_supported_paints(
     segmentation: &mut Segmentation,
     paints: &mut Vec<Paint>,
     config: &Config,
+) -> SupportedPaintMergeReport {
+    let mut report = SupportedPaintMergeReport::default();
+    let mut rejected = HashSet::new();
+    // Rebuild native boundary evidence after each disjoint matching. A merged
+    // face may then join another neighbour, while all contacts are rechecked.
+    // Each round retains the existing per-face and combined source-error gates.
+    for round_index in 0..config.paint_merge_passes {
+        let round = merge_source_supported_paints_round(
+            source,
+            boundary_source,
+            segmentation,
+            paints,
+            config,
+            &mut rejected,
+            round_index == 0,
+        );
+        report.merges += round.merges;
+        report.boundary_edges_removed += round.boundary_edges_removed;
+        if round.merges == 0 {
+            break;
+        }
+    }
+    report
+}
+
+fn merge_source_supported_paints_round(
+    source: &Raster,
+    boundary_source: &Raster,
+    segmentation: &mut Segmentation,
+    paints: &mut Vec<Paint>,
+    config: &Config,
+    rejected: &mut HashSet<PaintMergePairIdentity>,
+    allow_expensive: bool,
 ) -> SupportedPaintMergeReport {
     let count = segmentation.regions.len();
     if count < 2
@@ -5230,9 +5438,21 @@ pub(crate) fn merge_source_supported_paints(
             rejected_evidence += 1;
             continue;
         }
+        // A component grows monotonically. Its first pixel and area identify
+        // an unchanged face across compaction; changed unions receive a new key.
+        let mut identity = [
+            (region_pixels[left][0], region_pixels[left].len()),
+            (region_pixels[right][0], region_pixels[right].len()),
+        ];
+        identity.sort_unstable();
+        let cache_key = (identity[0], identity[1]);
+        if rejected.contains(&cache_key) {
+            continue;
+        }
         let seam_errors = seam_errors_at_points(&paints[left], &paints[right], &boundary.points);
         if percentile(seam_errors, 0.90) > 8.0 {
             rejected_seam += 1;
+            rejected.insert(cache_key);
             continue;
         }
         let left_region = MergeRegion {
@@ -5249,116 +5469,94 @@ pub(crate) fn merge_source_supported_paints(
             bounds: bounds(&region_pixels[right], source.width),
             paint: paints[right].clone(),
         };
-        let mut proposal = merge_proposal(source, &left_region, &right_region, config);
-        let combined_bounds = union_bounds(left_region.bounds, right_region.bounds);
-        let layered_samples = balanced_samples(
-            &region_samples[left],
-            &region_samples[right],
-            region_pixels[left].len(),
-            region_pixels[right].len(),
-            256,
-        );
-        // A union fit is not always the best underpaint for a smooth residual:
-        // either incident face may already model the common ramp accurately.
-        // Try each non-layered base and let the same per-face CIEDE2000 gates
-        // below decide whether removing the interface is lossless enough.
-        let mut layered_bases = vec![
-            proposal.paint.clone(),
-            paints[left].clone(),
-            paints[right].clone(),
-        ];
-        layered_bases.dedup();
-        for base in layered_bases
-            .into_iter()
-            .filter(|paint| !matches!(paint, Paint::Layered { .. }))
-        {
-            let (layered, layered_stats) =
-                fit_layered_residual_paint(source, &layered_samples, combined_bounds, base, 3);
-            let layered_score = objective(layered_stats)
-                .max(objective(paint_stats(
-                    source,
-                    &region_samples[left],
-                    &layered,
-                )))
-                .max(objective(paint_stats(
-                    source,
-                    &region_samples[right],
-                    &layered,
-                )));
-            if layered_score < proposal.score {
-                proposal.paint = layered;
-                proposal.score = layered_score;
+        let mut proposal = if config.paint_merge_passes > 1 {
+            quick_supported_merge(source, &left_region, &right_region)
+        } else {
+            MergeProposal {
+                samples: Vec::new(),
+                paint: paints[left].clone(),
+                score: f32::INFINITY,
+            }
+        };
+        let quick_valid = config.paint_merge_passes > 1
+            && supported_merge_error_gate(
+                &source_labs,
+                source.width,
+                [
+                    (&region_samples[left], &paints[left]),
+                    (&region_samples[right], &paints[right]),
+                ],
+                &proposal.paint,
+            ) == 0;
+        if !quick_valid {
+            if !allow_expensive {
+                rejected.insert(cache_key);
+                continue;
+            }
+            proposal = merge_proposal(source, &left_region, &right_region, config);
+            let combined_bounds = union_bounds(left_region.bounds, right_region.bounds);
+            let layered_samples = balanced_samples(
+                &region_samples[left],
+                &region_samples[right],
+                region_pixels[left].len(),
+                region_pixels[right].len(),
+                256,
+            );
+            // A union fit is not always the best underpaint for a smooth residual:
+            // either incident face may already model the common ramp accurately.
+            // Try each non-layered base and let the same per-face CIEDE2000 gates
+            // below decide whether removing the interface is lossless enough.
+            let mut layered_bases = vec![
+                proposal.paint.clone(),
+                paints[left].clone(),
+                paints[right].clone(),
+            ];
+            layered_bases.dedup();
+            for base in layered_bases
+                .into_iter()
+                .filter(|paint| !matches!(paint, Paint::Layered { .. }))
+            {
+                let (layered, layered_stats) =
+                    fit_layered_residual_paint(source, &layered_samples, combined_bounds, base, 3);
+                let layered_score = objective(layered_stats)
+                    .max(objective(paint_stats(
+                        source,
+                        &region_samples[left],
+                        &layered,
+                    )))
+                    .max(objective(paint_stats(
+                        source,
+                        &region_samples[right],
+                        &layered,
+                    )));
+                if layered_score < proposal.score {
+                    proposal.paint = layered;
+                    proposal.score = layered_score;
+                }
             }
         }
         layered_selected += usize::from(matches!(proposal.paint, Paint::Layered { .. }));
         if !proposal.score.is_finite() {
             rejected_nonfinite += 1;
+            rejected.insert(cache_key);
             continue;
         }
-        let left_baseline = paint_stats_against_labs(
-            &source_labs,
-            &region_samples[left],
-            source.width,
-            &paints[left],
-        );
-        let right_baseline = paint_stats_against_labs(
-            &source_labs,
-            &region_samples[right],
-            source.width,
-            &paints[right],
-        );
-        let left_candidate = paint_stats_against_labs(
-            &source_labs,
-            &region_samples[left],
-            source.width,
-            &proposal.paint,
-        );
-        let right_candidate = paint_stats_against_labs(
-            &source_labs,
-            &region_samples[right],
-            source.width,
-            &proposal.paint,
-        );
-        if left_candidate.mean > left_baseline.mean + 0.30
-            || right_candidate.mean > right_baseline.mean + 0.30
-            || left_candidate.percentile > left_baseline.percentile + 0.75
-            || right_candidate.percentile > right_baseline.percentile + 0.75
-        {
-            rejected_face += 1;
-            continue;
-        }
-        let mut baseline_errors = errors_for_indices(
-            &source_labs,
-            &region_samples[left],
-            source.width,
-            &paints[left],
-        );
-        baseline_errors.extend(errors_for_indices(
-            &source_labs,
-            &region_samples[right],
-            source.width,
-            &paints[right],
-        ));
-        let mut candidate_errors = errors_for_indices(
-            &source_labs,
-            &region_samples[left],
-            source.width,
-            &proposal.paint,
-        );
-        candidate_errors.extend(errors_for_indices(
-            &source_labs,
-            &region_samples[right],
-            source.width,
-            &proposal.paint,
-        ));
-        let baseline_mean = numpy_sum_f32(&baseline_errors) / baseline_errors.len().max(1) as f32;
-        let candidate_mean =
-            numpy_sum_f32(&candidate_errors) / candidate_errors.len().max(1) as f32;
-        if candidate_mean > baseline_mean + 0.01
-            || percentile(candidate_errors, 0.90) > percentile(baseline_errors, 0.90) + 0.04
-        {
-            rejected_combined += 1;
-            continue;
+        if !quick_valid {
+            let rejection = supported_merge_error_gate(
+                &source_labs,
+                source.width,
+                [
+                    (&region_samples[left], &paints[left]),
+                    (&region_samples[right], &paints[right]),
+                ],
+                &proposal.paint,
+            );
+            if rejection != 0 {
+                rejected_face += usize::from(rejection == 1);
+                rejected_combined += usize::from(rejection == 2);
+                rejected.insert(cache_key);
+                continue;
+            }
         }
         used[left] = true;
         used[right] = true;
@@ -5433,6 +5631,7 @@ pub fn fit_all(
         boundary_source,
         segmentation,
         Some(topology),
+        &[],
         strong_branches,
         config,
     )
@@ -5443,6 +5642,7 @@ pub fn fit_all(
 /// until after the final Paint merges avoids building the same exact tree
 /// twice without changing any fit decision.
 pub(crate) fn fit_all_without_topology(
+    hints: &[Option<Paint>],
     source: &Raster,
     boundary_source: &Raster,
     segmentation: &Segmentation,
@@ -5454,6 +5654,7 @@ pub(crate) fn fit_all_without_topology(
         boundary_source,
         segmentation,
         None,
+        hints,
         strong_branches,
         config,
     )
@@ -5464,6 +5665,7 @@ fn fit_all_internal(
     boundary_source: &Raster,
     segmentation: &Segmentation,
     topology: Option<&HierarchicalTopology>,
+    hints: &[Option<Paint>],
     strong_branches: &crate::ridge::StrongRidgeBranches,
     config: &Config,
 ) -> (Vec<Paint>, GradientSummary) {
@@ -5509,6 +5711,10 @@ fn fit_all_internal(
         .zip(region_paint_indices.par_iter())
         .enumerate()
         .map(|(label, (indices, paint_indices))| {
+            if let Some(Some(paint)) = hints.get(label) {
+                let stats = paint_stats_against_labs(&source_labs, indices, source.width, paint);
+                return (paint.clone(), stats.mean, RegionFitWork::CoherentField);
+            }
             let strong_dark = indices
                 .iter()
                 .filter(|&&index| strong_branches.dark[index])
@@ -5574,7 +5780,11 @@ fn fit_all_internal(
         .filter(|value| value.2 == RegionFitWork::GradientModelSearch)
         .count();
     let provable_solid_regions = gain_bound_solid_regions + low_range_solid_regions;
-    let full_fit_regions = fitted.len() - primary_solid_regions;
+    let coherent_field_regions = fitted
+        .iter()
+        .filter(|value| value.2 == RegionFitWork::CoherentField)
+        .count();
+    let full_fit_regions = fitted.len() - primary_solid_regions - coherent_field_regions;
     if cfg!(feature = "diagnostics") && config.retain_diagnostics {
         eprintln!(
             "picvec paint substage initial: {:.3}s (primary solid {}, gain-bound solid {}, low-range solid {}, model search {})",
@@ -5592,7 +5802,13 @@ fn fit_all_internal(
         save_paint_kinds(&format!("{prefix}-initial.json"), &paints);
         save_paint_details(&format!("{prefix}-initial-details.json"), &paints);
     }
-    let paint_boundaries = smooth_paint_boundaries(boundary_source, segmentation, 2, true);
+    let paint_boundaries = smooth_paint_boundaries(boundary_source, segmentation, 2, true)
+        .into_iter()
+        .filter(|b| {
+            hints.get(b.left).is_none_or(Option::is_none)
+                && hints.get(b.right).is_none_or(Option::is_none)
+        })
+        .collect::<Vec<_>>();
     #[cfg(feature = "diagnostics")]
     if let Ok(prefix) = std::env::var("PICVEC_PAINT_DIAGNOSTICS") {
         let values: Vec<serde_json::Value> = paint_boundaries
@@ -5676,6 +5892,7 @@ fn fit_all_internal(
         gain_bound_solid_regions,
         low_range_solid_regions,
         gradient_model_search_regions,
+        coherent_field_regions,
         full_fit_regions,
         ..GradientSummary::default()
     };
@@ -5987,6 +6204,33 @@ mod tests {
     }
 
     #[test]
+    fn blurred_material_step_is_not_a_continuous_shading_boundary() {
+        for blurred_step in [false, true] {
+            let source = Raster::new(
+                128,
+                64,
+                (0..128 * 64)
+                    .map(|i| {
+                        let x = (i % 128) as f32;
+                        let parameter = if blurred_step {
+                            ((x - 58.0) / 12.0).clamp(0.0, 1.0)
+                        } else {
+                            x / 127.0
+                        };
+                        [0.4 + 0.10 * parameter; 3]
+                    })
+                    .collect(),
+            );
+            let segmentation = two_face_segmentation(&source);
+            let mut boundaries = smooth_paint_boundaries(&source, &segmentation, 8, true);
+            assert_eq!(boundaries.len(), 1);
+            measure_boundary_material_step(&lab_pixels(&source), &segmentation, &mut boundaries[0]);
+            assert_eq!(boundary_has_material_step(&boundaries[0]), blurred_step);
+            assert_eq!(boundary_is_smooth(&boundaries[0]), !blurred_step);
+        }
+    }
+
+    #[test]
     fn smooth_boundary_detection_rejects_a_material_step() {
         let mut pixels = vec![[0.2; 3]; 12 * 8];
         for y in 0..8 {
@@ -6011,6 +6255,7 @@ mod tests {
                 gradient_sample_fraction: 1.0,
                 median_gradient_discontinuity: 0.2,
                 percentile_gradient_discontinuity: 0.3,
+                material_step_fraction: 0.0,
             },
             seam_p90: 4.0,
             same_paint_key: false,
@@ -6061,6 +6306,175 @@ mod tests {
         assert_eq!(report.boundary_edges_removed, 8);
         assert_eq!(segmentation.regions.len(), 1);
         assert_eq!(paints, vec![Paint::Solid { color: [0.5; 3] }]);
+    }
+
+    #[test]
+    fn merge_template_preserves_fitted_direction_and_radial_focus() {
+        let samples = (0..64 * 24).collect::<Vec<_>>();
+        for radial in [false, true] {
+            let center = Point { x: 10.0, y: 5.0 };
+            let radius = Point { x: 20.0, y: 10.0 };
+            let source = Raster::new(
+                64,
+                24,
+                samples
+                    .iter()
+                    .map(|&i| {
+                        let t = if radial {
+                            radial_parameter(i, 64, center, radius) * 0.2
+                        } else {
+                            ((i % 64) as f32 + 2.0 * (i / 64) as f32) / 160.0
+                        };
+                        [0.1 + t; 3]
+                    })
+                    .collect(),
+            );
+            let solid = Paint::Solid {
+                color: mean_color(&source, &samples),
+            };
+            let template = if radial {
+                Paint::Radial {
+                    origin: RadialOrigin::Fitted,
+                    center,
+                    radius,
+                    stops: Vec::new(),
+                }
+            } else {
+                Paint::Linear {
+                    preset: LinearPreset::Fitted,
+                    start: Point { x: 0.0, y: 0.0 },
+                    end: Point { x: 10.0, y: 20.0 },
+                    stops: Vec::new(),
+                }
+            };
+            let (paint, stats) = fit_like_merge_paint(
+                &source,
+                &samples,
+                bounds(&samples, 64),
+                &template,
+                &solid,
+                paint_stats(&source, &samples, &solid),
+            );
+            assert!(stats.mean < 0.01, "radial={radial}, mean={}", stats.mean);
+            match paint {
+                Paint::Linear { start, end, .. } => {
+                    assert!(((end.y - start.y) / (end.x - start.x) - 2.0).abs() < 1e-5)
+                }
+                Paint::Radial {
+                    center: actual,
+                    radius: actual_radius,
+                    ..
+                } => {
+                    assert_eq!(actual, center);
+                    assert!((actual_radius.x / actual_radius.y - 2.0).abs() < 1e-5);
+                }
+                _ => panic!("gradient model lost"),
+            }
+        }
+    }
+
+    #[test]
+    fn source_supported_merge_keeps_a_faint_one_pixel_line() {
+        let source = Raster::new(
+            64,
+            16,
+            (0..64 * 16)
+                .map(|i| if i % 64 == 31 { [0.78; 3] } else { [0.8; 3] })
+                .collect(),
+        );
+        let mut segmentation = two_face_segmentation(&source);
+        let labels = (0..64 * 16)
+            .map(|i| {
+                if i % 64 < 31 {
+                    0
+                } else if i % 64 == 31 {
+                    1
+                } else {
+                    2
+                }
+            })
+            .collect();
+        replace_source_supported_paint_labels(&source, &mut segmentation, labels, 0);
+        let mut paints = vec![
+            Paint::Solid { color: [0.8; 3] },
+            Paint::Solid { color: [0.78; 3] },
+            Paint::Solid { color: [0.8; 3] },
+        ];
+        let report = merge_source_supported_paints(
+            &source,
+            &source,
+            &mut segmentation,
+            &mut paints,
+            &Config {
+                paint_merge_passes: 8,
+                ..Config::default()
+            },
+        );
+        assert_eq!(report.merges, 0);
+        assert_ne!(segmentation.labels[30], segmentation.labels[31]);
+        assert_ne!(segmentation.labels[31], segmentation.labels[32]);
+    }
+
+    #[test]
+    fn source_supported_merge_joins_a_chain_of_ramp_fragments() {
+        let source = Raster::new(
+            64,
+            12,
+            (0..64 * 12)
+                .map(|i| [0.2 + 0.6 * (i % 64) as f32 / 63.0; 3])
+                .collect(),
+        );
+        let mut segmentation = two_face_segmentation(&source);
+        let labels = (0..64 * 12).map(|i| ((i % 64) / 16) as u32).collect();
+        replace_source_supported_paint_labels(&source, &mut segmentation, labels, 0);
+        let mut paints = (0..4)
+            .map(|i| {
+                let low = i * 16;
+                let high = low + 15;
+                Paint::Linear {
+                    preset: LinearPreset::LeftToRight,
+                    start: Point {
+                        x: low as f32,
+                        y: 0.0,
+                    },
+                    end: Point {
+                        x: high as f32,
+                        y: 0.0,
+                    },
+                    stops: vec![
+                        ColorStop {
+                            offset: 0.0,
+                            color: source.pixels[low].map(f64::from),
+                        },
+                        ColorStop {
+                            offset: 1.0,
+                            color: source.pixels[high].map(f64::from),
+                        },
+                    ],
+                }
+            })
+            .collect::<Vec<_>>();
+        let report = merge_source_supported_paints(
+            &source,
+            &source,
+            &mut segmentation,
+            &mut paints,
+            &Config {
+                paint_merge_passes: 8,
+                ..Config::default()
+            },
+        );
+        assert_eq!(report.merges, 3);
+        assert_eq!(segmentation.regions.len(), 1);
+        assert!(
+            paint_stats(
+                &source,
+                &(0..source.pixels.len()).collect::<Vec<_>>(),
+                &paints[0]
+            )
+            .mean
+                < 0.01
+        );
     }
 
     #[test]

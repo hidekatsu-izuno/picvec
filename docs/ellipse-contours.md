@@ -76,11 +76,6 @@ eight master cubics into more output pieces without changing their geometry.
 | Yellow | 1.2415 | <0.0001 |
 | White after key removal | 0.6999 | <0.0001 |
 
-[Source / before / after comparison](../sample/comparison/cliparts-6x6-ellipses.png)
-shows the window from the complete sheet, rendered at source resolution over
-white. The button row renders the SVG directly at the enlarged display scale;
-the source panel enlarges the original raster.
-
 The complete keyed sheet retains exactly the same 34 accepted refinement
 regions out of 35 evaluated candidates. SVG size changes from 28,557,227 to
 28,591,500 bytes (+0.12%). All 36 cells were compared at 5016 × 5016 on the

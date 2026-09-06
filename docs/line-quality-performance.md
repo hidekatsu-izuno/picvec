@@ -316,8 +316,7 @@ paths in definitions and the retained base. They measure representation,
 not visible line quality. Timings are individual diagnostic runs with other
 validation work occurring during parts of the runs, not a speed benchmark.
 
-[Enlarged source / before / after comparison](../sample/comparison/cliparts-6x6-lines.png)
-shows the code-document frame, database rim and Wi-Fi arcs. These were rendered
+The code-document frame, database rim and Wi-Fi arcs were rendered
 from the full sheet SVG at original source scale, with a green backing for
 comparison to the opaque source. Mean absolute RGB error (8-bit channel units)
 across the respective full 836 × 836 crops changed from 4.37147 to 4.37069,
@@ -376,9 +375,8 @@ The base pass recovered 175 joint bands (previously 16); this counter excludes
 additional bands in the adaptive regions. Its underpaint ownership increased
 from 27,134 to 53,593 pixels.
 
-[Source / before / after band comparison](../sample/comparison/cliparts-6x6-bands.png)
-uses crops rendered from the full sheet SVG at source resolution, then enlarged
-for inspection. The database's white separator is more continuous; the
+Inspection used crops rendered from the full sheet SVG at source resolution.
+The database's white separator is more continuous; the
 source-code frame's straight band has less width variation. The Wi-Fi example
 also shows remaining gradient and thin-outline irregularities.
 
@@ -473,7 +471,7 @@ were approximately 22.8 seconds before and 24.8 seconds after; these are single
 runs, not a controlled performance benchmark. No shared-loop fallback or
 whole-partition curve downgrade occurred in the final car conversion.
 
-`sample/comparison/car-lines.png` shows source / before / after. The larger
+The larger
 staircase and seam-end protrusion are reduced, but coloured ink still has
 uneven width and some subpixel steps at short Paint junctions. The retained
 thin Paint fragments do not yet share one fitted centreline and width over the
@@ -516,7 +514,7 @@ The regenerated 800 × 744 sample has zero recovered whole-band strokes,
 compared with 17 in the supplied working-tree SVG. Its Paint paths still
 contain 28 line commands and 126 circular-arc commands. The file changes
 from 148,860 to 135,569 bytes. The arm, cuff and hem connections were inspected
-in [source / before / after crops](../sample/comparison/boy_and_turtle-lines.png).
+in crops of the source and rendered SVGs.
 
 In the source rectangle x=270..479, y=285..424, 3,983 pixels have a 3 × 3
 neighbourhood with every RGB channel below 32/255. Of these dark core pixels,
@@ -561,9 +559,8 @@ The geometry pass now:
 
 These rules contain no car-specific coordinates, colours or label IDs.
 
-The regenerated [car.svg](../sample/output/car.svg) and
-[10x source / before / after crop](../sample/comparison/car-left-lines.png)
-show the reported exterior staircase removed. In the diagnostic shared curves
+The regenerated [car.svg](../sample/output/car.svg)
+shows the reported exterior staircase removed. In the diagnostic shared curves
 incident to background label 0, with endpoint midpoint in
 x=43..53, y=649..663, there were 8 exactly horizontal/vertical segments at
 least 0.5 pixels long before this change and zero afterwards. This measures

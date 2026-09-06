@@ -43,8 +43,7 @@ removal. All 35 proposed refinements are accepted, including every previously
 refined figure. SVG size changes from 28,557,227 to 34,349,390 bytes; added
 refinement bytes are 27,325,356, within the new 32 MiB limit.
 
-[Source / before / after warehouse comparison](../sample/comparison/cliparts-6x6-warehouse.png)
-uses white for display. The following opaque wall rectangles measure mean
+The following opaque wall rectangles measure mean
 CIEDE2000 error at the original source resolution. Rectangles are relative to
 the 710 x 660 crop beginning at source (900, 4120), with exclusive right/bottom
 coordinates.

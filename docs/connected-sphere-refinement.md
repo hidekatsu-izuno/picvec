@@ -82,9 +82,7 @@ small changes to its shading and outline, without losing the shackle or
 keyhole. This is a geometric regularizer, not a guarantee that every raster
 colour-error score decreases.
 
-[Source / before / after comparison](../sample/comparison/cliparts-6x6-network.png)
-shows the actual full-sheet SVGs rendered directly at the display scale over
-white. The source panel uses a green-key display matte. The output remains
+The output remains
 editable vector geometry and Paint; no raster image is embedded.
 
 Regression coverage checks that measured byte rate replaces partition cost,

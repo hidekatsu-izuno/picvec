@@ -68,9 +68,7 @@ source-resolution fitting rather than changing the Paint model.
 The added refinement bytes remain within the existing 24 MiB budget. The
 greater detail increases the complete SVG size by 6.4 MB.
 
-[Source / before / after comparison](../sample/comparison/cliparts-6x6-details.png)
-uses white for viewing; the source panel uses the same green-key matte.
-Metrics above use the original green background, not that display composite.
+Metrics above use the original green background.
 
 ## Reproduction and validation
 

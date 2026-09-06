@@ -51,6 +51,8 @@ pub struct Config {
     pub quantization_dark_delta_e: f32,
     pub quantization_light_delta_e: f32,
     pub gradient_merge_error: f32,
+    /// Final source-supported merge rounds; additional rounds trade time for fewer faces.
+    pub paint_merge_passes: usize,
     /// Maximum within-region DeltaE00 range treated unconditionally as Solid.
     pub solid_color_max_delta_e: f32,
     pub minimum_gradient_area: u32,
@@ -108,6 +110,7 @@ impl Default for Config {
             quantization_dark_delta_e: 2.5,
             quantization_light_delta_e: 5.0,
             gradient_merge_error: 2.3,
+            paint_merge_passes: 1,
             solid_color_max_delta_e: 1.5,
             minimum_gradient_area: 64,
             shared_boundary_overlap: 0.2,
@@ -260,6 +263,10 @@ impl Config {
         require(
             self.gradient_merge_error.is_finite() && self.gradient_merge_error >= 0.0,
             "gradient_merge_error must be finite and non-negative",
+        )?;
+        require(
+            (1..=8).contains(&self.paint_merge_passes),
+            "paint_merge_passes must be between 1 and 8",
         )?;
         require(
             self.solid_color_max_delta_e.is_finite() && self.solid_color_max_delta_e >= 0.0,

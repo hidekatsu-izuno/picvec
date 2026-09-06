@@ -17,6 +17,7 @@ include = [
     "/LICENSE",
     "/THIRD_PARTY_NOTICES.md",
     "/docs/chroma-key-background-removal.md",
+    "/docs/source-supported-region-merging.md",
 ]
 
 [features]

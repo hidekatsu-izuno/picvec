@@ -8,6 +8,8 @@ use crate::hierarchy::HierarchicalTopology;
 use crate::segment::Segmentation;
 use crate::union_find::UnionFind;
 
+#[path = "geometry_bezier.rs"]
+mod geometry_bezier;
 #[path = "geometry_primitives.rs"]
 mod geometry_primitives;
 

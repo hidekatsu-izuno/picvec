@@ -25,223 +25,25 @@ hand-written assembly and requires no assembly-specific build step.
 ## Run
 
 ```bash
-picvec input.png output.svg
+./target/release/picvec input.png output.svg [OPTIONS]
+./target/release/picvec --help
 ```
 
-The input processing size is selected automatically from source complexity;
-`--max-dimension` sets its upper bound. The only output is the SVG file named
-by the second positional argument.
+The first argument is the input raster; the second is the SVG file to create.
 
-Useful controls:
-
-```text
---max-dimension <PX>
---max-input-dimension <PX>
---max-input-megapixels <MP>
---max-decode-mib <MIB>
---remove-chroma-key-background
---smoothing-radius <PX>
---segmentation-min-size <AREA>
---quantization-dark-delta-e <DE>
---quantization-light-delta-e <DE>
---gradient-merge-error <DE>
---solid-color-max-delta-e <DE>
---no-adaptive-refinement
---adaptive-tile-dimension <PX>
---adaptive-max-patches <N>
---adaptive-svg-budget-mib <MIB>
---adaptive-min-perceptual-gain <DE>
---adaptive-min-predicted-rate <RATE>
---adaptive-complexity-penalty <RATE>
---threads <N>                 # 0: min(4, detected CPUs / 2), at least one
---quality-metrics             # diagnostics feature: full-SVG DeltaE00/SSIM report
---verbose                     # diagnostics feature: JSON report on stderr
-```
-
-`--solid-color-max-delta-e` controls the within-region colour range that can
-be accepted immediately as a solid fill. Lower values retain more subtle
-shading as gradients; higher values favour simpler SVG output. The default is
-1.5.
-
-Error tolerances tighten smoothly toward black and white to retain shadow
-and highlight detail. This applies to smoothing, colour quantization, Paint
-merging, and gradient promotion; the default effective palette tolerance is
-1.25 DeltaE00 at black, 2.5 at L*=45, and 1.5 at white. The default adaptive
-SVG budget is 32 MiB. See [tonal detail thresholds](docs/tonal-detail-thresholds.md).
-
-`--remove-chroma-key-background` detects a near-saturated red, green, blue,
-cyan, magenta, or yellow backing colour in a shallow outer band. It removes
-every matching region, including enclosed and disconnected regions, and
-preserves distinct opaque interiors even when they share the backing hue.
-Nearby foreground colours guide antialiased edge coverage, with a soft
-colour-difference matte as a fallback for unsupported thin details. White and
-black are deliberately not treated as automatic key colours. Without this
-option, opaque input does not use automatic chroma-key removal.
-
-An alpha channel already present in the input is handled automatically and
-does not require this option. Exact source alpha is retained as one-byte
-coverage samples while the vector mask is built. A narrow run of intermediate
-coverage connecting clear and opaque pixels is treated as raster antialiasing,
-not as a translucent object: its half-coverage position is interpolated between
-pixel centres and fitted as one fully opaque vector contour. The SVG renderer
-then antialiases that curve at the display resolution, so neither an enlarged
-raster staircase nor a persistent semitransparent outline is embedded in the
-SVG. Broad or independent authored transparency is preserved with the uniform
-two-bit levels `0`, `1/3`, `2/3`, and `1`, using nested vector regions. Visible
-pixels retain their straight source RGB. Fully transparent pixels receive
-extended foreground colours, so hidden PNG RGB and a temporary preview
-background cannot enter colour segmentation or Paint fitting. Alpha owns the
-silhouette independently of those extended colours.
-The converter does not flatten transparent input onto white. Structural ink
-and Paint use the same straight-colour reference; the temporary comparison
-background is reserved for quality measurement. Lines without covered source
-support are discarded.
-Mask-owned thin silhouettes and partial-alpha Paint samples also keep their
-source RGB instead of being replaced by that background. A translucent thin
-line retains its coverage even when it connects to a distant opaque junction;
-only locally supported antialias shoulders are collapsed. A narrow bright RGB rim
-on an opaque/transparent cutout is fitted along the same curves as its alpha
-mask, so it remains a continuous edge instead of isolated Paint fragments.
-
-Constant-colour matting from a single image is inherently ambiguous when the
-foreground itself contains an inferred chroma key. Such areas can be removed
-with the backing; choose a key colour absent from the subject for reliable
-opaque-key results. Exact source alpha does not have this ambiguity.
-See [the background-removal design notes](docs/chroma-key-background-removal.md)
-for the matte model, thresholds, and research basis.
-
-Large inputs use source-resolution adaptive refinement by default. The base
-SVG is rendered and compared with the original in source-space regions that
-contain whole connected figures. Transparency or a reliably flat background
-provides separation evidence; opaque backgrounds are retained in the output.
-Overlapping figure bounds and nearby details share one region. Figures that
-cannot be separated safely or exceed `--adaptive-tile-dimension` retain their
-whole-image base model. A region is rerun at a finer scale only when its
-mean/tail DeltaE00 and missing-edge improvement justify its predicted
-partition cost and measured added SVG bytes. This rate-distortion rule is
-content-independent: compact clip-art features can receive more detail while
-expensive photographic texture is normally left at the base level. Accepted
-regions are fitted from the original pixels with a halo and clipped back into
-the base SVG across the surrounding background. A rendered boundary check
-rejects replacements that disagree with the retained base. The byte budget and
-thresholds above control the quality/size tradeoff; `--no-adaptive-refinement`
-restores single-resolution processing.
-Crop padding fits inside the available background gap, including beside a
-large separator grid. The preliminary cost estimate uses a square-root
-partition penalty. Once a candidate is encoded, acceptance and budget ordering
-use its measured quality gain per SVG byte; the partition estimate is no longer
-charged on top of those bytes. See
-[clip-art detail refinement](docs/clipart-detail-refinement.md) for the server
-rack and portrait regressions.
-Replacement boundaries are checked against a source-scale render of the
-actual base vectors, avoiding false mismatches from enlarging the coarse
-preview. A thin pale separator crossing a foreground figure in keyed input
-can be retained as one source-fitted background band, so the figure remains
-independently refinable and the separator does not change at crop joins.
-Independent refinement regions run concurrently. The job count is bounded by
-the selected worker count and by a conservative estimate derived from the
-largest crop and currently available memory; `--verbose` reports the selected
-count as `adaptive_refinement.parallel_jobs`. Small source-native crops also
-skip the otherwise redundant automatic-resolution probe.
-
-The default candidate limit is 64, allowing individual figures in an icon
-sheet to be considered without cutting them to fit a fixed grid. This limit
-controls total candidates, not CPU workers. The SVG byte budget is unchanged.
-When transparent refinements replace the entire canvas, the hidden base paths
-and their gradient definitions are omitted from the final SVG.
-
-Outline regions normally keep their filled contours, with supported portions
-of the shared boundary fitted to straight lines or circular arcs. A narrow
-dark or bright band can instead become a constant-width centre-line only when
-every measured section agrees in width and colour and the candidate covers
-the complete connected ink region. If the source ink continues beyond the
-candidate or branches into another outline, the region stays in Paint. This
-decision is automatic and requires no option. For accepted bands, both incident
-colours are reconstructed beneath the line. The existing residual line pass
-handles the remaining candidates. Diagnostic reports count accepted whole-band
-transfers in the base pass as `structural.recovered_boundary_strokes`.
-See [outline recovery and performance validation](docs/line-quality-performance.md)
-for the model's limits and comparison procedure.
-
-Band recovery also examines source contours before residual line classification
-can fragment them. It searches across the full supported band, measures both
-sharp transitions, and uses the interior ink colour rather than a single
-extreme pixel. Compatible detector fragments join only when the intervening
-source cross-sections support the same band; intentional gaps remain open.
-The recovered geometry, width and colour are retained through final output.
-Open recovery intervals use butt caps with a short original-Paint overlap,
-so rounding their ends cannot fill an authored break.
-
-Long, supported boundary and centre-line intervals are fitted to straight lines
-or circular arcs before free-form cubic fitting. The fit preserves shared graph
-endpoints and explicit stroke tangents, checks the original contour in both
-directions, and retains free curves when the geometric model does not fit.
-Neighbouring curve pieces can also be consolidated under the same source-error
-bound. Straight spans retain SVG line commands; circular fits pass through the
-existing analytic-arc normalization. This removes some raster-scale waviness,
-but does not turn variable-width Paint bands or fragmented shading into a
-single uniform stroke.
-The same regularization runs on complete shared continuity contours before
-they are sliced at colour junctions, including when a circular model needs
-more cubic serialization pieces than the original free curve. See
-[connected sphere refinement](docs/connected-sphere-refinement.md).
-
-Closed material contours are also fitted as complete, potentially rotated
-ellipses before their colour boundaries are sliced. This lets shaded buttons
-and outlined circular details share one smooth contour across multiple Paint
-regions. Both sides reuse the same projected graph nodes and curve pieces;
-later local fitting preserves the accepted ellipse. Raster-distance, winding,
-corner and graph-order checks retain free curves when an ellipse does not fit.
-Residual strokes that merely redraw a corrected ellipse are omitted when
-their colour is already present in nearby Paint; missing or transferred ink
-and branches remain eligible. Narrow colour-correction strokes can follow the
-same ellipse with their existing width, subject to the source-error bound.
-Diagnostic reports count these contours as `geometry.fitted_ellipse_contours`.
-See [ellipse contour fitting and validation](docs/ellipse-contours.md).
-Open arches and rims can also use elliptical arcs with fixed shared endpoints
-and supported tangents. Large closed ellipses allow a bounded localization
-error proportional to their span, while corner, winding and graph-order
-checks protect non-elliptical shapes. See
-[lock and gear refinement](docs/lock-gear-refinement.md).
-
-Full-resolution source data waiting for adaptive refinement remains packed as
-RGB8 when it came directly from the decoder and as Q0.16 RGB only when matte or
-chroma processing produced fractional channels. Working crops are expanded to
-`f32`, so filtering and perceptual calculations do not use fixed-point
-arithmetic.
-
-Contour fairing uses an exact spatial search to avoid scanning the entire
-reference contour for every sample. Corridor validation reuses nearby support
-without reducing sampling density or relaxing error limits. See
-[geometry performance validation](docs/geometry-performance.md) for timings
-and byte-identical SVG comparisons.
-Scalar colour comparisons also avoid temporary heap buffers, and merge-model
-candidates share their reference colour conversion. See
-[colour-processing performance](docs/color-performance.md) for additional
-measurements with the same worker count and unchanged SVG output.
-
-The default worker count leaves thermal and interactive headroom: it uses half
-of the detected logical CPUs, capped at four workers and with a minimum of one.
-`--threads N` remains an explicit override for callers that prefer a different
-throughput/resource tradeoff.
-
-Input dimensions and total area are checked from the image header before
-decoding (32,768 pixels per axis and 32 megapixels by default), and decoder
-allocations have a 512 MiB best-effort limit.
-
-`--verbose` prints the in-memory timing and complexity report to stderr for
-development; it still writes no sidecar files.
-
-`--quality-metrics` explicitly enables a second, complete in-memory SVG render
-and reports DeltaE00 and SSIM. It is disabled by default because those metrics
-are observational and never change the generated SVG. With `--verbose` they
-are included in the complete report; otherwise only the metric object is
-printed to stderr.
-
-The published Rust crate contains only the converter source and its legal
-documentation; sample images and the evaluation-only Real-ESRGAN model are
-kept outside the crate. See `THIRD_PARTY_NOTICES.md` and `sample/README.md`
-before redistributing those repository assets.
+| Option | Description (default) |
+| --- | --- |
+| `--max-dimension <PX>` | Upper bound for automatic processing size (1600). |
+| `--max-input-dimension <PX>` | Maximum source width or height (32768). |
+| `--max-input-megapixels <MP>` | Maximum source area (32). |
+| `--max-decode-mib <MIB>` | Best-effort decoder memory limit (512). |
+| `--remove-chroma-key-background` | Remove a detected red, green, blue, cyan, magenta, or yellow background. |
+| `--paint-merge-passes <N>` | Region-merge passes, from 1 to 8 (1). |
+| `--no-adaptive-refinement` | Disable source-resolution detail refinement. |
+| `--adaptive-svg-budget-mib <MIB>` | Maximum additional SVG size for refinement (32). |
+| `--threads <N>` | Worker count; 0 selects half the detected CPUs, capped at 4 and at least 1 (0). |
+| `--quality-metrics` | Report full-SVG DeltaE00/SSIM to stderr; requires `diagnostics`. |
+| `--verbose` | Print a JSON diagnostic report to stderr; requires `diagnostics`. |
 
 ## Examples
 

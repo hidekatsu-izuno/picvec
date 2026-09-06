@@ -67,9 +67,8 @@ source was authored as mathematically exact ellipses.
 
 ## Validation
 
-The regenerated [whole-sheet SVG](../sample/output/cliparts-6x6.svg) and
-[source/before/after comparison](../sample/comparison/cliparts-6x6-lock-gear.png)
-use the default quality settings with green-key removal. The before version
+The regenerated [whole-sheet SVG](../sample/output/cliparts-6x6.svg)
+uses the default quality settings with green-key removal. The before version
 already includes the preceding connected-sphere improvements.
 
 Both SVGs were rendered at the original 5016 × 5016 resolution over the source

@@ -26,58 +26,18 @@ struct Arguments {
     /// Best-effort image-decoder allocation limit in MiB.
     #[arg(long, default_value_t = 512)]
     max_decode_mib: u64,
-    #[arg(long, default_value_t = 4)]
-    smoothing_radius: u32,
     /// Remove an automatically detected red/green/blue/cyan/magenta/yellow background.
     #[arg(long)]
     remove_chroma_key_background: bool,
     /// Disable source-resolution rate-distortion refinement.
     #[arg(long)]
     no_adaptive_refinement: bool,
-    /// Largest source-space side of one adaptive refinement region.
-    #[arg(long, default_value_t = 1400)]
-    adaptive_tile_dimension: u32,
-    /// Maximum source regions evaluated at higher resolution.
-    #[arg(long, default_value_t = 64)]
-    adaptive_max_patches: usize,
     /// Maximum additional SVG size accepted for adaptive regions, in MiB.
     #[arg(long, default_value_t = Config::default().adaptive_svg_budget_bytes / (1024 * 1024))]
     adaptive_svg_budget_mib: usize,
-    /// Minimum local DeltaE00 reduction required from a refinement.
-    #[arg(long, default_value_t = 0.75)]
-    adaptive_min_perceptual_gain: f32,
-    /// Minimum predicted perceptual gain per local model cost.
-    #[arg(long, default_value_t = 2.5)]
-    adaptive_min_predicted_rate: f32,
-    /// SVG rate penalty charged per byte/source-pixel.
-    #[arg(long, default_value_t = 1.0)]
-    adaptive_complexity_penalty: f32,
-    #[arg(long, default_value_t = 24)]
-    segmentation_min_size: u32,
-    /// Base dark palette tolerance, tightened further toward black.
-    #[arg(long, default_value_t = 2.5)]
-    quantization_dark_delta_e: f32,
-    /// Base light palette tolerance, tightened further toward white.
-    #[arg(long, default_value_t = 5.0)]
-    quantization_light_delta_e: f32,
-    /// Base Paint merge error budget before lightness adjustment.
-    #[arg(long, default_value_t = 2.3)]
-    gradient_merge_error: f32,
-    /// Base solid-fill colour range, tightened in shadows and highlights.
-    #[arg(long, default_value_t = 1.5)]
-    solid_color_max_delta_e: f32,
-    /// Samples used by the inexpensive Paint coherence gate.
-    #[arg(long, default_value_t = 64)]
-    paint_primary_samples: usize,
-    /// Final-region density required to enable the Paint coherence gate.
-    #[arg(long, default_value_t = 0.015)]
-    paint_primary_min_region_density: f32,
-    /// Spatial coherence required before a normal face runs full Paint fit.
-    #[arg(long, default_value_t = 0.08)]
-    paint_primary_threshold: f32,
-    /// Spatial coherence required for a face below minimum gradient area.
-    #[arg(long, default_value_t = 0.24)]
-    paint_primary_small_threshold: f32,
+    /// Additional passes can remove more internal contours at an extra time cost (1..=8).
+    #[arg(long, default_value_t = 1)]
+    paint_merge_passes: usize,
     /// Rayon workers; zero selects min(4, half the detected CPU count).
     #[arg(long, default_value_t = 0)]
     threads: usize,
@@ -122,22 +82,8 @@ fn run() -> picvec::Result<()> {
         auto_maximum_dimension: maximum,
         remove_chroma_key_background: arguments.remove_chroma_key_background,
         adaptive_refinement: !arguments.no_adaptive_refinement,
-        adaptive_tile_dimension: arguments.adaptive_tile_dimension,
-        adaptive_max_patches: arguments.adaptive_max_patches,
         adaptive_svg_budget_bytes,
-        adaptive_min_perceptual_gain: arguments.adaptive_min_perceptual_gain,
-        adaptive_min_predicted_rate: arguments.adaptive_min_predicted_rate,
-        adaptive_complexity_penalty: arguments.adaptive_complexity_penalty,
-        smoothing_radius: arguments.smoothing_radius,
-        segmentation_min_size: arguments.segmentation_min_size,
-        quantization_dark_delta_e: arguments.quantization_dark_delta_e,
-        quantization_light_delta_e: arguments.quantization_light_delta_e,
-        gradient_merge_error: arguments.gradient_merge_error,
-        solid_color_max_delta_e: arguments.solid_color_max_delta_e,
-        paint_primary_sample_budget: arguments.paint_primary_samples,
-        paint_primary_min_region_density: arguments.paint_primary_min_region_density,
-        paint_primary_min_explained_variance: arguments.paint_primary_threshold,
-        paint_primary_small_min_explained_variance: arguments.paint_primary_small_threshold,
+        paint_merge_passes: arguments.paint_merge_passes,
         rayon_threads: arguments.threads,
         compute_quality_metrics,
         retain_diagnostics,

@@ -1358,10 +1358,29 @@ fn vectorize_processing(
         processing.width,
         processing.height,
     );
-    // Long connected colour bands can span unrelated illumination fields.
-    // Fit source-smooth bands locally and retain their shared paint keys so
-    // the continuity solver can join the resulting gradients.
-    crate::segment::split_adaptive_paint_patches(&paint_reference, &processing, &mut segmentation);
+    // Recover continuous source fields before quantizer bands are subdivided.
+    // A validated field keeps one paint owner; only unresolved faces need
+    // local patches and the more expensive per-face model search.
+    let coherent_hints = crate::gradient::reconstruct_coherent_domains(
+        &paint_reference,
+        &processing,
+        &mut segmentation,
+        config,
+    );
+    let protected = coherent_hints
+        .iter()
+        .map(Option::is_some)
+        .collect::<Vec<_>>();
+    let parents = crate::segment::split_adaptive_paint_patches_with_protected(
+        &paint_reference,
+        &processing,
+        &mut segmentation,
+        &protected,
+    );
+    let coherent_hints = parents
+        .iter()
+        .map(|&i| coherent_hints[i].clone())
+        .collect::<Vec<_>>();
     save_label_diagnostic(
         "final-labels",
         &segmentation.labels,
@@ -1375,6 +1394,7 @@ fn vectorize_processing(
         &mut checkpoint,
     );
     let (mut paints, mut gradient_report) = fit_all_without_topology(
+        &coherent_hints,
         &paint_reference,
         &processing,
         &segmentation,

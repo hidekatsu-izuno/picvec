@@ -40,7 +40,11 @@ fn tangent(curve: CurveSegment, end: bool) -> Point {
     })
 }
 
-fn supports_tangents(curves: &[CurveSegment], start: Option<Point>, end: Option<Point>) -> bool {
+pub(super) fn supports_tangents(
+    curves: &[CurveSegment],
+    start: Option<Point>,
+    end: Option<Point>,
+) -> bool {
     [start.zip(curves.first()), end.zip(curves.last())]
         .into_iter()
         .enumerate()
@@ -234,6 +238,17 @@ pub(super) fn regularize(
     start_tangent: Option<Point>,
     end_tangent: Option<Point>,
 ) -> Vec<CurveSegment> {
+    let analytic = regularize_analytic(source, baseline, tolerance, start_tangent, end_tangent);
+    super::geometry_bezier::compact(source, &analytic, tolerance, start_tangent, end_tangent)
+}
+
+fn regularize_analytic(
+    source: &[Point],
+    baseline: &[CurveSegment],
+    tolerance: f32,
+    start_tangent: Option<Point>,
+    end_tangent: Option<Point>,
+) -> Vec<CurveSegment> {
     if source.len() < 16 || baseline.is_empty() {
         return baseline.to_vec();
     }
@@ -251,27 +266,80 @@ pub(super) fn regularize(
     let mut result = Vec::new();
     let mut index = 0;
     let mut changed = false;
+    // Match existing curve joins to ordered source observations. Fitting the
+    // already-smoothed cubics instead would preserve their local wobble and
+    // reject an arc which the raster itself supports. Joins stay fixed, so
+    // untouched neighbouring pieces retain exactly the same endpoints.
+    let mut source_knots = vec![0];
+    for curve in baseline.iter().take(baseline.len() - 1) {
+        let start = *source_knots.last().unwrap();
+        let nearest = super::nearest_point(&anchored[start..], curve.end()).0 + start;
+        source_knots.push(nearest);
+    }
+    source_knots.push(anchored.len() - 1);
+    let corners = persistent_open_corners(source);
     while index < baseline.len() {
         let remaining = baseline.len() - index;
-        let mut counts = vec![remaining.min(64), 32, 16, 8, 4, 2, 1];
-        counts.retain(|&n| n <= remaining);
-        counts.dedup();
         let mut accepted = None;
-        for count in counts {
-            let samples = sample_curve_sequence(&baseline[index..index + count], 0.75);
-            let Some(candidate) = fit(
-                &samples,
-                0.5_f32.min(tolerance),
-                (index == 0).then_some(start_tangent).flatten(),
-                (index + count == baseline.len())
-                    .then_some(end_tangent)
-                    .flatten(),
-            ) else {
+        // Try every join in the bounded window: powers of two alone can skip
+        // the transition from an attached straight edge to a circular rim.
+        for count in (1..=remaining.min(64)).rev() {
+            let first = source_knots[index];
+            let last = source_knots[index + count];
+            if last < first + 2 {
+                continue;
+            }
+            let pieces = &baseline[index..index + count];
+            let mut observations = anchored[first..=last].to_vec();
+            observations[0] = pieces[0].start();
+            *observations.last_mut().unwrap() = pieces.last().unwrap().end();
+            let start_constraint = (index == 0).then_some(start_tangent).flatten();
+            let end_constraint = (index + count == baseline.len())
+                .then_some(end_tangent)
+                .flatten();
+            let mut reference_samples = None;
+            let candidate = fit(
+                &observations,
+                0.85_f32.min(tolerance),
+                start_constraint,
+                end_constraint,
+            )
+            .or_else(|| {
+                // Retain the existing path for raster staircases whose RMS
+                // fails the primitive estimator, although their already-fitted
+                // line is supported by the source corridor. Both alternatives
+                // undergo the same local source and corner checks below.
+                let samples = sample_curve_sequence(pieces, 0.5);
+                let candidate = fit(
+                    &samples,
+                    0.5_f32.min(tolerance),
+                    start_constraint,
+                    end_constraint,
+                );
+                reference_samples = Some(samples);
+                candidate
+            });
+            let Some(candidate) = candidate else {
                 continue;
             };
             // A circular model has three scalar parameters even when encoded
             // as several cubic pieces. It may replace one free cubic too.
             if candidate.len() > count + 1 {
+                continue;
+            }
+            let samples = reference_samples.unwrap_or_else(|| sample_curve_sequence(pieces, 0.5));
+            if !boundary_corridor_supported(&samples, &candidate, tolerance)
+                || !boundary_corridor_supported(&source[first..=last], &candidate, tolerance)
+            {
+                continue;
+            }
+            let rendered = sample_curve_sequence(&candidate, 0.25);
+            if corners.iter().any(|&(i, corner)| {
+                i >= first
+                    && i <= last
+                    && super::nearest_point(&rendered, corner).1
+                        > (super::nearest_point(&samples, corner).1 + 0.125).max(0.25)
+            }) {
                 continue;
             }
             accepted = Some((count, candidate));
@@ -295,7 +363,7 @@ pub(super) fn regularize(
     // Keep supported corners, including corners inside a closed chain. The
     // fixed first/last graph anchor is already retained exactly by every fit.
     let samples = sample_curve_sequence(&result, 0.25);
-    for (_, corner) in persistent_open_corners(source) {
+    for (_, corner) in corners {
         let before = super::nearest_point(&reference, corner).1;
         if super::nearest_point(&samples, corner).1 > (before + 0.125).max(0.25) {
             return baseline.to_vec();
@@ -309,6 +377,95 @@ mod tests {
     use super::*;
     use crate::geometry::{fitted_structural_open_path_data, structural_curve_path_data};
     use crate::optimize::{optimize_path, OptimizedElement};
+
+    #[test]
+    #[cfg(feature = "diagnostics")]
+    fn attached_disc_rim_becomes_arcs_without_rounding_the_attached_garment() {
+        // Native-resolution continuity master from row 3, column 1 of
+        // cliparts-6x6. The rim shares a contour with the suit, so this is
+        // deliberately not a closed circle or an isolated circular arc.
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("test-data/man-disc-contour.json")).unwrap();
+        let point = |v: &serde_json::Value| Point {
+            x: v[0].as_f64().unwrap() as f32,
+            y: v[1].as_f64().unwrap() as f32,
+        };
+        let source: Vec<_> = fixture["source"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(point)
+            .collect();
+        let baseline: Vec<_> = fixture["baseline"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| CurveSegment::Cubic {
+                start: point(&v[0]),
+                first: point(&v[1]),
+                second: point(&v[2]),
+                end: point(&v[3]),
+            })
+            .collect();
+        let result = regularize(
+            &source,
+            &baseline,
+            super::super::fairing_raster_corridor(),
+            None,
+            None,
+        );
+        let rim_stats = |curves: &[CurveSegment]| {
+            let rim: Vec<_> = curves
+                .iter()
+                .copied()
+                .filter(|c| c.start().x > 510.0 && c.end().x > 510.0)
+                .collect();
+            let path = structural_curve_path_data(&rim, false);
+            let (_, ops) = optimize_path(&path, true, true).unwrap();
+            (rim.len(), ops.arc_segments)
+        };
+        let before = rim_stats(&baseline);
+        let after = rim_stats(&result);
+        assert!(after.0 < before.0);
+        assert!(after.1 > before.1, "the rim must gain actual SVG arcs");
+        assert!(
+            result.windows(3).any(|pieces| {
+                pieces
+                    .iter()
+                    .all(|c| c.start().x > 510.0 && c.end().x > 510.0)
+                    && circle(&sample_curve_sequence(pieces, 0.25), 0.02)
+                        .is_some_and(|arc| arc.len() >= 3)
+            }),
+            "the attached rim must contain a consistent arc spanning over 90 degrees"
+        );
+        assert_eq!(result[0].start(), baseline[0].start());
+        assert_eq!(result.last().unwrap().end(), baseline.last().unwrap().end());
+        assert!(result.windows(2).all(|p| p[0].end() == p[1].start()));
+        let corridor = super::super::fairing_raster_corridor();
+        assert!(boundary_corridor_supported(&source, &result, corridor));
+        assert!(boundary_corridor_supported(
+            &sample_curve_sequence(&baseline, 0.5),
+            &result,
+            corridor
+        ));
+        let reference = sample_curve_sequence(&baseline, 0.5);
+        let rendered = sample_curve_sequence(&result, 0.25);
+        for (_, corner) in persistent_open_corners(&source) {
+            assert!(
+                super::super::nearest_point(&rendered, corner).1
+                    <= (super::super::nearest_point(&reference, corner).1 + 0.125).max(0.25)
+            );
+        }
+        let mut next_master = 0;
+        assert!(super::super::geometry_mapping::map(
+            &source,
+            &result,
+            super::super::fairing_raster_corridor(),
+            &mut next_master
+        )
+        .is_some());
+        assert_ne!(result, baseline);
+    }
 
     fn noisy_arc(start: f64, sweep: f64, closed: bool) -> Vec<Point> {
         let mut points: Vec<_> = (0..=360)

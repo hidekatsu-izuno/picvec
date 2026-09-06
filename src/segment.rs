@@ -15,6 +15,8 @@ use crate::union_find::UnionFind;
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct SegmentationSummary {
     pub graph_edges: usize,
+    pub coherent_domains: usize,
+    pub coherent_regions_removed: usize,
     pub histogram_cells: usize,
     pub palette_colours: usize,
     pub initial_regions: usize,
@@ -2620,6 +2622,8 @@ pub fn segment(image: &Raster, roles: &EdgeRoles, config: &Config) -> Segmentati
         canonical,
         regions,
         summary: SegmentationSummary {
+            coherent_domains: 0,
+            coherent_regions_removed: 0,
             graph_edges: image.width.saturating_sub(1) * image.height
                 + image.height.saturating_sub(1) * image.width,
             histogram_cells,
@@ -2785,9 +2789,18 @@ pub fn split_adaptive_paint_patches(
     boundary_image: &Raster,
     segmentation: &mut Segmentation,
 ) {
+    split_adaptive_paint_patches_with_protected(image, boundary_image, segmentation, &[]);
+}
+
+pub(crate) fn split_adaptive_paint_patches_with_protected(
+    image: &Raster,
+    boundary_image: &Raster,
+    segmentation: &mut Segmentation,
+    protected: &[bool],
+) -> Vec<usize> {
     let count = segmentation.regions.len();
     if count == 0 || image.width != segmentation.width || image.height != segmentation.height {
-        return;
+        return (0..count).collect();
     }
     let image_lab = lab_pixels(image);
     let boundary_lab = lab_pixels(boundary_image);
@@ -3007,12 +3020,16 @@ pub fn split_adaptive_paint_patches(
     };
     let mut output = vec![u32::MAX; segmentation.labels.len()];
     let mut output_paint_keys = Vec::<u32>::new();
+    let mut parents = Vec::new();
     let mut next_label = 0_u32;
     let mut split_faces = 0_usize;
     let mut added_regions = 0_usize;
     for (label, indices) in pixels.iter().enumerate() {
         let mut pieces = Vec::<Vec<usize>>::new();
-        if candidates.contains(&label) && indices.len() >= 256 {
+        if !protected.get(label).copied().unwrap_or(false)
+            && candidates.contains(&label)
+            && indices.len() >= 256
+        {
             let minimum_x = indices
                 .iter()
                 .map(|index| index % segmentation.width)
@@ -3116,12 +3133,13 @@ pub fn split_adaptive_paint_patches(
                 output[index] = next_label;
             }
             output_paint_keys.push(source_paint_keys[label]);
+            parents.push(label);
             next_label += 1;
         }
     }
     if output.contains(&u32::MAX) || added_regions == 0 {
         segmentation.summary.adaptive_patch_candidate_faces = candidate_count;
-        return;
+        return (0..count).collect();
     }
     segmentation.labels = output;
     segmentation.paint_keys = output_paint_keys;
@@ -3131,6 +3149,7 @@ pub fn split_adaptive_paint_patches(
     segmentation.summary.adaptive_patch_split_faces = split_faces;
     segmentation.summary.adaptive_patch_added_regions = added_regions;
     let _ = candidate_runs;
+    parents
 }
 
 fn percentile_f64(sorted: &[f32], quantile: f64) -> f64 {
