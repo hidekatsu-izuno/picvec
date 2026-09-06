@@ -629,6 +629,7 @@ impl AlphaMatte {
 
     /// Quantize exact source coverage to the four values representable by a
     /// two-bit alpha channel: 0, 1/3, 2/3, and 1.
+    #[cfg(test)]
     pub(crate) fn quantized_2bit(&self) -> Self {
         if matches!(self.values, AlphaValues::Packed2 { .. }) {
             return self.clone();

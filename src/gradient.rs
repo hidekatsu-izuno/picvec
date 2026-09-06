@@ -314,6 +314,30 @@ fn primary_gradient_coherence(
             }
         }
     }
+    // Smooth localized highlights need not correlate with a two-stop preset.
+    // Such a fit is not an upper bound for a multi-stop or layered gradient.
+    if !directional_only {
+        let mut residual = 0.0;
+        let mut checked = 0;
+        for &i in samples {
+            let w = source.width;
+            if i.is_multiple_of(w) || i % w + 1 == w || i < w || i + w >= source.pixels.len() {
+                continue;
+            }
+            for c in 0..3 {
+                let prediction = (source.pixels[i - 1][c]
+                    + source.pixels[i + 1][c]
+                    + source.pixels[i - w][c]
+                    + source.pixels[i + w][c])
+                    * 0.25;
+                residual += (source.pixels[i][c] - prediction).powi(2);
+            }
+            checked += 1;
+        }
+        if checked >= samples.len() / 2 && residual / total < 0.02 {
+            return 1.0;
+        }
+    }
     (best_explained / total).clamp(0.0, 1.0)
 }
 
@@ -1479,6 +1503,201 @@ fn legacy_gradient_candidate(
         .expect("at least the four default linear gradients")
 }
 
+// Estimate the shading direction from native derivatives even in a narrow
+// colour band whose sampled values reveal little of the transverse slope.
+fn differential_linear_paint(source: &Raster, samples: &[usize]) -> Option<Paint> {
+    let mut dx = [0.0_f64; 3];
+    let mut dy = [0.0_f64; 3];
+    let mut count = 0;
+    for &i in samples {
+        let w = source.width;
+        if i.is_multiple_of(w) || i % w + 1 == w || i < w || i + w >= source.pixels.len() {
+            continue;
+        }
+        let p = source.pixels[i];
+        let l = source.pixels[i - 1];
+        let r = source.pixels[i + 1];
+        let t = source.pixels[i - w];
+        let b = source.pixels[i + w];
+        if (0..3).any(|c| {
+            (r[c] - 2.0 * p[c] + l[c])
+                .abs()
+                .max((b[c] - 2.0 * p[c] + t[c]).abs())
+                > 3.0 / 255.0
+                || (r[c] - l[c]).abs().max((b[c] - t[c]).abs()) > 16.0 / 255.0
+        }) {
+            continue;
+        }
+        for c in 0..3 {
+            dx[c] += 0.5 * (r[c] - l[c]) as f64;
+            dy[c] += 0.5 * (b[c] - t[c]) as f64;
+        }
+        count += 1;
+    }
+    if count < 16 {
+        return None;
+    }
+    for c in 0..3 {
+        dx[c] /= count as f64;
+        dy[c] /= count as f64;
+    }
+    let xx = dx.iter().map(|v| v * v).sum::<f64>();
+    let yy = dy.iter().map(|v| v * v).sum::<f64>();
+    let xy = (0..3).map(|c| dx[c] * dy[c]).sum::<f64>();
+    if xx + yy < 1e-10 {
+        return None;
+    }
+    let angle = 0.5 * (2.0 * xy).atan2(xx - yy);
+    let direction = (angle.cos() as f32, angle.sin() as f32);
+    let (start, end) = fitted_linear_geometry(samples, source.width, direction);
+    let mean = mean_color(source, samples);
+    let mx = samples
+        .iter()
+        .map(|i| (i % source.width) as f64)
+        .sum::<f64>()
+        / samples.len() as f64;
+    let my = samples
+        .iter()
+        .map(|i| (i / source.width) as f64)
+        .sum::<f64>()
+        / samples.len() as f64;
+    let stops = [start, end]
+        .into_iter()
+        .enumerate()
+        .map(|(j, p)| ColorStop {
+            offset: j as f64,
+            color: [0, 1, 2].map(|c| {
+                (mean[c] as f64 + (p.x as f64 - mx) * dx[c] + (p.y as f64 - my) * dy[c])
+                    .clamp(0.0, 1.0)
+            }),
+        })
+        .collect();
+    Some(Paint::Linear {
+        preset: LinearPreset::Fitted,
+        start,
+        end,
+        stops,
+    })
+}
+
+// Recover an ellipse centre from source gradient normals. Unlike bounding-box
+// presets, this can describe a highlight whose centre lies outside its face.
+fn fitted_radial_geometry(source: &Raster, samples: &[usize]) -> Option<(Point, Point)> {
+    let b = bounds(samples, source.width);
+    let sx = (b.max_x - b.min_x).max(1.0);
+    let sy = (b.max_y - b.min_y).max(1.0);
+    let mut normal = vec![vec![0.0_f64; 3]; 3];
+    let mut target = vec![0.0_f64; 3];
+    let mut count = 0;
+    for i in sampled_indices(samples, 1024) {
+        let x = i % source.width;
+        let y = i / source.width;
+        if x == 0 || x + 1 == source.width || y == 0 || y + 1 == source.height {
+            continue;
+        }
+        for c in 0..3 {
+            let p = source.pixels[i][c];
+            let left = source.pixels[i - 1][c];
+            let right = source.pixels[i + 1][c];
+            let top = source.pixels[i - source.width][c];
+            let bottom = source.pixels[i + source.width][c];
+            if (right - 2.0 * p + left)
+                .abs()
+                .max((bottom - 2.0 * p + top).abs())
+                > 3.0 / 255.0
+                || (right - left).abs().max((bottom - top).abs()) > 16.0 / 255.0
+            {
+                continue;
+            }
+            let gx = (right - left) as f64 * sx as f64;
+            let gy = (bottom - top) as f64 * sy as f64;
+            let nx = ((x as f32 - b.min_x) / sx) as f64;
+            let ny = ((y as f32 - b.min_y) / sy) as f64;
+            let row = [gy * nx, -gy, gx];
+            for j in 0..3 {
+                target[j] += row[j] * gx * ny;
+                for k in 0..3 {
+                    normal[j][k] += row[j] * row[k];
+                }
+            }
+            count += 1;
+        }
+    }
+    if count < 48 {
+        return None;
+    }
+    let solution = solve_system(normal, target);
+    let k = solution[0];
+    let cx = solution[1] / k;
+    let cy = solution[2];
+    if !(0.01..=100.0).contains(&k) || !(-8.0..=9.0).contains(&cx) || !(-8.0..=9.0).contains(&cy) {
+        return None;
+    }
+    let center = Point {
+        x: b.min_x + sx * cx as f32,
+        y: b.min_y + sy * cy as f32,
+    };
+    let mut radius = Point {
+        x: sx,
+        y: sy * k.sqrt() as f32,
+    };
+    let scale = samples
+        .iter()
+        .map(|&i| {
+            (((i % source.width) as f32 - center.x) / radius.x)
+                .hypot(((i / source.width) as f32 - center.y) / radius.y)
+        })
+        .fold(0.0_f32, f32::max)
+        .max(0.01);
+    radius.x *= scale;
+    radius.y *= scale;
+    Some((center, radius))
+}
+
+pub(crate) fn fit_alpha_field(source: &Raster, pixels: &[usize]) -> Option<Paint> {
+    let mut samples = sampled_indices(pixels, 2048);
+    samples.sort_unstable();
+    let mut best = Paint::Solid {
+        color: mean_color(source, &samples),
+    };
+    let mut error = paint_rgb_mse(source, &samples, &best);
+    if error < 1.0 / (255.0 * 255.0) {
+        return Some(best);
+    }
+    for direction in [(1.0, 0.0), (0.0, 1.0)]
+        .into_iter()
+        .chain(fitted_linear_directions(source, &samples))
+    {
+        let paint = coherent::profile_paint(source, pixels, direction, 5);
+        let e = paint_rgb_mse(source, &samples, &paint);
+        if e < error {
+            best = paint;
+            error = e;
+        }
+    }
+    let labs = samples
+        .iter()
+        .map(|&i| rgb_to_lab(source.pixels[i]))
+        .collect::<Vec<_>>();
+    if let Some((paint, _)) = office_gradient_candidate_with_labs(
+        source,
+        &labs,
+        &samples,
+        bounds(&samples, source.width),
+        5,
+    ) {
+        if paint_rgb_mse(source, &samples, &paint) < error {
+            best = paint;
+        }
+    }
+    let errors = samples
+        .iter()
+        .map(|&i| (source.pixels[i][0] - paint_at(&best, i, source.width)[0]).abs())
+        .collect::<Vec<_>>();
+    let mean = errors.iter().sum::<f32>() / errors.len().max(1) as f32;
+    (mean <= 2.0 / 255.0 && percentile(errors, 0.90) <= 4.0 / 255.0).then_some(best)
+}
+
 fn office_gradient_candidate(
     source: &Raster,
     source_labs: &[Lab],
@@ -1545,14 +1764,23 @@ fn office_gradient_candidate_with_labs(
             push_linear(LinearPreset::Fitted, start, end);
         }
     }
-    for origin in [
+    let mut radial_models = [
         RadialOrigin::Center,
         RadialOrigin::TopLeft,
         RadialOrigin::TopRight,
         RadialOrigin::BottomLeft,
         RadialOrigin::BottomRight,
-    ] {
+    ]
+    .into_iter()
+    .map(|origin| {
         let (center, radius) = radial_geometry(origin, region_bounds);
+        (origin, center, radius)
+    })
+    .collect::<Vec<_>>();
+    if let Some((center, radius)) = fitted_radial_geometry(source, samples) {
+        radial_models.push((RadialOrigin::Fitted, center, radius));
+    }
+    for (origin, center, radius) in radial_models {
         let parameters: Vec<f32> = samples
             .iter()
             .map(|&index| radial_parameter(index, source.width, center, radius))
@@ -1765,6 +1993,47 @@ fn small_region_office_required_gain(
     (4.0 * minimum_improvement) * minimum_gradient_area.max(1) as f32 / region_area.max(1) as f32
 }
 
+// Quantizer bands constrain colour, not the direction of shading. Include a
+// short source-smooth halo when estimating geometry so an almost iso-colour
+// strip does not flatten a gradient normal to its contour.
+fn smooth_fit_support(source: &Raster, samples: &[usize]) -> Vec<usize> {
+    let w = source.width;
+    let h = source.height;
+    let mut support = samples.to_vec();
+    for i in sampled_indices(samples, 512) {
+        let x = i % w;
+        let y = i / w;
+        for (dx, dy) in [(-1_isize, 0_isize), (1, 0), (0, -1), (0, 1)] {
+            let mut previous = source.pixels[i];
+            let mut slope = None::<[f32; 3]>;
+            for distance in 1..=8 {
+                let nx = x as isize + dx * distance;
+                let ny = y as isize + dy * distance;
+                if nx < 0 || ny < 0 || nx >= w as isize || ny >= h as isize {
+                    break;
+                }
+                let j = ny as usize * w + nx as usize;
+                let value = source.pixels[j];
+                let delta = [0, 1, 2].map(|c| value[c] - previous[c]);
+                if delta.iter().any(|v| v.abs() > 8.0 / 255.0)
+                    || slope
+                        .is_some_and(|old| (0..3).any(|c| (delta[c] - old[c]).abs() > 3.0 / 255.0))
+                {
+                    break;
+                }
+                if distance % 4 == 0 {
+                    support.push(j);
+                }
+                previous = value;
+                slope = Some(delta);
+            }
+        }
+    }
+    support.sort_unstable();
+    support.dedup();
+    support
+}
+
 #[allow(clippy::too_many_arguments)]
 fn fit_region_samples(
     label: usize,
@@ -1772,7 +2041,7 @@ fn fit_region_samples(
     source_labs: &[Lab],
     samples: &[usize],
     area: usize,
-    region_bounds: Bounds,
+    _region_bounds: Bounds,
     canonical_solid: [f32; 3],
     canonical_solid_lab: Lab,
     directional_only: bool,
@@ -1798,6 +2067,9 @@ fn fit_region_samples(
             .ok()
             .and_then(|value| value.parse::<usize>().ok())
             == Some(label);
+    if trace {
+        eprintln!("paint gates label={label} area={area} samples={} solid={solid_error:?} directional={directional_only}",samples.len());
+    }
     let small_region = area < config.minimum_gradient_area as usize;
     let tone_scale = config.tonal_detail_scale(rgb_to_lab(solid_color).l);
     let minimum_improvement = 0.25 * 2.3 * tone_scale;
@@ -1829,7 +2101,31 @@ fn fit_region_samples(
     // low-chroma shading: on light monochrome artwork it can make a visibly
     // modelled ramp look flat after vectorization. The improvement and
     // complexity gates below still prevent gratuitous SVG gradients.
-    if perceptual_range <= config.solid_color_max_delta_e * tone_scale {
+    let support = if directional_only {
+        samples.to_vec()
+    } else {
+        smooth_fit_support(source, samples)
+    };
+    let support_bounds = bounds(&support, source.width);
+    let differential = (!directional_only)
+        .then(|| differential_linear_paint(source, samples))
+        .flatten();
+    let smooth_ramp = !directional_only
+        && (perceptual_range > 0.25 || solid_error.mean > 0.25)
+        && primary_gradient_coherence(source, &support, support_bounds, false, 256) >= 0.8;
+    let differential_stats = differential
+        .as_ref()
+        .map(|paint| paint_stats_against_sample_labs(&sample_labs, samples, source.width, paint));
+    let differential_gain = differential_stats.is_some_and(|stats| {
+        solid_error.mean - stats.mean >= 0.115 && stats.percentile <= solid_error.percentile
+    });
+    if trace {
+        eprintln!("paint range label={label} range={perceptual_range} ramp={smooth_ramp} differential={differential_stats:?}");
+    }
+    if perceptual_range <= config.solid_color_max_delta_e * tone_scale
+        && !smooth_ramp
+        && !differential_gain
+    {
         return (
             Paint::Solid { color: solid_color },
             solid_error.mean,
@@ -1840,33 +2136,56 @@ fn fit_region_samples(
     // the source-fitted direction and the Office presets had different
     // promotion thresholds, so a less accurate radial preset could replace
     // Solid after a better continuously rotated linear fit was rejected.
+    let support_labs = support.iter().map(|&i| source_labs[i]).collect::<Vec<_>>();
     let mut candidates = vec![(Paint::Solid { color: solid_color }, solid_error)];
     if !small_region {
         candidates.push(legacy_gradient_candidate(
             source,
             source_labs,
-            &sample_labs,
-            samples,
-            region_bounds,
+            &support_labs,
+            &support,
+            support_bounds,
             directional_only,
         ));
     }
 
     let office_candidate = office_gradient_candidate_with_labs(
         source,
-        &sample_labs,
-        samples,
-        region_bounds,
+        &support_labs,
+        &support,
+        support_bounds,
         config.maximum_gradient_stops,
     )
     .filter(|(paint, _)| !directional_only || matches!(paint, Paint::Linear { .. }));
     if let Some(candidate) = office_candidate.clone() {
         candidates.push(candidate);
     }
-    let (selected, selected_stats) = candidates
+    if let Some(paint) = differential {
+        candidates.push((paint, differential_stats.unwrap()));
+    }
+    for (paint, stats) in &mut candidates {
+        *stats = paint_stats_against_sample_labs(&sample_labs, samples, source.width, paint);
+    }
+    let (mut selected, mut selected_stats) = candidates
         .into_iter()
         .min_by(|left, right| objective(left.1).total_cmp(&objective(right.1)))
         .expect("Solid always supplies one Paint candidate");
+    if !directional_only && area >= 256 && selected_stats.mean > 0.6 {
+        let (paint, stats) = fit_layered_residual_paint(
+            source,
+            samples,
+            bounds(samples, source.width),
+            selected.clone(),
+            3,
+        );
+        if objective(stats) < objective(selected_stats)
+            && stats.percentile <= selected_stats.percentile
+        {
+            selected = paint;
+            selected_stats = stats;
+        }
+    }
+
     if trace {
         eprintln!(
             "paint trace label={label} area={area} samples={} solid={solid_error:?} selected={selected:?} selected_stats={selected_stats:?} office={office_candidate:?}",
@@ -2518,26 +2837,71 @@ fn fit_layered_residual_paint(
     }
 
     let base_stats = paint_stats(source, samples, &base);
+    let mut residual_sum = [0.0_f64; 3];
+    let mut residual_power = 0.0_f64;
+    for &i in samples {
+        let predicted = paint_at(&base, i, source.width);
+        for c in 0..3 {
+            let residual = (source.pixels[i][c] - predicted[c]) as f64;
+            residual_sum[c] += residual;
+            residual_power += residual * residual;
+        }
+    }
+    let constant_power = residual_sum.iter().map(|v| v * v).sum::<f64>() / samples.len() as f64;
+    if residual_power - constant_power < 0.25 * residual_power {
+        // A uniform colour offset is not a local highlight. Radial patches
+        // would turn an otherwise smooth field into artificial bumps.
+        return (base, base_stats);
+    }
     let original_base = base.clone();
     let mut current = base;
     let mut current_mse = paint_rgb_mse(source, samples, &current);
     let mut overlays = Vec::<PaintOverlay>::new();
-    for _ in 0..maximum_layers.min(3) {
-        let mut ranked = samples
-            .iter()
-            .copied()
-            .map(|index| {
-                let predicted = paint_at(&current, index, source.width);
-                let error = (0..3)
-                    .map(|channel| {
-                        let difference = source.pixels[index][channel] - predicted[channel];
-                        difference * difference
+    for _ in 0..maximum_layers.min(8) {
+        // Choose a supported residual cluster, not a single boundary outlier.
+        // Signed sums distinguish a coherent highlight from alternating noise.
+        let mut cells = HashMap::<(usize, usize), ([f32; 3], usize, Vec<usize>)>::new();
+        for &index in samples {
+            let predicted = paint_at(&current, index, source.width);
+            let x = ((index % source.width) as f32 - region_bounds.min_x) / span_x;
+            let y = ((index / source.width) as f32 - region_bounds.min_y) / span_y;
+            let cell = cells
+                .entry(((x * 8.0) as usize, (y * 8.0) as usize))
+                .or_default();
+            for (c, sum) in cell.0.iter_mut().enumerate() {
+                *sum += source.pixels[index][c] - predicted[c];
+            }
+            cell.1 += 1;
+            cell.2.push(index);
+        }
+        let mut ranked = cells
+            .into_values()
+            .map(|(sum, n, indices)| {
+                let score = sum.iter().map(|v| v * v).sum::<f32>() / n as f32;
+                let mx = indices
+                    .iter()
+                    .map(|i| (i % source.width) as f32)
+                    .sum::<f32>()
+                    / n as f32;
+                let my = indices
+                    .iter()
+                    .map(|i| (i / source.width) as f32)
+                    .sum::<f32>()
+                    / n as f32;
+                let index = indices
+                    .into_iter()
+                    .min_by(|&a, &b| {
+                        let distance = |i: usize| {
+                            ((i % source.width) as f32 - mx).powi(2)
+                                + ((i / source.width) as f32 - my).powi(2)
+                        };
+                        distance(a).total_cmp(&distance(b)).then(a.cmp(&b))
                     })
-                    .sum::<f32>();
-                (index, error)
+                    .unwrap();
+                (index, score)
             })
             .collect::<Vec<_>>();
-        ranked.sort_by(|left, right| right.1.total_cmp(&left.1));
+        ranked.sort_by(|left, right| right.1.total_cmp(&left.1).then(left.0.cmp(&right.0)));
         let mut centres = Vec::<usize>::new();
         for (index, _) in ranked {
             let x = (index % source.width) as f32;
@@ -2548,7 +2912,7 @@ fn fit_layered_residual_paint(
                 ((x - ex) / span_x).hypot((y - ey) / span_y) >= 0.16
             }) {
                 centres.push(index);
-                if centres.len() == 1 {
+                if centres.len() == if maximum_layers > 3 { 4 } else { 2 } {
                     break;
                 }
             }
@@ -2560,7 +2924,7 @@ fn fit_layered_residual_paint(
                 x: (centre_index % source.width) as f32,
                 y: (centre_index / source.width) as f32,
             };
-            for radius_scale in [0.24_f32, 0.46, 0.72] {
+            for radius_scale in [0.08_f32, 0.12, 0.24, 0.46, 0.72] {
                 let radius = Point {
                     x: (span_x * radius_scale).max(6.0),
                     y: (span_y * radius_scale).max(6.0),
@@ -2628,7 +2992,9 @@ fn fit_layered_residual_paint(
         };
         // Require a material residual reduction so layers do not accumulate
         // merely to chase rounding noise in already coherent Paint.
-        if candidate_mse > current_mse * 0.92 || current_mse - candidate_mse < 1e-7 {
+        if candidate_mse > current_mse * if maximum_layers > 3 { 0.99 } else { 0.92 }
+            || current_mse - candidate_mse < 1e-7
+        {
             break;
         }
         current = Paint::Layered {
@@ -3974,6 +4340,33 @@ struct HarmonizeProposal {
     boundary_count: usize,
 }
 
+// A group average can hide a flattened highlight on one part of a face.
+// Check source colour error locally before exchanging that fit for continuity.
+fn preserves_local_shading(
+    source: &Raster,
+    samples: &[usize],
+    before: &Paint,
+    after: &Paint,
+) -> bool {
+    let mut tiles = HashMap::<(usize, usize), (f32, usize)>::new();
+    for &i in samples {
+        let old = paint_at(before, i, source.width);
+        let new = paint_at(after, i, source.width);
+        let difference = (0..3)
+            .map(|c| (new[c] - source.pixels[i][c]).abs() - (old[c] - source.pixels[i][c]).abs())
+            .sum::<f32>()
+            / 3.0;
+        let entry = tiles
+            .entry((i % source.width / 32, i / source.width / 32))
+            .or_default();
+        entry.0 += difference;
+        entry.1 += 1;
+    }
+    tiles
+        .values()
+        .all(|&(difference, n)| n < 8 || difference / n as f32 <= 0.5 / 255.0)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn harmonize_adjacent_paints(
     source: &Raster,
@@ -3983,8 +4376,9 @@ fn harmonize_adjacent_paints(
     paint_boundaries: &[SmoothPaintBoundary],
     paints: &mut [Paint],
     errors: &mut [f32],
+    hints: &[Option<Paint>],
     config: &Config,
-) -> usize {
+) -> (usize, Vec<usize>) {
     let background = background_label(segmentation);
     let boundaries: Vec<&SmoothPaintBoundary> = paint_boundaries
         .iter()
@@ -4008,6 +4402,9 @@ fn harmonize_adjacent_paints(
         .collect();
     let mut owner: Vec<usize> = (0..count).collect();
     let mut accepted = 0_usize;
+    // Owners only gain members during this solve. An unchanged owner pair
+    // therefore has identical samples, paints and boundary constraints.
+    let mut evaluated = HashSet::new();
     for _ in 0..3 {
         let mut grouped =
             std::collections::BTreeMap::<(usize, usize), Vec<&SmoothPaintBoundary>>::new();
@@ -4023,6 +4420,9 @@ fn harmonize_adjacent_paints(
         }
         let mut proposals: Vec<HarmonizeProposal> = grouped
             .into_iter()
+            .filter(|((left, right), _)| {
+                evaluated.insert((*left, members[left].len(), *right, members[right].len()))
+            })
             .collect::<Vec<_>>()
             .into_par_iter()
             .filter_map(|((left_owner, right_owner), shared)| {
@@ -4039,13 +4439,43 @@ fn harmonize_adjacent_paints(
                     union_samples.extend_from_slice(&label_samples[label]);
                 }
                 union_samples = sampled_indices(&union_samples, 8192);
+                let fitting_samples = if union_labels
+                    .iter()
+                    .any(|&label| hints.get(label).is_some_and(Option::is_some))
+                {
+                    // A narrow quantizer band must not carry the same fitting
+                    // weight as the large smooth face next to it.
+                    let total = union_labels
+                        .iter()
+                        .map(|&label| region_paint_indices[label].len())
+                        .sum::<usize>();
+                    union_labels
+                        .iter()
+                        .flat_map(|&label| {
+                            let indices = &region_paint_indices[label];
+                            sampled_indices(indices, (8192 * indices.len() / total.max(1)).max(1))
+                        })
+                        .collect::<Vec<_>>()
+                } else {
+                    union_samples.clone()
+                };
                 let (candidate, _) = office_gradient_candidate(
                     source,
                     source_labs,
-                    &union_samples,
+                    &fitting_samples,
                     bounds(&union_samples, source.width),
                     config.maximum_gradient_stops,
                 )?;
+                if union_labels.iter().any(|&label| {
+                    !preserves_local_shading(
+                        source,
+                        &label_samples[label],
+                        &paints[label],
+                        &candidate,
+                    )
+                }) {
+                    return None;
+                }
                 let mut baseline_errors = Vec::<f32>::new();
                 for &label in &union_labels {
                     baseline_errors.extend(errors_for_indices(
@@ -4142,7 +4572,7 @@ fn harmonize_adjacent_paints(
             break;
         }
     }
-    accepted
+    (accepted, owner)
 }
 
 #[allow(dead_code)]
@@ -4846,7 +5276,9 @@ fn couple_adjacent_paints(
         }
         let left = boundary.left;
         let right = boundary.right;
-        if left == background
+        if matches!(paints[left], Paint::Layered { .. })
+            || matches!(paints[right], Paint::Layered { .. })
+            || left == background
             || right == background
             || region_paint_indices[left].is_empty()
             || region_paint_indices[right].is_empty()
@@ -5183,7 +5615,14 @@ fn couple_adjacent_paints(
             has_patch_boundary,
             config,
         );
-        let accepted = mean_regression <= maximum_mean_regression
+        let accepted = members.iter().enumerate().all(|(position, &member)| {
+            preserves_local_shading(
+                source,
+                &data_samples[member],
+                &paint_snapshot[member],
+                &proposed[position],
+            )
+        }) && mean_regression <= maximum_mean_regression
             && p90_regression <= maximum_p90_regression
             && before_p90 - after_p90 >= 0.50
             && after_p90 <= 2.3_f32.max(0.80 * before_p90)
@@ -5660,6 +6099,24 @@ pub(crate) fn fit_all_without_topology(
     )
 }
 
+fn smooth_native_paint_sample(source: &Raster, boundary_source: &Raster, i: usize) -> bool {
+    let w = source.width;
+    if i.is_multiple_of(w) || i % w + 1 == w || i < w || i + w >= source.pixels.len() {
+        return false;
+    }
+    (0..3).all(|c| {
+        let p = boundary_source.pixels[i][c];
+        (source.pixels[i][c] - p).abs() <= 2.0 / 255.0
+            && [i - 1, i + 1, i - w, i + w]
+                .iter()
+                .all(|&j| (boundary_source.pixels[j][c] - p).abs() <= 8.0 / 255.0)
+            && [(i - 1, i + 1), (i - w, i + w)].iter().all(|&(a, b)| {
+                (boundary_source.pixels[a][c] + boundary_source.pixels[b][c] - 2.0 * p).abs()
+                    <= 3.0 / 255.0
+            })
+    })
+}
+
 fn fit_all_internal(
     source: &Raster,
     boundary_source: &Raster,
@@ -5675,7 +6132,11 @@ fn fit_all_internal(
     let mut region_paint_indices = vec![Vec::<usize>::new(); segmentation.regions.len()];
     for (index, &label) in segmentation.labels.iter().enumerate() {
         region_indices[label as usize].push(index);
-        if segmentation.paint_samples[index] {
+        if segmentation.paint_samples[index]
+            || (!strong_branches.dark[index]
+                && segmentation.regions[label as usize].area >= 64
+                && smooth_native_paint_sample(source, boundary_source, index))
+        {
             region_paint_indices[label as usize].push(index);
         }
     }
@@ -5712,8 +6173,27 @@ fn fit_all_internal(
         .enumerate()
         .map(|(label, (indices, paint_indices))| {
             if let Some(Some(paint)) = hints.get(label) {
-                let stats = paint_stats_against_labs(&source_labs, indices, source.width, paint);
-                return (paint.clone(), stats.mean, RegionFitWork::CoherentField);
+                let samples = sampled_indices(
+                    if paint_indices.is_empty() {
+                        indices
+                    } else {
+                        paint_indices
+                    },
+                    2048,
+                );
+                let stats = paint_stats_against_labs(&source_labs, &samples, source.width, paint);
+                let (paint, stats) = if stats.mean > 0.6 {
+                    fit_layered_residual_paint(
+                        source,
+                        &samples,
+                        bounds(&samples, source.width),
+                        paint.clone(),
+                        8,
+                    )
+                } else {
+                    (paint.clone(), stats)
+                };
+                return (paint, stats.mean, RegionFitWork::CoherentField);
             }
             let strong_dark = indices
                 .iter()
@@ -5738,7 +6218,9 @@ fn fit_all_internal(
                 paint_indices
                     .iter()
                     .copied()
-                    .filter(|&index| strong_branches.bright[index])
+                    .filter(|&index| {
+                        strong_branches.bright[index] || !segmentation.paint_samples[index]
+                    })
                     .collect()
             } else {
                 Vec::new()
@@ -5802,11 +6284,22 @@ fn fit_all_internal(
         save_paint_kinds(&format!("{prefix}-initial.json"), &paints);
         save_paint_details(&format!("{prefix}-initial-details.json"), &paints);
     }
+    let boundary_labs = lab_pixels(boundary_source);
     let paint_boundaries = smooth_paint_boundaries(boundary_source, segmentation, 2, true)
         .into_iter()
-        .filter(|b| {
-            hints.get(b.left).is_none_or(Option::is_none)
-                && hints.get(b.right).is_none_or(Option::is_none)
+        .filter_map(|mut boundary| {
+            let has_field = hints.get(boundary.left).is_some_and(Option::is_some)
+                || hints.get(boundary.right).is_some_and(Option::is_some);
+            if has_field {
+                // A successful interior fit does not guarantee agreement with
+                // the neighbouring paint. Reconcile source-smooth interfaces,
+                // while retaining actual (including blurred) material steps.
+                measure_boundary_material_step(&boundary_labs, segmentation, &mut boundary);
+                if !boundary_is_smooth(&boundary) {
+                    return None;
+                }
+            }
+            Some(boundary)
         })
         .collect::<Vec<_>>();
     #[cfg(feature = "diagnostics")]
@@ -5831,7 +6324,7 @@ fn fit_all_internal(
         }
     }
     let harmonize_started = std::time::Instant::now();
-    let coupled = harmonize_adjacent_paints(
+    let (coupled, harmonized_owners) = harmonize_adjacent_paints(
         source,
         &source_labs,
         segmentation,
@@ -5839,6 +6332,7 @@ fn fit_all_internal(
         &paint_boundaries,
         &mut paints,
         &mut errors,
+        hints,
         config,
     );
     if cfg!(feature = "diagnostics") && config.retain_diagnostics {
@@ -5853,6 +6347,24 @@ fn fit_all_internal(
         save_paint_details(&format!("{prefix}-harmonized-details.json"), &paints);
     }
     let coupling_started = std::time::Instant::now();
+    // Keep a reconciled field group indivisible. Pairwise adjustment of just
+    // one member would reintroduce the seam removed by harmonization.
+    let mut group_sizes = vec![0; paints.len()];
+    let mut field_groups = vec![false; paints.len()];
+    for (label, &owner) in harmonized_owners.iter().enumerate() {
+        group_sizes[owner] += 1;
+        field_groups[owner] |= hints.get(label).is_some_and(Option::is_some);
+    }
+    let coupling_boundaries = paint_boundaries
+        .iter()
+        .filter(|boundary| {
+            [boundary.left, boundary.right].iter().all(|&label| {
+                let owner = harmonized_owners[label];
+                !field_groups[owner] || group_sizes[owner] == 1
+            })
+        })
+        .cloned()
+        .collect::<Vec<_>>();
     let mut locally_coupled = 0_usize;
     // A second disjoint-pair pass lets continuity propagate to the next seam
     // without ever turning a whole shading component into one global fit.
@@ -5863,7 +6375,7 @@ fn fit_all_internal(
             segmentation,
             &region_indices,
             &region_paint_indices,
-            &paint_boundaries,
+            &coupling_boundaries,
             &mut paints,
             &mut errors,
             config,
@@ -5973,6 +6485,107 @@ mod tests {
     use super::*;
 
     #[test]
+    fn primary_gate_keeps_smooth_local_highlights() {
+        let source = Raster::new(
+            128,
+            128,
+            (0..128 * 128)
+                .map(|i| {
+                    let r =
+                        (((i % 128) as f32 - 35.0) / 12.0).hypot(((i / 128) as f32 - 24.0) / 8.0);
+                    [0.5 + 0.3 * (-r * r).exp(); 3]
+                })
+                .collect(),
+        );
+        let samples = (0..128 * 128).collect::<Vec<_>>();
+        assert!(
+            primary_gradient_coherence(&source, &samples, bounds(&samples, 128), false, 256) > 0.95
+        );
+    }
+
+    #[test]
+    fn seam_adjustment_cannot_hide_local_colour_loss_in_a_group_average() {
+        let source = Raster::new(
+            128,
+            32,
+            (0..128 * 32)
+                .map(|i| [0.3 + 0.4 * (i % 128) as f32 / 127.0; 3])
+                .collect(),
+        );
+        let samples = (0..128 * 32).collect::<Vec<_>>();
+        let before = Paint::Solid { color: [0.3; 3] };
+        let after = Paint::Solid { color: [0.5; 3] };
+        assert!(
+            paint_rgb_mse(&source, &samples, &after) < paint_rgb_mse(&source, &samples, &before)
+        );
+        assert!(!preserves_local_shading(&source, &samples, &before, &after));
+        let exact = differential_linear_paint(&source, &samples).unwrap();
+        assert!(preserves_local_shading(&source, &samples, &before, &exact));
+    }
+
+    #[test]
+    fn narrow_isocolour_band_keeps_the_source_slope() {
+        let source = Raster::new(
+            128,
+            128,
+            (0..128 * 128)
+                .map(|i| [0.2 + 0.001 * (i % 128 + i / 128) as f32; 3])
+                .collect(),
+        );
+        let samples = (0..128 * 128)
+            .filter(|i| (100..108).contains(&(i % 128 + i / 128)))
+            .collect::<Vec<_>>();
+        let labs = lab_pixels(&source);
+        let mean = mean_color(&source, &samples);
+        let (paint, _, _) = fit_region_samples(
+            0,
+            &source,
+            &labs,
+            &samples,
+            samples.len(),
+            bounds(&samples, 128),
+            mean,
+            rgb_to_lab(mean),
+            false,
+            true,
+            &Config::default(),
+        );
+        assert!(matches!(paint, Paint::Linear { .. }), "{paint:?}");
+        assert!(paint_rgb_mse(&source, &samples, &paint) < 1e-7);
+        // A real material step is never included in the fitting halo.
+        let mut stepped = source.clone();
+        for i in 0..128 * 128 {
+            if i % 128 >= 64 {
+                stepped.pixels[i] = [0.8; 3];
+            }
+        }
+        let support = smooth_fit_support(&stepped, &[60 * 128 + 62; 32]);
+        assert!(support.iter().all(|i| i % 128 < 64));
+    }
+
+    #[test]
+    fn radial_normals_recover_a_highlight_centre_outside_the_face() {
+        let source = Raster::new(
+            128,
+            128,
+            (0..128 * 128)
+                .map(|i| {
+                    let r = (((i % 128) as f32 - 64.0) / 110.0)
+                        .hypot(((i / 128) as f32 - 150.0) / 130.0);
+                    [0.3 + 0.3 * r; 3]
+                })
+                .collect(),
+        );
+        let samples = (0..128 * 128)
+            .filter(|i| (20..80).contains(&(i / 128)) && (20..108).contains(&(i % 128)))
+            .collect::<Vec<_>>();
+        let (center, radius) = fitted_radial_geometry(&source, &samples).unwrap();
+        assert!((center.x - 64.0).abs() < 0.5, "{center:?}");
+        assert!((center.y - 150.0).abs() < 0.5, "{center:?}");
+        assert!((radius.x / radius.y - 110.0 / 130.0).abs() < 0.01);
+    }
+
+    #[test]
     fn cached_merge_observations_keep_both_error_statistics_exact() {
         let source = Raster::new(
             8,
@@ -6070,6 +6683,125 @@ mod tests {
                 },
             ],
             summary: crate::segment::SegmentationSummary::default(),
+        }
+    }
+
+    #[test]
+    fn smooth_highlight_samples_survive_a_quantized_ridge_mask() {
+        let source = Raster::new(
+            128,
+            64,
+            (0..128 * 64)
+                .map(|i| {
+                    let r =
+                        (((i % 128) as f32 - 90.0) / 12.0).hypot(((i / 128) as f32 - 32.0) / 12.0);
+                    [0.5 + 0.3 * (-r * r).exp(); 3]
+                })
+                .collect(),
+        );
+        let mut segmentation = two_face_segmentation(&source);
+        segmentation.canonical = Raster::blank(128, 64, [0.5; 3]);
+        for (i, sample) in segmentation.paint_samples.iter_mut().enumerate() {
+            *sample = source.pixels[i][0] < 0.505;
+        }
+        let branches = crate::ridge::StrongRidgeBranches {
+            dark: vec![false; 128 * 64],
+            bright: vec![false; 128 * 64],
+        };
+        let (paints, _) = fit_all_without_topology(
+            &[None, None],
+            &source,
+            &source,
+            &segmentation,
+            &branches,
+            &Config::default(),
+        );
+        assert!(
+            paint_at(&paints[1], 32 * 128 + 90, 128)[0] > 0.72,
+            "{:?}",
+            paints[1]
+        );
+        let mut ink = source.clone();
+        ink.pixels[32 * 128 + 90] = [1.0; 3];
+        assert!(!smooth_native_paint_sample(&source, &ink, 32 * 128 + 90));
+    }
+
+    #[test]
+    fn fitted_fields_reconcile_smooth_seams_but_keep_blurred_material_steps() {
+        for material_step in [false, true] {
+            let source = Raster::new(
+                128,
+                128,
+                (0..128 * 128)
+                    .map(|i| {
+                        let x = (i % 128) as f32;
+                        let step = if material_step {
+                            0.1 * ((x - 58.0) / 12.0).clamp(0.0, 1.0)
+                        } else {
+                            0.0
+                        };
+                        [0.3 + 0.3 * x / 127.0 + step; 3]
+                    })
+                    .collect(),
+            );
+            let labels = (0..128 * 128)
+                .map(|i| {
+                    let x = i % 128;
+                    let y = i / 128;
+                    if !(8..120).contains(&x) || !(8..120).contains(&y) {
+                        0
+                    } else if x < 64 {
+                        1
+                    } else {
+                        2
+                    }
+                })
+                .collect();
+            let mut segmentation = two_face_segmentation(&source);
+            replace_source_supported_paint_labels(&source, &mut segmentation, labels, 0);
+            let field = |bias: f64| Paint::Linear {
+                preset: LinearPreset::Fitted,
+                start: Point { x: 0.0, y: 0.0 },
+                end: Point { x: 127.0, y: 0.0 },
+                stops: vec![
+                    ColorStop {
+                        offset: 0.0,
+                        color: [0.3 + bias; 3],
+                    },
+                    ColorStop {
+                        offset: 1.0,
+                        color: [0.6 + bias; 3],
+                    },
+                ],
+            };
+            let hints = vec![
+                None,
+                Some(field(-0.02)),
+                Some(field(if material_step { 0.12 } else { 0.02 })),
+            ];
+            let seam = [Point { x: 63.5, y: 64.0 }];
+            let before = seam_errors_at_points(
+                hints[1].as_ref().unwrap(),
+                hints[2].as_ref().unwrap(),
+                &seam,
+            )[0];
+            let (paints, _) = fit_all_without_topology(
+                &hints,
+                &source,
+                &source,
+                &segmentation,
+                &crate::ridge::StrongRidgeBranches {
+                    dark: vec![false; 128 * 128],
+                    bright: vec![false; 128 * 128],
+                },
+                &Config::default(),
+            );
+            let after = seam_errors_at_points(&paints[1], &paints[2], &seam)[0];
+            if material_step {
+                assert!((after - before).abs() < 1e-5);
+            } else {
+                assert!(after < 0.5 && after < before * 0.2, "{before} -> {after}");
+            }
         }
     }
 

@@ -207,6 +207,79 @@ impl StructuralInk {
         });
     }
 
+    pub(crate) fn refine_interrupted_strokes(
+        &mut self,
+        source: &Raster,
+        matte: Option<&crate::chroma::AlphaMatte>,
+    ) {
+        let mut restored = Vec::new();
+        let mut dotted = Vec::new();
+        for stroke in &self.strokes {
+            if let Some(parts) = stroke_model::refine_interrupted(source, stroke, matte) {
+                dotted.push(stroke);
+                restored.extend(parts);
+            } else {
+                restored.push(stroke.clone());
+            }
+        }
+        // Missing tiny marks may never enter the residual graph. Only bridge
+        // mutually nearest, aligned ends of already source-confirmed dotted
+        // strokes, and require repeated source ink along the bridge itself.
+        let ends: Vec<_> = dotted
+            .iter()
+            .enumerate()
+            .flat_map(|(i, s)| [true, false].map(|start| (i, graph_endpoint(s, start))))
+            .collect();
+        let mut nearest = vec![None; ends.len()];
+        for (i, &(owner, (p, t))) in ends.iter().enumerate() {
+            let mut best = 24.0_f32;
+            for (j, &(other, (q, u))) in ends.iter().enumerate() {
+                let distance = p.distance(q);
+                if owner == other || distance < 2.0 || distance >= best {
+                    continue;
+                }
+                let direction = ((q.x - p.x) / distance, (q.y - p.y) / distance);
+                if t.0 * direction.0 + t.1 * direction.1 < 0.7
+                    || -u.0 * direction.0 - u.1 * direction.1 < 0.7
+                    || delta_e2000(
+                        rgb_to_lab(dotted[owner].color),
+                        rgb_to_lab(dotted[other].color),
+                    ) > 15.0
+                {
+                    continue;
+                }
+                best = distance;
+                nearest[i] = Some(j);
+            }
+        }
+        for (i, partner) in nearest.iter().enumerate() {
+            let Some(j) = *partner else {
+                continue;
+            };
+            if j <= i || nearest[j] != Some(i) {
+                continue;
+            }
+            let (owner, (p, _)) = ends[i];
+            let (other, (q, _)) = ends[j];
+            let bridge = StructuralStroke {
+                points: vec![p, q],
+                path_data: None,
+                precise_points: None,
+                color: std::array::from_fn(|c| {
+                    0.5 * (dotted[owner].color[c] + dotted[other].color[c])
+                }),
+                width: dotted[owner].width.max(dotted[other].width),
+                role: "ridge-on-boundary",
+                width_samples: Vec::new(),
+            };
+            if let Some(parts) = stroke_model::refine_interrupted(source, &bridge, matte) {
+                restored.extend(parts);
+            }
+        }
+        self.strokes = restored;
+        self.summary.stroke_count = self.strokes.len();
+    }
+
     pub(crate) fn recover_alpha_boundary(
         &mut self,
         source: &Raster,
@@ -4388,6 +4461,36 @@ pub fn select_missing_with_junctions(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dotted_continuations_require_source_marks_inside_the_gap() {
+        for missing_source in [false, true] {
+            let mut source = Raster::blank(96, 40, [1.0; 3]);
+            for x in 8..88 {
+                if x % 4 < 2 && !(missing_source && (32..48).contains(&x)) {
+                    source.pixels[20 * 96 + x] = [0.0; 3];
+                }
+            }
+            let mut ink = StructuralInk::empty();
+            for (a, b) in [(8.5, 30.5), (48.5, 85.5)] {
+                ink.strokes.push(StructuralStroke {
+                    points: vec![Point { x: a, y: 20.5 }, Point { x: b, y: 20.5 }],
+                    path_data: None,
+                    precise_points: None,
+                    color: [0.0; 3],
+                    width: 1.4,
+                    role: "ridge-on-boundary",
+                    width_samples: Vec::new(),
+                });
+            }
+            ink.refine_interrupted_strokes(&source, None);
+            let bridge = ink
+                .strokes
+                .iter()
+                .any(|s| s.points.iter().any(|p| (35.0..45.0).contains(&p.x)));
+            assert_eq!(bridge, !missing_source, "source gap must remain empty");
+        }
+    }
 
     #[test]
     fn partial_ridge_detection_keeps_a_connected_silhouette_in_paint() {

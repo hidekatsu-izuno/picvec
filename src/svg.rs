@@ -62,11 +62,14 @@ pub(crate) struct AlphaMaskLayer {
     /// silhouette is a single full-opacity layer; durable authored
     /// transparency may use nested two-bit layers.
     pub opacity: f32,
+    /// Grayscale coverage in a luminance mask; absent for flat alpha layers.
+    pub paint: Option<Paint>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct AlphaMask {
     pub layers: Vec<AlphaMaskLayer>,
+    pub luminance: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -618,18 +621,43 @@ pub(crate) fn serialize_filtered_with_alpha(
     let mut definitions = String::new();
     let mut summary = SvgSummary::default();
     if let Some(mask) = alpha_mask {
+        for (i, layer) in mask.layers.iter().enumerate() {
+            if let Some(paint) = &layer.paint {
+                register_gradient(
+                    paint,
+                    None,
+                    format!("mask-{i}"),
+                    &mut gradient_ids,
+                    &mut definitions,
+                    &mut summary,
+                );
+            }
+        }
+        let mode = if mask.luminance { "luminance" } else { "alpha" };
         let _ = write!(
             definitions,
-            "<mask id=\"source-alpha-mask\" maskUnits=\"userSpaceOnUse\" maskContentUnits=\"userSpaceOnUse\" x=\"0\" y=\"0\" width=\"{}\" height=\"{}\" mask-type=\"alpha\" style=\"mask-type:alpha\">",
+            "<mask id=\"source-alpha-mask\" maskUnits=\"userSpaceOnUse\" maskContentUnits=\"userSpaceOnUse\" x=\"0\" y=\"0\" width=\"{}\" height=\"{}\" mask-type=\"{mode}\" style=\"mask-type:{mode}\">",
             width, height
         );
-        for layer in &mask.layers {
+        for (i, layer) in mask.layers.iter().enumerate() {
             if layer.path_data.is_empty() || layer.opacity <= 0.0 {
                 continue;
             }
+            let fill = match &layer.paint {
+                Some(Paint::Solid { color }) => rgb_hex(*color),
+                Some(_) => format!("url(#{})", gradient_ids[&format!("mask-{i}")]),
+                None => "#ffffff".to_string(),
+            };
+            let stroke = if mask.luminance
+                && !matches!(&layer.paint, Some(Paint::Solid {color}) if *color == [1.0;3])
+            {
+                format!(" stroke=\"{fill}\" stroke-width=\"1.5\"")
+            } else {
+                String::new()
+            };
             let _ = write!(
                 definitions,
-                "<path d=\"{}\" fill=\"#ffffff\" fill-opacity=\"{}\" fill-rule=\"evenodd\"/>",
+                "<path d=\"{}\" fill=\"{fill}\"{stroke} fill-opacity=\"{}\" fill-rule=\"evenodd\"/>",
                 layer.path_data,
                 number(layer.opacity.clamp(0.0, 1.0)),
             );
@@ -782,7 +810,7 @@ pub(crate) fn serialize_filtered_with_alpha(
             rgb_hex(stroke.color),
             number(stroke.width)
         );
-        if stroke.role == "boundary-stroke" {
+        if matches!(stroke.role, "boundary-stroke" | "sampled-ink") {
             // Recovery owns a measured interval, not an inferred round cap.
             // The original Paint retains its tips and intentional breaks.
             attributes.push_str(" stroke-linecap=\"butt\"");

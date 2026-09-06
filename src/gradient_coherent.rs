@@ -441,7 +441,7 @@ fn reconstruct_domains(
     result
 }
 
-fn profile_paint(
+pub(super) fn profile_paint(
     source: &Raster,
     pixels: &[usize],
     direction: (f32, f32),
@@ -653,11 +653,48 @@ mod tests {
     }
     #[test]
     fn a_single_fittable_face_is_not_cut_into_spatial_patches() {
+        for noise in [0.0, 0.006] {
+            let source = Raster::new(
+                256,
+                256,
+                (0..256 * 256)
+                    .map(|i| {
+                        [0.3 + 0.3 * (i % 256) as f32 / 255.0
+                            + noise * ((i / 256 % 7) as f32 - 3.0); 3]
+                    })
+                    .collect(),
+            );
+            let labels = (0..256 * 256)
+                .map(|i| {
+                    u32::from((32..224).contains(&(i % 256)) && (32..224).contains(&(i / 256)))
+                })
+                .collect();
+            let mut segmentation = partition(&source, labels);
+            let hints = reconstruct(&source, &source, &mut segmentation, &Config::default());
+            assert!(hints[1].is_some());
+            let protected = hints.iter().map(Option::is_some).collect::<Vec<_>>();
+            crate::segment::split_adaptive_paint_patches_with_protected(
+                &source,
+                &source,
+                &mut segmentation,
+                &protected,
+            );
+            assert_eq!(segmentation.regions.len(), 2);
+        }
+    }
+
+    #[test]
+    fn a_local_highlight_is_refined_without_subdividing_its_field() {
         let source = Raster::new(
             256,
             256,
             (0..256 * 256)
-                .map(|i| [0.3 + 0.3 * (i % 256) as f32 / 255.0; 3])
+                .map(|i| {
+                    let x = (i % 256) as f32;
+                    let y = (i / 256) as f32;
+                    let r = ((x - 110.0) / 28.0).hypot((y - 120.0) / 28.0);
+                    [0.3 + 0.3 * x / 255.0 + 0.2 * (-r * r).exp(); 3]
+                })
                 .collect(),
         );
         let labels = (0..256 * 256)
@@ -674,6 +711,26 @@ mod tests {
             &protected,
         );
         assert_eq!(segmentation.regions.len(), 2);
+        let branches = crate::ridge::StrongRidgeBranches {
+            dark: vec![false; 256 * 256],
+            bright: vec![false; 256 * 256],
+        };
+        let (paints, _) = fit_all_without_topology(
+            &hints,
+            &source,
+            &source,
+            &segmentation,
+            &branches,
+            &Config::default(),
+        );
+        let centre = 120 * 256 + 110;
+        let original = paint_at(hints[1].as_ref().unwrap(), centre, 256)[0];
+        let corrected = paint_at(&paints[1], centre, 256)[0];
+        let target = source.pixels[centre][0];
+        assert!(
+            (target - corrected).abs() < (target - original).abs() * 0.6,
+            "{original} -> {corrected}, source {target}"
+        );
     }
 
     #[test]

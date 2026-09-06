@@ -34,9 +34,26 @@ alpha2bit   = level / 3
 The four levels `0`, `1/3`, `2/3`, and `1` are fitted as nested binary
 superlevel regions and applied as one SVG alpha mask to Paint faces and
 structural strokes. Adjacent levels therefore meet at a shared vector boundary
-rather than through a source-resolution opacity ramp. Exact decoder alpha
-remains compact at one byte per source sample; it is expanded only when a
-sample is evaluated.
+rather than through a source-resolution opacity ramp. Exact decoder alpha remains compact at one byte per source sample. A
+temporary grayscale raster is materialized only when fitting continuous
+coverage fields.
+Broad continuously varying alpha is an exception to the four-level model.
+Smooth interior samples distinguish authored coverage ramps from silhouette
+antialiasing. Connected coverage bands are fitted with linear or elliptical
+fields against the original decoder alpha, including the high-opacity band.
+The fields form a grayscale SVG luminance mask. Opaque silhouettes and flat
+transparency retain the compact mask above.
+
+A field must keep mean absolute alpha error within 2/255 and p90 within 4/255.
+Unresolved components use local six-bit coverage contours; the fallback does
+not repeat whole-canvas contours at every level. Small overlaps between partial
+coverage paths prevent antialias gaps at artificial band boundaries. Opaque
+mask paths are not expanded. The reported alpha precision is 8 for a field mask
+and 2 for the flat mask; it reports the maximum precision, not a guarantee of
+exact per-pixel reconstruction. Adaptive child masks propagate that precision.
+Quality evaluation composites with original decoder alpha, not its quantized
+approximation.
+
 Visible pixels retain straight source RGB. Pixels quantized to zero are
 not automatically discarded: every sample with nonzero source coverage is
 kept as underpaint beneath the interpolated mask. Only exactly zero-alpha RGB
@@ -122,4 +139,6 @@ thin details without nearby opaque anchors retain the colour-difference
 assumption. Broad translucent areas can be interpreted as opaque under the
 distinct-interior model. Exact source alpha does not
 have that inference ambiguity: its visibility is represented by the
-independent two-bit vector mask rather than by colour classification.
+independent vector mask rather than by colour classification. Smooth authored
+alpha uses the continuous luminance-mask path described above; flat coverage
+retains the two-bit mask.

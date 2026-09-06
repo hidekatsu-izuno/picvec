@@ -701,9 +701,209 @@ pub(super) fn recover_alpha_boundary(
     joined
 }
 
+/// Re-measure repeated subpixel ink after graph joining. Connectivity is only
+/// a geometric hypothesis: it must not turn a dotted source into a solid band.
+pub(super) fn refine_interrupted(
+    source: &Raster,
+    stroke: &StructuralStroke,
+    matte: Option<&crate::chroma::AlphaMatte>,
+) -> Option<Vec<StructuralStroke>> {
+    if stroke.width > 6.0
+        || stroke.points.len() < 2
+        || matches!(
+            stroke.role,
+            "boundary-stroke"
+                | "bright-ridge-on-boundary"
+                | "alpha-boundary-stroke"
+                | "alpha-boundary-underpaint"
+        )
+    {
+        return None;
+    }
+    let covered_sample = |p: Point| {
+        let Some(matte) = matte else {
+            return (luma(sample(source, p)), 1.0);
+        };
+        let x = (p.x - 0.5).clamp(0.0, (source.width - 1) as f32);
+        let y = (p.y - 0.5).clamp(0.0, (source.height - 1) as f32);
+        let (ix, iy) = (x as usize, y as usize);
+        let (tx, ty) = (x - ix as f32, y - iy as f32);
+        let mut visible = 0.0;
+        let mut alpha = 0.0;
+        for (x, y, weight) in [
+            (ix, iy, (1.0 - tx) * (1.0 - ty)),
+            ((ix + 1).min(source.width - 1), iy, tx * (1.0 - ty)),
+            (ix, (iy + 1).min(source.height - 1), (1.0 - tx) * ty),
+            (
+                (ix + 1).min(source.width - 1),
+                (iy + 1).min(source.height - 1),
+                tx * ty,
+            ),
+        ] {
+            let i = y * source.width + x;
+            let a = matte.get(i);
+            // Interpolate composited samples, never straight RGB and alpha
+            // independently: invisible black must contribute no visible ink.
+            visible += weight * (luma(source.pixels[i]) * a + 1.0 - a);
+            alpha += weight * a;
+        }
+        (visible, alpha)
+    };
+    let visible = |p| covered_sample(p).0;
+    let reach = (stroke.width * 0.5 + 1.0).max(2.0);
+    let count = (reach * 4.0).ceil() as i32;
+    let mut measured = Vec::new();
+    for pair in stroke.points.windows(2) {
+        let length = pair[0].distance(pair[1]);
+        if length < 1e-5 {
+            continue;
+        }
+        let normal = Point {
+            x: (pair[0].y - pair[1].y) / length,
+            y: (pair[1].x - pair[0].x) / length,
+        };
+        let steps = (length * 2.0).ceil() as usize;
+        for j in 0..steps {
+            let t = j as f32 / steps as f32;
+            let p = Point {
+                x: pair[0].x + t * (pair[1].x - pair[0].x),
+                y: pair[0].y + t * (pair[1].y - pair[0].y),
+            };
+            let background =
+                visible(offset(p, normal, -reach)).min(visible(offset(p, normal, reach)));
+            let contrast = background - luma(stroke.color);
+            let mut mass = 0.0;
+            let mut moment = 0.0;
+            if contrast > 0.15 {
+                for k in -count..=count {
+                    let d = k as f32 * 0.25;
+                    let weight = ((background - visible(offset(p, normal, d))) / contrast)
+                        .clamp(0.0, 1.0)
+                        * 0.25;
+                    mass += weight;
+                    moment += weight * d;
+                }
+            }
+            let center = offset(
+                p,
+                normal,
+                if mass > 0.05 {
+                    (moment / mass).clamp(-1.5, 1.5)
+                } else {
+                    0.0
+                },
+            );
+            let width = mass / covered_sample(center).1.max(0.25);
+            measured.push((center, width));
+        }
+    }
+    if measured.len() < 8 {
+        return None;
+    }
+    let mut widths: Vec<_> = measured.iter().map(|(_, w)| *w).collect();
+    widths.sort_by(f32::total_cmp);
+    let low = widths[widths.len() / 5];
+    let high = widths[widths.len() * 4 / 5];
+    let median = widths[widths.len() / 2];
+    let crossings = measured
+        .windows(2)
+        .filter(|p| p[0].1 < 0.6 * high && p[1].1 >= 0.6 * high)
+        .count();
+    if !(0.2..=1.8).contains(&high)
+        || low > 0.6 * high
+        || median > 0.85 * stroke.width
+        || crossings < 2
+    {
+        return None;
+    }
+    Some(
+        measured
+            .windows(2)
+            .filter_map(|p| {
+                let width = 0.5 * (p[0].1 + p[1].1);
+                if width < 0.08 || p[0].0.distance(p[1].0) > 2.0 {
+                    return None;
+                }
+                Some(StructuralStroke {
+                    points: vec![p[0].0, p[1].0],
+                    path_data: None,
+                    precise_points: None,
+                    color: stroke.color,
+                    width: width.min(1.8),
+                    role: "sampled-ink",
+                    width_samples: Vec::new(),
+                })
+            })
+            .collect(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dotted_ink_keeps_its_gaps_and_ignores_invisible_black() {
+        for hidden_black in [false, true] {
+            let mut source = Raster::blank(96, 40, [1.0; 3]);
+            let mut alpha = vec![1.0; 96 * 40];
+            for x in 8..88 {
+                if x % 4 < 2 {
+                    source.pixels[20 * 96 + x] = [0.0; 3];
+                }
+                if hidden_black {
+                    for y in 17..20 {
+                        source.pixels[y * 96 + x] = [0.0; 3];
+                        alpha[y * 96 + x] = 0.0;
+                    }
+                }
+            }
+            let matte = crate::chroma::AlphaMatte::new(96, 40, alpha);
+            let stroke = StructuralStroke {
+                points: vec![Point { x: 8.5, y: 20.5 }, Point { x: 87.5, y: 20.5 }],
+                path_data: None,
+                precise_points: None,
+                color: [0.0; 3],
+                width: 4.0,
+                role: "ridge-on-boundary",
+                width_samples: Vec::new(),
+            };
+            let restored = refine_interrupted(&source, &stroke, Some(&matte)).unwrap();
+            assert!(!restored.is_empty());
+            assert!(restored.iter().all(|s| s.width <= 1.01));
+            assert!(restored
+                .iter()
+                .flat_map(|s| &s.points)
+                .all(|p| (p.y - 20.5).abs() < 0.01));
+            for x in (10..86).step_by(4) {
+                let gap = x as f32 + 1.0;
+                assert!(
+                    restored
+                        .iter()
+                        .all(|s| !(s.points[0].x < gap && s.points[1].x > gap)),
+                    "closed source gap at {gap}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_continuous_thin_line_is_not_replaced_by_dashes() {
+        let mut source = Raster::blank(96, 40, [1.0; 3]);
+        for x in 8..88 {
+            source.pixels[20 * 96 + x] = [0.0; 3];
+        }
+        let stroke = StructuralStroke {
+            points: vec![Point { x: 10.5, y: 20.5 }, Point { x: 85.5, y: 20.5 }],
+            path_data: None,
+            precise_points: None,
+            color: [0.0; 3],
+            width: 1.2,
+            role: "ridge-on-boundary",
+            width_samples: Vec::new(),
+        };
+        assert!(refine_interrupted(&source, &stroke, None).is_none());
+    }
 
     fn edge() -> SourceEdge {
         SourceEdge {
