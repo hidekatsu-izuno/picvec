@@ -471,6 +471,41 @@ fn save_mask_diagnostic(name: &str, mask: &[bool], width: usize, height: usize) 
 #[cfg(not(feature = "diagnostics"))]
 fn save_mask_diagnostic(_name: &str, _mask: &[bool], _width: usize, _height: usize) {}
 
+fn select_dimension<R: RasterSource + ?Sized>(image: &R, config: &Config) -> ComplexityProbe {
+    let (_, maximum) = config.automatic_dimension_bounds();
+    if image.width().max(image.height()) <= maximum as usize
+        && (image.width() * image.height()) as f32 <= MINIMUM_AUTOMATIC_TARGET_PIXELS
+    {
+        ComplexityProbe {
+            selected_dimension: image.width().max(image.height()) as u32,
+            target_pixels: MINIMUM_AUTOMATIC_TARGET_PIXELS,
+            ..ComplexityProbe::default()
+        }
+    } else {
+        estimate_dimension(image, config)
+    }
+}
+
+fn resize_processing<R: RasterSource + ?Sized>(
+    source: &R,
+    matte: Option<&AlphaMatte>,
+    source_alpha: bool,
+    maximum: u32,
+) -> (Raster, Option<AlphaMatte>) {
+    if source_alpha {
+        let (image, matte) = chroma::resize_source_alpha(
+            source,
+            matte.expect("source alpha requires a matte"),
+            maximum,
+        );
+        (image, Some(matte))
+    } else {
+        let image = source.resize_max(maximum);
+        let matte = matte.map(|matte| matte.resized(image.width, image.height));
+        (image, matte)
+    }
+}
+
 fn estimate_dimension<R: RasterSource + ?Sized>(image: &R, config: &Config) -> ComplexityProbe {
     let probe_max = image.width().max(image.height()).min(1024) as u32;
     let probe = image.resize_max(probe_max);
@@ -923,18 +958,7 @@ fn adaptively_refine(
                     matte.crop(expanded.x, expanded.y, expanded.width, expanded.height)
                 });
                 let probe = if child_config.auto_dimension {
-                    let (_, automatic_maximum) = child_config.automatic_dimension_bounds();
-                    if crop.width.max(crop.height) <= automatic_maximum as usize
-                        && crop.pixels.len() as f32 <= MINIMUM_AUTOMATIC_TARGET_PIXELS
-                    {
-                        ComplexityProbe {
-                            selected_dimension: crop.width.max(crop.height) as u32,
-                            target_pixels: MINIMUM_AUTOMATIC_TARGET_PIXELS,
-                            ..ComplexityProbe::default()
-                        }
-                    } else {
-                        estimate_dimension(&crop, &child_config)
-                    }
+                    select_dimension(&crop, &child_config)
                 } else {
                     ComplexityProbe {
                         selected_dimension: child_config
@@ -943,10 +967,12 @@ fn adaptively_refine(
                         ..ComplexityProbe::default()
                     }
                 };
-                let processing = crop.resize_max(probe.selected_dimension.max(64));
-                let processing_matte = crop_matte
-                    .as_ref()
-                    .map(|matte| matte.resized(processing.width, processing.height));
+                let (processing, processing_matte) = resize_processing(
+                    &crop,
+                    crop_matte.as_ref(),
+                    source_alpha,
+                    probe.selected_dimension.max(64),
+                );
                 let local_scale = (processing.width as f32 / expanded.width.max(1) as f32)
                     .min(processing.height as f32 / expanded.height.max(1) as f32);
                 if local_scale <= 1.1 * base_scale {
@@ -1176,7 +1202,7 @@ fn vectorize_inner(
         (decoded.clone(), decoded, None, [1.0; 3], None, None)
     };
     let complexity = if config.auto_dimension {
-        estimate_dimension(&source_reference, config)
+        select_dimension(&source_reference, config)
     } else {
         ComplexityProbe {
             selected_dimension: config
@@ -1212,10 +1238,12 @@ fn vectorize_inner(
             }
         }
     }
-    let processing = source.resize_max(complexity.selected_dimension.max(64));
-    let processing_matte = input_matte
-        .as_ref()
-        .map(|matte| matte.resized(processing.width, processing.height));
+    let (processing, processing_matte) = resize_processing(
+        &source,
+        input_matte.as_ref(),
+        source_has_alpha,
+        complexity.selected_dimension.max(64),
+    );
     let processing_width = processing.width;
     let processing_height = processing.height;
     let source_scale = (input_width as f32 / processing_width.max(1) as f32)
@@ -1794,6 +1822,63 @@ mod tests {
     use std::collections::HashSet;
     use std::sync::{Arc, Barrier};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn alpha_weighted_resize_preserves_visible_colour_in_base_and_crops() {
+        let source = SourceRaster::from_rgb8_fn(128, 64, |i| {
+            if i % 2 == 0 {
+                [1.0, 0.0, 0.0]
+            } else {
+                [0.0, 0.0, 1.0]
+            }
+        });
+        let matte = AlphaMatte::from_u8(
+            128,
+            64,
+            (0..128 * 64)
+                .map(|i| if i % 2 == 0 { 255 } else { 1 })
+                .collect(),
+        );
+        let crop = source.crop(0, 0, 128, 64);
+        let (base, alpha) = resize_processing(&source, Some(&matte), true, 64);
+        let (child, _) = resize_processing(&crop, Some(&matte), true, 64);
+        for image in [&base, &child] {
+            let rgb = image.get(32, 16);
+            assert!((rgb[0] - 255.0 / 256.0).abs() < 0.001, "{rgb:?}");
+            assert!((rgb[2] - 1.0 / 256.0).abs() < 0.001, "{rgb:?}");
+        }
+        assert!((alpha.as_ref().unwrap().get(16 * 64 + 32) - 128.0 / 255.0).abs() < 0.005);
+        let core =
+            vectorize_processing(base, alpha.as_ref(), true, [1.0; 3], &Config::default()).unwrap();
+        let tree = parse_svg_document(&core.document).unwrap();
+        let mut pixmap = resvg::tiny_skia::Pixmap::new(64, 32).unwrap();
+        resvg::render(
+            &tree,
+            resvg::tiny_skia::Transform::identity(),
+            &mut pixmap.as_mut(),
+        );
+        let pixel = pixmap.pixels()[16 * 64 + 32];
+        assert!(pixel.alpha() > 0);
+        assert!(f32::from(pixel.red()) / f32::from(pixel.alpha()) > 0.98);
+        assert!(f32::from(pixel.blue()) / f32::from(pixel.alpha()) < 0.02);
+    }
+
+    #[test]
+    fn small_inputs_select_native_dimensions_without_a_probe() {
+        let source = Raster::blank(1024, 1024, [0.5; 3]);
+        let config = Config::default();
+        let selection = select_dimension(&source, &config);
+        assert_eq!(
+            selection.selected_dimension,
+            estimate_dimension(&source, &config).selected_dimension
+        );
+        assert_eq!(selection.probe_width, 0);
+        let limited = Config {
+            maximum_dimension: 64,
+            ..config
+        };
+        assert_eq!(select_dimension(&source, &limited).selected_dimension, 64);
+    }
 
     #[test]
     fn native_vector_join_does_not_inherit_coarse_preview_blur() {

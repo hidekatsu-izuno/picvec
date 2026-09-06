@@ -12,7 +12,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use image::{imageops::FilterType, ImageBuffer, Luma};
+use image::{imageops::FilterType, ImageBuffer, Luma, Rgba};
 use serde::Serialize;
 
 use crate::geometry::Point;
@@ -402,7 +402,6 @@ fn foreground_extension_owners(matte: &AlphaMatte, width: usize) -> Vec<usize> {
     owners
 }
 
-#[cfg(test)]
 pub(crate) fn prepare_source_alpha(image: &Raster, matte: &AlphaMatte) -> Raster {
     assert_eq!(image.pixels.len(), matte.len());
     let owners = foreground_extension_owners(matte, image.width);
@@ -420,6 +419,64 @@ pub(crate) fn prepare_source_alpha(image: &Raster, matte: &AlphaMatte) -> Raster
             })
             .collect(),
     )
+}
+
+/// Filter colour and coverage together; hidden RGB must not tint visible ink.
+/// Q0.16 keeps low-coverage colour during filtering without a full f32 RGBA source.
+pub(crate) fn resize_source_alpha<R: RasterSource + ?Sized>(
+    source: &R,
+    matte: &AlphaMatte,
+    maximum: u32,
+) -> (Raster, AlphaMatte) {
+    assert_eq!(
+        (source.width(), source.height()),
+        (matte.width, matte.height)
+    );
+    let current = source.width().max(source.height()) as u32;
+    if maximum == 0 || current <= maximum {
+        return (source.resize_max(maximum), matte.clone());
+    }
+    let scale = maximum as f64 / current as f64;
+    let width = (source.width() as f64 * scale).round().max(1.0) as u32;
+    let height = (source.height() as f64 * scale).round().max(1.0) as u32;
+    let premultiplied = ImageBuffer::<Rgba<u16>, Vec<u16>>::from_fn(
+        source.width() as u32,
+        source.height() as u32,
+        |x, y| {
+            let alpha = matte
+                .get(y as usize * matte.width + x as usize)
+                .clamp(0.0, 1.0);
+            let rgb = source.get(x as usize, y as usize);
+            Rgba([
+                (rgb[0].clamp(0.0, 1.0) * alpha * 65_535.0).round() as u16,
+                (rgb[1].clamp(0.0, 1.0) * alpha * 65_535.0).round() as u16,
+                (rgb[2].clamp(0.0, 1.0) * alpha * 65_535.0).round() as u16,
+                (alpha * 65_535.0).round() as u16,
+            ])
+        },
+    );
+    let resized = image::imageops::resize(&premultiplied, width, height, FilterType::Lanczos3);
+    drop(premultiplied);
+    let matte = AlphaMatte::from_u8(
+        width as usize,
+        height as usize,
+        resized
+            .pixels()
+            .map(|p| (f32::from(p[3]) / 257.0).round() as u8)
+            .collect(),
+    );
+    let image = Raster::new(
+        width as usize,
+        height as usize,
+        resized
+            .pixels()
+            .map(|p| {
+                [0, 1, 2].map(|c| (f32::from(p[c]) / f32::from(p[3]).max(1.0)).clamp(0.0, 1.0))
+            })
+            .collect(),
+    );
+    // Restore straight foreground underpaint beyond the new coverage boundary.
+    (prepare_source_alpha(&image, &matte), matte)
 }
 
 pub(crate) fn prepare_compact_source_alpha(
@@ -1168,6 +1225,38 @@ impl ChromaKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn alpha_resize_ignores_hidden_rgb_and_preserves_unscaled_samples() {
+        let matte = AlphaMatte::from_u8(
+            128,
+            64,
+            (0..128 * 64)
+                .map(|i| if i % 128 < 64 { 255 } else { 0 })
+                .collect(),
+        );
+        let foreground = Raster::blank(128, 64, [1.0, 0.0, 0.0]);
+        let mut hidden = foreground.clone();
+        for (i, pixel) in hidden.pixels.iter_mut().enumerate() {
+            if matte.get(i) == 0.0 {
+                *pixel = [0.0, 0.0, 1.0];
+            }
+        }
+        let (first, _) = resize_source_alpha(&foreground, &matte, 64);
+        let (second, _) = resize_source_alpha(&hidden, &matte, 64);
+        assert_eq!(first.pixels, second.pixels);
+        assert_eq!(first.get(63, 16), [1.0, 0.0, 0.0]);
+        let (unchanged, alpha) = resize_source_alpha(&hidden, &matte, 128);
+        assert_eq!(unchanged.pixels, hidden.pixels);
+        assert_eq!(
+            alpha.iter().collect::<Vec<_>>(),
+            matte.iter().collect::<Vec<_>>()
+        );
+        let clear = AlphaMatte::from_u8(128, 64, vec![0; 128 * 64]);
+        let (image, alpha) = resize_source_alpha(&hidden, &clear, 64);
+        assert!(image.pixels.iter().all(|p| *p == [0.0; 3]));
+        assert!(alpha.iter().all(|a| a == 0.0));
+    }
 
     #[test]
     fn detection_accepts_six_keys_but_not_white_or_black() {

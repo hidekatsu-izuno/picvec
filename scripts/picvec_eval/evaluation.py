@@ -15,7 +15,7 @@ from scipy import ndimage
 from skimage import color, metrics
 from skimage.morphology import skeletonize
 
-from .support import delta_e2000, luminance_edges, resize_image, srgb_to_lab
+from .support import delta_e2000, load_rgb, luminance_edges, resize_image, srgb_to_lab
 
 
 FloatImage = NDArray[np.float32]
@@ -117,17 +117,6 @@ class EvaluationConfig:
     detail_tile_min_pixels: int = 100
 
 
-def load_rgb(path: str | Path, *, background: str = "#ffffff") -> FloatImage:
-    """Load an image and composite transparency onto the evaluation background."""
-
-    color = _parse_color(background)
-    with Image.open(path) as source:
-        rgba = source.convert("RGBA")
-        canvas = Image.new("RGBA", rgba.size, (*color, 255))
-        rgb = Image.alpha_composite(canvas, rgba).convert("RGB")
-        return np.asarray(rgb, dtype=np.float32) / 255.0
-
-
 def save_rgb(image: NDArray[np.floating], path: str | Path) -> None:
     value = np.rint(np.clip(image, 0.0, 1.0) * 255.0).astype(np.uint8)
     output_path = Path(path)
@@ -146,18 +135,6 @@ def save_rgb(image: NDArray[np.floating], path: str | Path) -> None:
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
-
-
-def _parse_color(value: str) -> tuple[int, int, int]:
-    text = value.strip().lstrip("#")
-    if len(text) == 3:
-        text = "".join(channel * 2 for channel in text)
-    if len(text) != 6:
-        raise ValueError(f"background must be #RGB or #RRGGBB, got {value!r}")
-    try:
-        return tuple(int(text[index : index + 2], 16) for index in (0, 2, 4))  # type: ignore[return-value]
-    except ValueError as exc:
-        raise ValueError(f"invalid background colour: {value!r}") from exc
 
 
 def _edge_map(image: FloatImage, config: EvaluationConfig) -> BoolImage:

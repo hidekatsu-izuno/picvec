@@ -1,7 +1,9 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use image::{imageops::FilterType, DynamicImage, ImageBuffer, ImageReader, Limits, Rgb};
+use image::{
+    imageops::FilterType, DynamicImage, ImageBuffer, ImageDecoder, ImageReader, Limits, Rgb,
+};
 
 use crate::Result;
 
@@ -92,7 +94,14 @@ impl Raster {
         maximum_pixels: u64,
         maximum_decode_bytes: u64,
     ) -> Result<DynamicImage> {
-        let (width, height) = ImageReader::open(path)?.into_dimensions()?;
+        let mut reader = ImageReader::open(path)?;
+        let mut limits = Limits::default();
+        limits.max_image_width = Some(maximum_dimension);
+        limits.max_image_height = Some(maximum_dimension);
+        limits.max_alloc = Some(maximum_decode_bytes);
+        reader.limits(limits.clone());
+        let mut decoder = reader.into_decoder()?;
+        let (width, height) = decoder.dimensions();
         let pixels = u64::from(width) * u64::from(height);
         if pixels > maximum_pixels {
             return Err(format!(
@@ -100,13 +109,11 @@ impl Raster {
             )
             .into());
         }
-        let mut reader = ImageReader::open(path)?;
-        let mut limits = Limits::default();
-        limits.max_image_width = Some(maximum_dimension);
-        limits.max_image_height = Some(maximum_dimension);
-        limits.max_alloc = Some(maximum_decode_bytes);
-        reader.limits(limits);
-        Ok(reader.decode()?)
+        // Match ImageReader::decode's output-buffer reservation, while keeping
+        // the decoder whose dimensions were checked instead of reopening a path.
+        limits.reserve(decoder.total_bytes())?;
+        decoder.set_limits(limits)?;
+        Ok(DynamicImage::from_decoder(decoder)?)
     }
 
     pub fn from_dynamic(image: &DynamicImage) -> Self {
@@ -399,6 +406,19 @@ mod tests {
         assert!(Raster::load(&path, 16, 100, 64 * 1024 * 1024).is_err());
         let loaded = Raster::load(&path, 16, 1_000, 64 * 1024 * 1024).unwrap();
         assert_eq!((loaded.width, loaded.height), (16, 8));
+    }
+
+    #[test]
+    fn checked_decoder_enforces_pixel_and_output_buffer_limits() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("limits.png");
+        ImageBuffer::from_pixel(1024, 1024, Rgb([0_u8, 0, 0]))
+            .save(&path)
+            .unwrap();
+        let error = Raster::load(&path, 1024, 1024 * 1024 - 1, 64 * 1024 * 1024).unwrap_err();
+        assert!(error.to_string().contains("1048576 pixels"), "{error}");
+        assert!(Raster::load(&path, 1024, 1024 * 1024, 1024 * 1024).is_err());
+        assert!(Raster::load(&path, 1024, 1024 * 1024, 64 * 1024 * 1024).is_ok());
     }
 
     #[test]

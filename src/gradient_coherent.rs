@@ -149,7 +149,7 @@ fn reconstruct_domains(
     // interchangeable. Preserve measured interfaces anywhere in the union,
     // including interfaces far from the path that connected its interiors.
     let boundary_labs = lab_pixels(boundary_source);
-    let barriers = smooth_paint_boundaries(boundary_source, segmentation, 8, true)
+    let barriers = smooth_paint_boundaries(&boundary_labs, segmentation, 8, true)
         .into_iter()
         .map(|mut boundary| {
             measure_boundary_material_step(&boundary_labs, segmentation, &mut boundary);

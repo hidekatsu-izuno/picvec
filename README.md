@@ -75,6 +75,10 @@ timeout 600s nice -n 10 mise x -- uv run scripts/generate_realesrgan_x4.py \
   --model /path/to/RealESRGAN_x4plus_anime_6B.pth
 ```
 
+Transparent inputs are composited onto white for evaluation. Use the same
+`--background` colour with the standalone generator and the evaluator when
+evaluating against another background.
+
 See `scripts/picvec_eval/README.md` for NCNN and PyTorch evaluator usage,
 content-addressed caching, and reproducibility controls. The evaluator's
 separate SVG rasterization step currently uses `rsvg-convert`.

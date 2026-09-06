@@ -4172,12 +4172,11 @@ fn seam_errors_at_points(first: &Paint, second: &Paint, points: &[Point]) -> Vec
 }
 
 fn smooth_paint_boundaries(
-    boundary_source: &Raster,
+    labs: &[Lab],
     segmentation: &Segmentation,
     minimum_length: usize,
     include_non_smooth: bool,
 ) -> Vec<SmoothPaintBoundary> {
-    let labs = lab_pixels(boundary_source);
     let mut pairs =
         std::collections::BTreeMap::<(usize, usize), Vec<(usize, Point, f32, Option<f32>)>>::new();
     for y in 0..segmentation.height {
@@ -4196,7 +4195,7 @@ fn smooth_paint_boundaries(
                     y: y as f32,
                 },
                 delta_e2000(labs[first_index], labs[second_index]),
-                boundary_gradient_discontinuity(&labs, segmentation, first_index, second_index),
+                boundary_gradient_discontinuity(labs, segmentation, first_index, second_index),
             ));
         }
     }
@@ -4216,7 +4215,7 @@ fn smooth_paint_boundaries(
                     y: y as f32 + 0.5,
                 },
                 delta_e2000(labs[first_index], labs[second_index]),
-                boundary_gradient_discontinuity(&labs, segmentation, first_index, second_index),
+                boundary_gradient_discontinuity(labs, segmentation, first_index, second_index),
             ));
         }
     }
@@ -5758,6 +5757,11 @@ pub(crate) fn merge_source_supported_paints(
     config: &Config,
 ) -> SupportedPaintMergeReport {
     let mut report = SupportedPaintMergeReport::default();
+    if segmentation.regions.len() < 2 {
+        return report;
+    }
+    let source_labs = lab_pixels(source);
+    let boundary_labs = lab_pixels(boundary_source);
     let mut rejected = HashSet::new();
     // Rebuild native boundary evidence after each disjoint matching. A merged
     // face may then join another neighbour, while all contacts are rechecked.
@@ -5766,6 +5770,8 @@ pub(crate) fn merge_source_supported_paints(
         let round = merge_source_supported_paints_round(
             source,
             boundary_source,
+            &source_labs,
+            &boundary_labs,
             segmentation,
             paints,
             config,
@@ -5781,9 +5787,12 @@ pub(crate) fn merge_source_supported_paints(
     report
 }
 
+#[allow(clippy::too_many_arguments)]
 fn merge_source_supported_paints_round(
     source: &Raster,
     boundary_source: &Raster,
+    source_labs: &[Lab],
+    boundary_labs: &[Lab],
     segmentation: &mut Segmentation,
     paints: &mut Vec<Paint>,
     config: &Config,
@@ -5812,7 +5821,7 @@ fn merge_source_supported_paints_round(
     }
 
     let mut evidence = HashMap::<(usize, usize), BoundaryEvidence>::new();
-    for boundary in smooth_paint_boundaries(boundary_source, segmentation, 2, true) {
+    for boundary in smooth_paint_boundaries(boundary_labs, segmentation, 2, true) {
         let entry = evidence
             .entry(pair(boundary.left, boundary.right))
             .or_default();
@@ -5851,7 +5860,6 @@ fn merge_source_supported_paints_round(
         }
         region_samples[label] = sampled_indices(&region_samples[label], 768);
     }
-    let source_labs = lab_pixels(source);
     let mut used = vec![false; count];
     let mut accepted = Vec::<(usize, usize, Paint, usize)>::new();
     let mut considered = 0_usize;
@@ -5919,7 +5927,7 @@ fn merge_source_supported_paints_round(
         };
         let quick_valid = config.paint_merge_passes > 1
             && supported_merge_error_gate(
-                &source_labs,
+                source_labs,
                 source.width,
                 [
                     (&region_samples[left], &paints[left]),
@@ -5982,7 +5990,7 @@ fn merge_source_supported_paints_round(
         }
         if !quick_valid {
             let rejection = supported_merge_error_gate(
-                &source_labs,
+                source_labs,
                 source.width,
                 [
                     (&region_samples[left], &paints[left]),
@@ -6285,7 +6293,7 @@ fn fit_all_internal(
         save_paint_details(&format!("{prefix}-initial-details.json"), &paints);
     }
     let boundary_labs = lab_pixels(boundary_source);
-    let paint_boundaries = smooth_paint_boundaries(boundary_source, segmentation, 2, true)
+    let paint_boundaries = smooth_paint_boundaries(&boundary_labs, segmentation, 2, true)
         .into_iter()
         .filter_map(|mut boundary| {
             let has_field = hints.get(boundary.left).is_some_and(Option::is_some)
@@ -6929,7 +6937,7 @@ mod tests {
             .collect();
         let source = Raster::new(12, 8, pixels);
         let segmentation = two_face_segmentation(&source);
-        let boundaries = smooth_paint_boundaries(&source, &segmentation, 8, false);
+        let boundaries = smooth_paint_boundaries(&lab_pixels(&source), &segmentation, 8, false);
         assert_eq!(boundaries.len(), 1);
         assert!(boundaries[0].median_delta_e > 3.0);
         assert!(boundary_has_continuous_gradient(&boundaries[0]));
@@ -6954,7 +6962,8 @@ mod tests {
                     .collect(),
             );
             let segmentation = two_face_segmentation(&source);
-            let mut boundaries = smooth_paint_boundaries(&source, &segmentation, 8, true);
+            let mut boundaries =
+                smooth_paint_boundaries(&lab_pixels(&source), &segmentation, 8, true);
             assert_eq!(boundaries.len(), 1);
             measure_boundary_material_step(&lab_pixels(&source), &segmentation, &mut boundaries[0]);
             assert_eq!(boundary_has_material_step(&boundaries[0]), blurred_step);
@@ -6972,7 +6981,7 @@ mod tests {
         }
         let source = Raster::new(12, 8, pixels);
         let segmentation = two_face_segmentation(&source);
-        assert!(smooth_paint_boundaries(&source, &segmentation, 8, false).is_empty());
+        assert!(smooth_paint_boundaries(&lab_pixels(&source), &segmentation, 8, false).is_empty());
     }
 
     fn coupling_boundary(length: usize, median_delta_e: f32) -> CouplingBoundary {

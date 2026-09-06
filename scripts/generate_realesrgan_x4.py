@@ -14,21 +14,24 @@ import argparse
 import json
 from pathlib import Path
 
-import numpy as np
-from PIL import Image
+from picvec_eval.support import load_rgb
 
 from picvec_eval.upscale import generate_realesrgan_x4
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("input", type=Path, help="source RGB PNG/JPEG")
+    parser.add_argument("input", type=Path, help="source PNG/JPEG")
     parser.add_argument("output", type=Path, help="exact x4 PNG to create")
     parser.add_argument(
         "--model",
         type=Path,
         required=True,
         help="official RealESRGAN_x4plus_anime_6B .pth model",
+    )
+    parser.add_argument(
+        "--background", default="#ffffff",
+        help="transparency background (#RGB or #RRGGBB)",
     )
     parser.add_argument("--tile-size", type=int, default=256)
     parser.add_argument("--tile-padding", type=int, default=16)
@@ -51,7 +54,7 @@ def main(argv: list[str] | None = None) -> int:
         raise FileNotFoundError(f"source image not found: {args.input}")
     if not args.model.is_file():
         raise FileNotFoundError(f"Real-ESRGAN model not found: {args.model}")
-    source = np.asarray(Image.open(args.input).convert("RGB"))
+    source = load_rgb(args.input, background=args.background)
     report = generate_realesrgan_x4(
         source,
         args.output,

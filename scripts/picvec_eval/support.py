@@ -6,6 +6,8 @@ evaluator without importing any part of its vectorization pipeline.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 from numpy.typing import NDArray
 
@@ -168,3 +170,28 @@ def luminance_edges(
     dark_support = ndimage.binary_dilation(dark_pixels, iterations=2)
     dark_edges = logarithmic & dark_support
     return ordinary | dark_edges, dark_edges
+
+
+def load_rgb(path: str | Path, *, background: str = "#ffffff") -> FloatImage:
+    """Load an image and composite transparency onto the evaluation background."""
+
+    from PIL import Image
+
+    color = _parse_color(background)
+    with Image.open(path) as source:
+        rgba = source.convert("RGBA")
+        canvas = Image.new("RGBA", rgba.size, (*color, 255))
+        rgb = Image.alpha_composite(canvas, rgba).convert("RGB")
+        return np.asarray(rgb, dtype=np.float32) / 255.0
+
+
+def _parse_color(value: str) -> tuple[int, int, int]:
+    text = value.strip().lstrip("#")
+    if len(text) == 3:
+        text = "".join(channel * 2 for channel in text)
+    if len(text) != 6:
+        raise ValueError(f"background must be #RGB or #RRGGBB, got {value!r}")
+    try:
+        return tuple(int(text[index : index + 2], 16) for index in (0, 2, 4))  # type: ignore[return-value]
+    except ValueError as exc:
+        raise ValueError(f"invalid background colour: {value!r}") from exc

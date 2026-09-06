@@ -11,7 +11,8 @@ from unittest import mock
 import numpy as np
 from PIL import Image
 
-from generate_realesrgan_x4 import build_parser as build_generator_parser
+from generate_realesrgan_x4 import build_parser as build_generator_parser, main as generator_main
+from picvec_eval.evaluation import load_rgb
 from picvec_eval.cli import (
     _write_text_atomic,
     build_parser as build_evaluator_parser,
@@ -36,6 +37,25 @@ class RepeatX4Upscaler:
 
 
 class RealESRGANGenerationTests(unittest.TestCase):
+    def test_generator_uses_the_evaluator_background_for_transparency(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "alpha.png"
+            model = root / "model.pth"
+            model.write_bytes(b"mock-model")
+            Image.fromarray(np.array([[[255, 0, 0, 0], [0, 0, 255, 128]]], dtype=np.uint8)).save(source)
+            for background in ("#ffffff", "#123456", "#abc"):
+                with self.subTest(background=background), mock.patch(
+                    "generate_realesrgan_x4.generate_realesrgan_x4",
+                    return_value={"cache_hit": False, "width": 8, "height": 4},
+                ) as generate:
+                    generator_main([str(source), str(root / "out.png"), "--model", str(model),
+                                    "--background", background, "--no-cache"])
+                np.testing.assert_array_equal(
+                    generate.call_args.args[0], load_rgb(source, background=background)
+                )
+            np.testing.assert_array_equal(load_rgb(source)[0, 0], np.ones(3))
+
     def test_upscaler_import_does_not_load_evaluator_dependencies(self) -> None:
         completed = subprocess.run(
             [
