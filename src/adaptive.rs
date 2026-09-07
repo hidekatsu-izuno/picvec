@@ -89,6 +89,8 @@ pub struct AdaptiveRefinementSummary {
     pub accepted_regions: usize,
     pub rejected_for_quality: usize,
     pub rejected_for_complexity: usize,
+    /// Subset of complexity rejections caused by the global byte budget.
+    pub rejected_for_budget: usize,
     pub baseline_mean_delta_e: f32,
     pub refined_mean_delta_e: f32,
     pub estimated_global_delta_e_reduction: f32,
@@ -676,7 +678,8 @@ fn inner_svg(document: &str, prefix: &str) -> Result<String> {
     }
     Ok(document[body..end]
         .replace("id=\"", &format!("id=\"{prefix}"))
-        .replace("url(#", &format!("url(#{prefix}")))
+        .replace("url(#", &format!("url(#{prefix}"))
+        .replace("href=\"#", &format!("href=\"#{prefix}")))
 }
 
 pub(crate) fn compose_refinements(
@@ -812,6 +815,15 @@ pub(crate) fn refinements_cover_canvas(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn refinement_namespaces_reused_soft_geometry() {
+        let child = "<svg><defs/><g id=\"soft-source\"/><use href=\"#soft-source\" filter=\"url(#blur)\"/></svg>";
+        let nested = inner_svg(child, "child-").unwrap();
+        assert!(nested.contains("href=\"#child-soft-source\""));
+        assert!(nested.contains("id=\"child-soft-source\""));
+        assert!(nested.contains("url(#child-blur)"));
+    }
 
     #[test]
     fn thin_spanning_separator_does_not_hide_a_touching_figure() {

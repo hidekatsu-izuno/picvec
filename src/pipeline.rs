@@ -358,6 +358,21 @@ fn build_gradient_alpha_mask(matte: &AlphaMatte, levels: &[u8]) -> Option<AlphaM
 }
 
 fn build_source_alpha_mask(matte: &AlphaMatte) -> AlphaMask {
+    let (remaining, lines) = crate::alpha_lines::extract(matte);
+    let mut mask = build_source_alpha_mask_regions(&remaining);
+    if !lines.is_empty() {
+        for layer in &mut mask.layers {
+            if layer.paint.is_none() {
+                layer.paint = Some(Paint::Solid { color: [1.0; 3] });
+            }
+        }
+        mask.luminance = true;
+        mask.layers.extend(lines);
+    }
+    mask
+}
+
+fn build_source_alpha_mask_regions(matte: &AlphaMatte) -> AlphaMask {
     let levels = matte.vectorized_levels();
     if let Some(mask) = build_gradient_alpha_mask(matte, &levels) {
         return mask;
@@ -1080,9 +1095,8 @@ fn adaptively_refine(
         }
     }
 
-    // A global byte budget converts the local ordering into a deterministic
-    // best-first refinement pass.  Candidate generation order cannot change
-    // which equal-cost regions win.
+    // Rank candidates deterministically by efficiency. An explicitly configured
+    // byte budget retains the best candidates first.
     evaluated.sort_by(|left, right| {
         right
             .rate
@@ -1093,10 +1107,25 @@ fn adaptively_refine(
     let mut accepted = Vec::<EmbeddedRefinement>::new();
     let mut refinement_svg = SvgSummary::default();
     for refinement in evaluated {
-        if summary.added_svg_bytes.saturating_add(refinement.svg.bytes)
-            > config.adaptive_svg_budget_bytes
+        if config.adaptive_svg_budget_bytes != 0
+            && summary.added_svg_bytes.saturating_add(refinement.svg.bytes)
+                > config.adaptive_svg_budget_bytes
         {
             summary.rejected_for_complexity += 1;
+            summary.rejected_for_budget += 1;
+            #[cfg(feature = "diagnostics")]
+            if config.retain_diagnostics {
+                eprintln!(
+                    "picvec adaptive budget skipped {} {} {} {}: bytes={} used={} limit={}",
+                    refinement.embedded.core.x,
+                    refinement.embedded.core.y,
+                    refinement.embedded.core.width,
+                    refinement.embedded.core.height,
+                    refinement.svg.bytes,
+                    summary.added_svg_bytes,
+                    config.adaptive_svg_budget_bytes
+                );
+            }
             continue;
         }
         let area_weight = refinement.embedded.core.area() as f32 / whole.area().max(1) as f32;
@@ -1780,7 +1809,7 @@ fn vectorize_processing(
     let ownership_summary = ownership.summary.clone();
     let paint_overlap = ownership.paint_overlap;
     let structural = ownership.structural;
-    let (document, svg_report) = serialize_svg(
+    let (document, mut svg_report) = serialize_svg(
         processing.width,
         processing.height,
         &geometry,
@@ -1791,6 +1820,36 @@ fn vectorize_processing(
         &excluded_regions,
         alpha_mask.as_ref(),
     );
+    // Use a neutral comparison backing; the chroma diagnostic backing is
+    // deliberately saturated and must not veto grayscale source evidence.
+    let soft_reference = if source_alpha {
+        chroma::composite_over(&processing, chroma_matte.unwrap(), [1.0; 3])
+    } else {
+        processing.clone()
+    };
+    let document = crate::soft_edges::refine(
+        &document,
+        &soft_reference,
+        chroma_matte.filter(|_| source_alpha),
+        |document| render_svg_document_on(document, processing.width, processing.height, [1.0; 3]),
+    )?;
+    svg_report.bytes = document.len();
+    #[cfg(feature = "diagnostics")]
+    let quality = if config.compute_quality_metrics {
+        let final_render = render_svg_document_on(
+            &document,
+            processing.width,
+            processing.height,
+            preview_background,
+        )?;
+        Some(crate::metrics::compare(
+            &processing_reference,
+            &final_render,
+        ))
+    } else {
+        quality
+    };
+
     report_progress(config, "final-svg", started, &mut checkpoint);
     Ok(CoreVectorization {
         source_alpha_bits: if alpha_mask.as_ref().is_some_and(|mask| mask.luminance) {

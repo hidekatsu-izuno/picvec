@@ -5,6 +5,7 @@
 //! ownership validation is performed in memory by the embedded `resvg` crate.
 
 pub mod adaptive;
+mod alpha_lines;
 pub mod chroma;
 pub mod color;
 pub mod config;
@@ -21,6 +22,7 @@ pub mod raster;
 pub mod ridge;
 pub mod segment;
 mod separators;
+mod soft_edges;
 pub mod structural;
 pub mod svg;
 mod union_find;

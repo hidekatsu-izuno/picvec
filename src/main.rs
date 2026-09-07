@@ -32,7 +32,7 @@ struct Arguments {
     /// Disable source-resolution rate-distortion refinement.
     #[arg(long)]
     no_adaptive_refinement: bool,
-    /// Maximum additional SVG size accepted for adaptive regions, in MiB.
+    /// Maximum additional SVG size for adaptive regions in MiB (0: unlimited).
     #[arg(long, default_value_t = Config::default().adaptive_svg_budget_bytes / (1024 * 1024))]
     adaptive_svg_budget_mib: usize,
     /// Additional passes can remove more internal contours at an extra time cost (1..=8).
@@ -106,6 +106,10 @@ fn run() -> picvec::Result<()> {
         summary.geometry.regions,
         summary.elapsed_seconds,
     );
+    if summary.adaptive_refinement.rejected_for_budget > 0 {
+        eprintln!("kept {} regions at base resolution: the {} MiB adaptive SVG budget was exhausted; increase --adaptive-svg-budget-mib or set it to 0 (unlimited) to retain more detail",
+            summary.adaptive_refinement.rejected_for_budget, arguments.adaptive_svg_budget_mib);
+    }
     Ok(())
 }
 

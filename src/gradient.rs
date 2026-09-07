@@ -6209,31 +6209,21 @@ fn fit_all_internal(
                 .count()
                 * 2
                 >= indices.len();
-            let strong_bright = !strong_dark
-                && indices
-                    .iter()
-                    .filter(|&&index| strong_branches.bright[index])
-                    .count()
-                    * 2
-                    >= indices.len();
             let branch_paint_indices: Vec<usize> = if strong_dark {
                 paint_indices
                     .iter()
                     .copied()
                     .filter(|&index| strong_branches.dark[index])
                     .collect()
-            } else if strong_bright {
-                paint_indices
-                    .iter()
-                    .copied()
-                    .filter(|&index| {
-                        strong_branches.bright[index] || !segmentation.paint_samples[index]
-                    })
-                    .collect()
             } else {
                 Vec::new()
             };
-            let selected_paint_indices = if strong_dark || strong_bright {
+            // A bright ridge describes only the crest of a highlight, not
+            // the complete Paint face. Restricting a curved highlight to
+            // that crest leaves its tips unobserved and lets a fitted
+            // gradient extrapolate unrelated dark colours into them.
+            // Keep every valid Paint sample for highlight fitting.
+            let selected_paint_indices = if strong_dark {
                 &branch_paint_indices
             } else {
                 paint_indices
@@ -6692,6 +6682,86 @@ mod tests {
             ],
             summary: crate::segment::SegmentationSummary::default(),
         }
+    }
+
+    #[test]
+    fn curved_car_highlight_keeps_colour_beyond_the_bright_ridge() {
+        // A crop of the native underpaint and its pre-fit ownership. Mask
+        // channels are face membership, valid Paint samples, and effective
+        // bright-ridge membership (see docs/car-highlight-sampling.md).
+        // The ridge covers a majority of the face but
+        // omits the curved right tip where the old fit invented a shadow.
+        let input = image::load_from_memory(include_bytes!("test-data/car-highlight-source.png"))
+            .unwrap()
+            .to_rgb8();
+        let mask = image::load_from_memory(include_bytes!("test-data/car-highlight-mask.png"))
+            .unwrap()
+            .to_rgb8();
+        let w = input.width() as usize;
+        let h = input.height() as usize;
+        let source = Raster::new(
+            w,
+            h,
+            input
+                .pixels()
+                .map(|p| p.0.map(|v| v as f32 / 255.0))
+                .collect(),
+        );
+        let mut segmentation = two_face_segmentation(&source);
+        segmentation.labels = mask.pixels().map(|p| u32::from(p[0] > 0)).collect();
+        segmentation.paint_samples = mask.pixels().map(|p| p[1] > 0).collect();
+        let highlight = [0.96415824, 0.5070586, 0.467012];
+        segmentation.canonical = Raster::new(
+            w,
+            h,
+            segmentation
+                .labels
+                .iter()
+                .map(|&l| if l == 1 { highlight } else { [0.3; 3] })
+                .collect(),
+        );
+        for label in 0..2 {
+            let indices = segmentation
+                .labels
+                .iter()
+                .enumerate()
+                .filter_map(|(i, &l)| (l == label as u32).then_some(i))
+                .collect::<Vec<_>>();
+            let b = bounds(&indices, w);
+            let region = &mut segmentation.regions[label];
+            region.area = indices.len();
+            region.min_x = b.min_x as usize;
+            region.max_x = b.max_x as usize + 1;
+            region.min_y = b.min_y as usize;
+            region.max_y = b.max_y as usize + 1;
+        }
+        let branches = crate::ridge::StrongRidgeBranches {
+            dark: vec![false; w * h],
+            bright: mask.pixels().map(|p| p[2] > 0).collect(),
+        };
+        let (paints, _) = fit_all_without_topology(
+            &[Some(Paint::Solid { color: [0.3; 3] }), None],
+            &source,
+            &source,
+            &segmentation,
+            &branches,
+            &Config::default(),
+        );
+        let tip = segmentation
+            .labels
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &l)| {
+                (l == 1 && i % w >= 78 && segmentation.paint_samples[i]).then_some(i)
+            })
+            .collect::<Vec<_>>();
+        assert!(tip.len() > 100);
+        let error = paint_stats_against_labs(&lab_pixels(&source), &tip, w, &paints[1]);
+        assert!(
+            error.mean < 5.0,
+            "highlight tip lost its source colour: {error:?}, {:?}",
+            paints[1]
+        );
     }
 
     #[test]

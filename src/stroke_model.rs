@@ -559,16 +559,71 @@ pub(super) fn recover_alpha_boundary(
     image: &Raster,
     matte: &crate::chroma::AlphaMatte,
 ) -> Vec<StructuralStroke> {
+    let mut strokes = recover_alpha_boundary_polarity(image, matte, true);
+    strokes.extend(recover_alpha_boundary_polarity(image, matte, false));
+    strokes.sort_by_key(|s| s.role == "alpha-boundary-stroke");
+    strokes
+}
+
+fn recover_alpha_boundary_polarity(
+    image: &Raster,
+    matte: &crate::chroma::AlphaMatte,
+    bright: bool,
+) -> Vec<StructuralStroke> {
+    let polarity = if bright { 1.0 } else { -1.0 };
     let mut strokes = Vec::new();
-    // Authored partial-alpha areas have a different coverage model.
-    if (0..matte.len()).any(|i| {
-        let a = matte.get(i);
-        a > 0.0 && a < 1.0
-    }) {
+    // Bright partial-alpha areas retain their existing coverage model.
+    if bright
+        && (0..matte.len()).any(|i| {
+            let a = matte.get(i);
+            a > 0.0 && a < 1.0
+        })
+    {
         return strokes;
     }
+    // Partial alpha at an antialiased dark rim is valid evidence. Exclude
+    // invisible RGB from its profiles; the shared mask supplies coverage.
+    let edge_sample = |p: Point, paint: [f32; 3]| {
+        if bright {
+            return sample(image, p);
+        }
+        let x = (p.x - 0.5).clamp(0.0, (image.width - 1) as f32);
+        let y = (p.y - 0.5).clamp(0.0, (image.height - 1) as f32);
+        let (ix, iy) = (x as usize, y as usize);
+        let (tx, ty) = (x - ix as f32, y - iy as f32);
+        let mut mass = 0.0;
+        let mut color = [0.0; 3];
+        for (sx, sy, weight) in [
+            (ix, iy, (1.0 - tx) * (1.0 - ty)),
+            ((ix + 1).min(image.width - 1), iy, tx * (1.0 - ty)),
+            (ix, (iy + 1).min(image.height - 1), (1.0 - tx) * ty),
+            (
+                (ix + 1).min(image.width - 1),
+                (iy + 1).min(image.height - 1),
+                tx * ty,
+            ),
+        ] {
+            let i = sy * image.width + sx;
+            let weight = weight * matte.get(i);
+            mass += weight;
+            for c in 0..3 {
+                color[c] += weight * image.pixels[i][c];
+            }
+        }
+        if mass > 1e-5 {
+            color.map(|c| c / mass)
+        } else {
+            paint
+        }
+    };
     for contour in matte.isocontours(0.5) {
-        let spans = crate::geometry::alpha_contour_spans(&contour);
+        // Dark rims may be subpixel dots. Sample them more finely than
+        // the bright, continuous rim so a span cannot bridge several dots.
+        let spans = if bright {
+            crate::geometry::alpha_contour_spans(&contour)
+        } else {
+            crate::geometry::alpha_contour_spans_with_step(&contour, 0.5)
+        };
         if spans.len() < 8 {
             continue;
         }
@@ -597,8 +652,8 @@ pub(super) fn recover_alpha_boundary(
             }
             let paint = sample(image, offset(p, normal, 3.5));
             let peak = (0..=6)
-                .map(|i| sample(image, offset(p, normal, i as f32 * 0.25)))
-                .max_by(|a, b| luma(*a).total_cmp(&luma(*b)))
+                .map(|i| edge_sample(offset(p, normal, i as f32 * 0.25), paint))
+                .max_by(|a, b| (polarity * luma(*a)).total_cmp(&(polarity * luma(*b))))
                 .unwrap();
             observations.push(Some((normal, paint, peak)));
         }
@@ -612,9 +667,9 @@ pub(super) fn recover_alpha_boundary(
             let ink = (-3..=3)
                 .filter_map(|d| observations[(i as isize + d).rem_euclid(count as isize) as usize])
                 .map(|(_, _, peak)| peak)
-                .max_by(|a, b| luma(*a).total_cmp(&luma(*b)))
+                .max_by(|a, b| (polarity * luma(*a)).total_cmp(&(polarity * luma(*b))))
                 .unwrap();
-            let contrast = luma(ink) - luma(paint);
+            let contrast = polarity * (luma(ink) - luma(paint));
             if contrast < 0.06
                 || distance(
                     sample(image, offset(spans[i].points[1], normal, 2.5)),
@@ -625,11 +680,11 @@ pub(super) fn recover_alpha_boundary(
             }
             let width: f32 = (0..12)
                 .map(|j| {
-                    let observed = sample(
-                        image,
+                    let observed = edge_sample(
                         offset(spans[i].points[1], normal, (j as f32 + 0.5) * 0.25),
+                        paint,
                     );
-                    ((luma(observed) - luma(paint)) / contrast).clamp(0.0, 1.0) * 0.25
+                    (polarity * (luma(observed) - luma(paint)) / contrast).clamp(0.0, 1.0) * 0.25
                 })
                 .sum();
             inks[i] = ink;
@@ -645,8 +700,9 @@ pub(super) fn recover_alpha_boundary(
                 .map(|d| widths[(i as isize + d).rem_euclid(count as isize) as usize])
                 .collect();
             local.sort_by(f32::total_cmp);
-            let width = local[2];
-            if width < 0.12 || luma(inks[i]) - luma(paint) < 0.06 {
+            // Keep the measured dark-dot gaps instead of median-filling them.
+            let width = if bright { local[2] } else { widths[i] };
+            if width < 0.12 || polarity * (luma(inks[i]) - luma(paint)) < 0.06 {
                 continue;
             }
             let points = spans[i].points.to_vec();
@@ -772,17 +828,22 @@ pub(super) fn refine_interrupted(
             let background =
                 visible(offset(p, normal, -reach)).min(visible(offset(p, normal, reach)));
             let contrast = background - luma(stroke.color);
+            // Insufficient contrast is an unknown width, not evidence of
+            // missing ink. In particular, dark shading can cross this gate
+            // repeatedly along a continuous line. Keep the existing stroke
+            // unless every profile can support the interruption decision.
+            if contrast <= 0.15 {
+                return None;
+            }
             let mut mass = 0.0;
             let mut moment = 0.0;
-            if contrast > 0.15 {
-                for k in -count..=count {
-                    let d = k as f32 * 0.25;
-                    let weight = ((background - visible(offset(p, normal, d))) / contrast)
-                        .clamp(0.0, 1.0)
-                        * 0.25;
-                    mass += weight;
-                    moment += weight * d;
-                }
+            for k in -count..=count {
+                let d = k as f32 * 0.25;
+                let weight = ((background - visible(offset(p, normal, d))) / contrast)
+                    .clamp(0.0, 1.0)
+                    * 0.25;
+                mass += weight;
+                moment += weight * d;
             }
             let center = offset(
                 p,
@@ -885,6 +946,37 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn insufficient_profile_contrast_does_not_turn_a_continuous_line_into_dots() {
+        let width = 96;
+        let height = 40;
+        let mut source = Raster::new(
+            width,
+            height,
+            (0..width * height)
+                .map(|i| {
+                    // The background crosses the profile contrast gate,
+                    // while the black line itself remains continuous.
+                    let tone = if (i % width) % 12 < 6 { 0.13 } else { 0.18 };
+                    [tone; 3]
+                })
+                .collect(),
+        );
+        for x in 8..88 {
+            source.pixels[20 * width + x] = [0.0; 3];
+        }
+        let stroke = StructuralStroke {
+            points: vec![Point { x: 10.5, y: 20.5 }, Point { x: 85.5, y: 20.5 }],
+            path_data: None,
+            precise_points: None,
+            color: [0.0; 3],
+            width: 1.8,
+            role: "ridge",
+            width_samples: Vec::new(),
+        };
+        assert!(refine_interrupted(&source, &stroke, None).is_none());
     }
 
     #[test]
@@ -1244,10 +1336,46 @@ mod tests {
     }
 
     #[test]
+    fn cactus_dotted_rim_is_recovered_at_the_transparent_left_edge() {
+        let input = image::load_from_memory(include_bytes!("test-data/cactus-circle.png"))
+            .unwrap()
+            .to_rgba8();
+        let source = Raster::new(
+            input.width() as usize,
+            input.height() as usize,
+            input
+                .pixels()
+                .map(|p| {
+                    [
+                        p[0] as f32 / 255.0,
+                        p[1] as f32 / 255.0,
+                        p[2] as f32 / 255.0,
+                    ]
+                })
+                .collect(),
+        );
+        let matte = crate::chroma::AlphaMatte::from_u8(
+            source.width,
+            source.height,
+            input.pixels().map(|p| p[3]).collect(),
+        );
+        let source = crate::chroma::prepare_source_alpha(&source, &matte);
+        let strokes = recover_alpha_boundary(&source, &matte);
+        for y in [41.0, 44.0] {
+            assert!(
+                strokes.iter().any(|s| s.role == "alpha-boundary-stroke"
+                    && luma(s.color) < 0.6
+                    && s.points.iter().any(|p| p.x < 19.0 && (p.y - y).abs() < 1.0)),
+                "source dots disappeared near left edge y={y}"
+            );
+        }
+    }
+
+    #[test]
     fn alpha_rim_uses_continuous_mask_curves_and_keeps_black_silhouettes() {
         let width = 96;
-        for mode in 0..3 {
-            let white_rim = mode != 0;
+        for mode in 0..6 {
+            let has_rim = mode % 3 != 0;
             let mut image = Raster::blank(width, width, [0.0; 3]);
             let mut alpha = vec![0.0; width * width];
             for y in 0..width {
@@ -1256,7 +1384,7 @@ mod tests {
                     if radius < 38.0 {
                         alpha[y * width + x] = 1.0;
                         let angle = (y as f32 + 0.5 - 48.0).atan2(x as f32 + 0.5 - 48.0);
-                        let band = if white_rim && !(mode == 2 && (0.3..1.1).contains(&angle)) {
+                        let band = if has_rim && !(mode % 3 == 2 && (0.3..1.1).contains(&angle)) {
                             ((radius - 36.5) / 1.0).clamp(0.0, 1.0)
                         } else {
                             0.0
@@ -1265,10 +1393,15 @@ mod tests {
                     }
                 }
             }
+            if mode >= 3 {
+                for pixel in &mut image.pixels {
+                    *pixel = pixel.map(|c| 1.0 - c);
+                }
+            }
             let matte = crate::chroma::AlphaMatte::new(width, width, alpha);
             let source = crate::chroma::prepare_source_alpha(&image, &matte);
             let recovered = recover_alpha_boundary(&source, &matte);
-            if !white_rim {
+            if !has_rim {
                 assert!(recovered.is_empty());
                 continue;
             }
@@ -1286,7 +1419,7 @@ mod tests {
                     }
                 }
             }
-            if mode == 2 {
+            if mode % 3 == 2 {
                 assert!(!covered[7], "an intentional rim gap was bridged");
                 assert!(covered[36], "the supported opposite rim disappeared");
                 continue;

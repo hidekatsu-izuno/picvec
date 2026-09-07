@@ -3896,7 +3896,20 @@ pub fn refine_thin_paint_ownership(
                         .then_with(|| second_contact.cmp(first_contact))
                         .then_with(|| first.cmp(second))
                 })
-                .map(|(&owner, _)| owner);
+                .map(|(&owner, _)| owner)
+                .filter(|&owner| {
+                    // A neighbouring coreless fragment can screen the
+                    // matching parent from this phase. The family proved
+                    // the incident parents collectively, so also compare
+                    // colour collectively: never force a red boundary into
+                    // the background just because it is the only directly
+                    // touching durable face. Retain the phase when its
+                    // better matching parent is not locally reachable.
+                    let error = delta_e2000(prototypes[label], prototypes[owner as usize]);
+                    durable_parents.iter().all(|&parent| {
+                        error <= delta_e2000(prototypes[label], prototypes[parent as usize]) + 1e-4
+                    })
+                });
         }
     }
     let mut output = original.clone();
@@ -5539,6 +5552,61 @@ mod tests {
         }
         assert_eq!(segmentation.summary.thin_paint_refined, 4);
         assert_eq!(segmentation.summary.thin_paint_reassigned_pixels, 4);
+    }
+
+    #[test]
+    fn boundary_phase_cannot_discard_colour_when_its_matching_parent_is_screened() {
+        let width = 24;
+        let height = 14;
+        let background = [0.92; 3];
+        let red = [0.75, 0.08, 0.06];
+        let mut source = Raster::blank(width, height, background);
+        let mut labels = vec![0; width * height];
+        for y in 7..height {
+            for x in 0..width {
+                let i = y * width + x;
+                source.pixels[i] = red;
+                labels[i] = 5;
+            }
+        }
+        for (label, x) in (1..=4).zip([4, 7, 10, 13]) {
+            labels[7 * width + x] = label;
+        }
+        // This equally red, coreless fragment screens the first phase
+        // from the durable red face. Its only direct durable neighbour is
+        // the background, but that does not make the phase background.
+        for x in 3..=5 {
+            labels[7 * width + x] = 6;
+            labels[8 * width + x] = 6;
+        }
+        labels[7 * width + 4] = 1;
+        let regions = region_stats(&source, &labels, 7);
+        let mut segmentation = Segmentation {
+            width,
+            height,
+            labels,
+            paint_keys: (0..7).collect(),
+            paint_samples: vec![true; width * height],
+            canonical: source.clone(),
+            regions,
+            summary: SegmentationSummary::default(),
+        };
+        refine_thin_paint_ownership(
+            &source,
+            &mut segmentation,
+            &vec![false; width * height],
+            &vec![false; width * height],
+        );
+        let tip = 7 * width + 4;
+        assert_ne!(segmentation.labels[tip], segmentation.labels[0]);
+        assert_eq!(segmentation.canonical.pixels[tip], red);
+        // The unscreened phases can still rejoin their matching parent.
+        for x in [7, 10, 13] {
+            assert_eq!(
+                segmentation.labels[7 * width + x],
+                segmentation.labels[10 * width + x]
+            );
+        }
     }
 
     #[test]

@@ -1191,8 +1191,13 @@ fn regularize_short_corner_excursions(
                 };
                 let incoming_anchor = project(rotated[start_index], first_centre, first_direction);
                 let outgoing_anchor = project(rotated[end_index], second_centre, second_direction);
-                if incoming_anchor.distance(rotated[start_index]) > straight_corridor
-                    || outgoing_anchor.distance(rotated[end_index]) > straight_corridor
+                // Rays are fitted to edge midpoints, but their anchors are
+                // grid vertices. Allow the half-pixel diagonal between those
+                // representations; a valid straight raster edge can exceed
+                // the narrower midpoint corridor at its terminal vertex.
+                let anchor_corridor = straight_corridor.max(std::f32::consts::FRAC_1_SQRT_2);
+                if incoming_anchor.distance(rotated[start_index]) > anchor_corridor
+                    || outgoing_anchor.distance(rotated[end_index]) > anchor_corridor
                 {
                     continue;
                 }
@@ -1259,7 +1264,10 @@ fn regularize_short_corner_excursions(
                 } else {
                     (48.0 * uncertainty).max(12.0)
                 };
-                if area > area_limit {
+                // The removed polygon includes raster stair steps. Account for
+                // their half-pixel uncertainty along the replacement rays.
+                let raster_area_allowance = anchor_corridor * replacement_length;
+                if area > area_limit + raster_area_allowance {
                     continue;
                 }
                 let mut deviation = 0.0_f32;
@@ -2782,11 +2790,23 @@ fn fit_alpha_contour(points: &[Point]) -> (Vec<Point>, Vec<CurveSegment>) {
         );
         return (source, curves);
     }
+    // Normalize short excursions before protecting sharp turns. Otherwise the
+    // mask and its recovered rim preserve spurs removed from Paint geometry.
+    // Keep the interpolated coordinates: no snapping to the pixel grid.
+    let regularized = regularize_short_corner_excursions(
+        &source,
+        &vec![RegionPair::new(0, 1); source.len() - 1],
+        &HashSet::new(),
+        1,
+        0.5,
+    );
+    source = regularized.points;
     // Keep sharp turns detected before fairing, including the tips of narrow
     // bands: a smoothed corner probe can otherwise erase their end caps.
     let corners = polyline_corner_indices(&source, true, 0.65, 100.0);
     let count = source.len() - 1;
     let mut fixed = corners.clone();
+    fixed.extend(regularized.fixed);
     for &corner in &corners {
         // Protect the small cap around a reversal as well as its vertex.
         let before = source[(corner + count - 3) % count];
@@ -2823,6 +2843,10 @@ pub(crate) struct AlphaContourSpan {
 }
 
 pub(crate) fn alpha_contour_spans(points: &[Point]) -> Vec<AlphaContourSpan> {
+    alpha_contour_spans_with_step(points, 3.0)
+}
+
+pub(crate) fn alpha_contour_spans_with_step(points: &[Point], step: f32) -> Vec<AlphaContourSpan> {
     let (source, mut curves) = fit_alpha_contour(points);
     if source.is_empty() {
         return Vec::new();
@@ -2841,7 +2865,7 @@ pub(crate) fn alpha_contour_spans(points: &[Point]) -> Vec<AlphaContourSpan> {
                     .distance(cubic_point(curve, (i + 1) as f32 / 8.0))
             })
             .sum();
-        let count = (length / 3.0).ceil().max(1.0) as usize;
+        let count = (length / step).ceil().max(1.0) as usize;
         let mut remainder = curve;
         for i in 0..count {
             let (part, rest) = split_curve(remainder, 1.0 / (count - i) as f64);
@@ -7222,6 +7246,54 @@ mod tests {
     use crate::color::rgb_to_lab;
     use crate::raster::Raster;
     use crate::segment::{RegionStats, Segmentation, SegmentationSummary};
+
+    #[test]
+    fn cube_alpha_contour_does_not_restore_corner_spurs() {
+        let input = image::load_from_memory(include_bytes!("test-data/cube-alpha.png"))
+            .unwrap()
+            .to_luma8();
+        let matte = crate::chroma::AlphaMatte::from_u8(
+            input.width() as usize,
+            input.height() as usize,
+            input.into_raw(),
+        );
+        let contours = matte.isocontours(0.5);
+        assert_eq!(contours.len(), 1);
+        let (_, curves) = fit_alpha_contour(&contours[0]);
+        let samples = sample_curve_sequence(&curves, 0.1);
+        let left = samples.iter().map(|p| p.x).fold(f32::INFINITY, f32::min);
+        let bottom = samples
+            .iter()
+            .map(|p| p.y)
+            .fold(f32::NEG_INFINITY, f32::max);
+        assert!(left > 18.0, "left spur survived: {left}");
+        assert!(bottom < 387.0, "bottom spur survived: {bottom}");
+    }
+
+    #[test]
+    fn cube_bottom_corner_excursion_is_regularized() {
+        let raw = include_str!("test-data/cube-bottom-corner.txt")
+            .lines()
+            .map(|line| {
+                let mut values = line.split_whitespace().map(|v| v.parse::<f32>().unwrap());
+                Point {
+                    x: values.next().unwrap(),
+                    y: values.next().unwrap(),
+                }
+            })
+            .collect::<Vec<_>>();
+        let result = regularize_short_corner_excursions(
+            &raw,
+            &vec![RegionPair::new(0, 1); raw.len() - 1],
+            &HashSet::new(),
+            1601,
+            0.5,
+        );
+        assert!(!result.corners.is_empty(), "cube spike survived");
+        assert!(result.points.iter().all(|point| point.y < 387.0));
+        assert_eq!(result.points.first(), raw.first());
+        assert_eq!(result.points.last(), raw.last());
+    }
 
     #[test]
     fn sorted_fairing_search_matches_exhaustive_hypot_and_ties() {

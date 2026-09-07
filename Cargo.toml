@@ -1,6 +1,6 @@
 [package]
 name = "picvec"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.95"
 license = "MIT"
@@ -15,9 +15,7 @@ include = [
     "/Cargo.lock",
     "/README.md",
     "/LICENSE",
-    "/THIRD_PARTY_NOTICES.md",
-    "/docs/chroma-key-background-removal.md",
-    "/docs/source-supported-region-merging.md",
+    "/THIRD_PARTY_NOTICES.md"
 ]
 
 [features]

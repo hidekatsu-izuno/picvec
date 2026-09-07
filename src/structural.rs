@@ -2188,6 +2188,113 @@ fn graph_endpoint(stroke: &StructuralStroke, at_start: bool) -> (Point, (f32, f3
     (endpoint, (dx / length, dy / length))
 }
 
+/// A medial ridge can stop just before it enters a broad dark Paint face:
+/// inside that face it no longer has two lighter sides. Recover only a
+/// short, source-supported terminal run that actually reaches such a face.
+fn extend_graph_to_dark_paint(
+    strokes: &mut [StructuralStroke],
+    source: &[Lab],
+    paint: &[Lab],
+    width: usize,
+    height: usize,
+) {
+    let mut endpoints = HashMap::new();
+    for stroke in strokes.iter().filter(|s| s.points.len() >= 2) {
+        for p in [stroke.points[0], *stroke.points.last().unwrap()] {
+            *endpoints.entry(point_key(p)).or_insert(0_usize) += 1;
+        }
+    }
+    for stroke in strokes {
+        if stroke.points.len() < 2
+            || !matches!(
+                stroke.role,
+                "ridge" | "ridge-on-boundary" | "dark-boundary" | "coloured-ridge-on-boundary"
+            )
+            || stroke
+                .points
+                .windows(2)
+                .map(|p| p[0].distance(p[1]))
+                .sum::<f32>()
+                < 8.0
+        {
+            continue;
+        }
+        let ink = rgb_to_lab(stroke.color).l;
+        let radius = (stroke.width * 0.75 + 0.5).max(1.5);
+        let limit = (stroke.width * 4.0).clamp(6.0, 12.0);
+        for at_start in [true, false] {
+            let (endpoint, tangent) = graph_endpoint(stroke, at_start);
+            if endpoints[&point_key(endpoint)] != 1 {
+                continue;
+            }
+            let normal = (-tangent.1, tangent.0);
+            let sample = |image: &[Lab], p: Point, offset: f32| {
+                bilinear_lab_precise(
+                    image,
+                    width,
+                    height,
+                    [
+                        (p.x + normal.0 * offset) as f64,
+                        (p.y + normal.1 * offset) as f64,
+                    ],
+                )
+                .l
+            };
+            let in_paint = |p: Point| {
+                [-radius, 0.0, radius]
+                    .iter()
+                    .all(|&d| sample(paint, p, d) <= ink + 4.0)
+            };
+            let anchor = Point {
+                x: endpoint.x - tangent.0 * radius * 2.0,
+                y: endpoint.y - tangent.1 * radius * 2.0,
+            };
+            if sample(source, anchor, 0.0) + 4.0
+                > sample(source, anchor, -radius).min(sample(source, anchor, radius))
+            {
+                continue;
+            }
+            if in_paint(endpoint) {
+                continue;
+            }
+            let mut target = None;
+            for step in 1..=(limit * 2.0) as usize {
+                let distance = step as f32 * 0.5;
+                let p = Point {
+                    x: endpoint.x + tangent.0 * distance,
+                    y: endpoint.y + tangent.1 * distance,
+                };
+                if p.x < radius
+                    || p.y < radius
+                    || p.x >= width as f32 - radius
+                    || p.y >= height as f32 - radius
+                {
+                    break;
+                }
+                let center = sample(source, p, 0.0);
+                let side = sample(source, p, -radius).min(sample(source, p, radius));
+                // Never bridge a source gap merely because dark Paint lies
+                // nearby. A genuine terminal remains ink-like or has a
+                // measured dark valley until it reaches the receiving face.
+                if center > ink + 6.9 && center + 4.0 > side {
+                    break;
+                }
+                if in_paint(p) {
+                    target = Some(p);
+                    break;
+                }
+            }
+            if let Some(target) = target {
+                if at_start {
+                    stroke.points.insert(0, target);
+                } else {
+                    stroke.points.push(target);
+                }
+            }
+        }
+    }
+}
+
 /// Return the same lexicographically ordered pairs as a dense `first < second`
 /// scan, restricted to points within `maximum_distance`. A cell has exactly
 /// the query radius as its side, so every qualifying pair is in one of the
@@ -2685,6 +2792,8 @@ fn straight_graph_line(
     points: &[Point],
     tolerance: f32,
     minimum_length: f32,
+    shared_start: bool,
+    shared_end: bool,
 ) -> Option<(Point, Point)> {
     if points.len() < 2 {
         return None;
@@ -2725,8 +2834,23 @@ fn straight_graph_line(
         x: (centre_x + maximum * direction.0) as f32,
         y: (centre_y + maximum * direction.1) as f32,
     };
-    let chord_x = (maximum - minimum) * direction.0;
-    let chord_y = (maximum - minimum) * direction.1;
+    if (end.x - start.x) * (points[points.len() - 1].x - points[0].x)
+        + (end.y - start.y) * (points[points.len() - 1].y - points[0].y)
+        < 0.0
+    {
+        std::mem::swap(&mut start, &mut end);
+    }
+    // Validate the line that will actually be emitted. Restoring a shared
+    // graph endpoint after validation can rotate a long, thin stroke away
+    // from its source samples and leave a gap against the Paint boundary.
+    if shared_start {
+        start = points[0];
+    }
+    if shared_end {
+        end = points[points.len() - 1];
+    }
+    let chord_x = end.x as f64 - start.x as f64;
+    let chord_y = end.y as f64 - start.y as f64;
     let length = chord_x.hypot(chord_y);
     if length < minimum_length.max(0.0) as f64 {
         return None;
@@ -2752,12 +2876,6 @@ fn straight_graph_line(
     };
     if distance_95 > tolerance.max(0.0) as f64 {
         return None;
-    }
-    if (end.x - start.x) * (points[points.len() - 1].x - points[0].x)
-        + (end.y - start.y) * (points[points.len() - 1].y - points[0].y)
-        < 0.0
-    {
-        std::mem::swap(&mut start, &mut end);
     }
     Some((start, end))
 }
@@ -4344,6 +4462,13 @@ pub fn select_missing_with_junctions(
             .filter(|stroke| stroke.role == "boundary-stroke")
             .cloned(),
     );
+    extend_graph_to_dark_paint(
+        &mut selected_graph,
+        &source_lab,
+        &rendered_lab,
+        width,
+        height,
+    );
     let mut endpoint_counts = HashMap::<(i64, i64), usize>::new();
     for edge in &selected_graph {
         for point in [edge.points[0], edge.points[edge.points.len() - 1]] {
@@ -4385,15 +4510,14 @@ pub fn select_missing_with_junctions(
             let end_key = point_key(stroke.points[stroke.points.len() - 1]);
             let shared_start = endpoint_counts.get(&start_key).copied().unwrap_or(0) > 1;
             let shared_end = endpoint_counts.get(&end_key).copied().unwrap_or(0) > 1;
-            let straight =
-                straight_graph_line(&stroke.points, std::f32::consts::FRAC_1_SQRT_2, minimum);
-            let (points, path_data) = if let Some((mut start, mut end)) = straight {
-                if shared_start {
-                    start = stroke.points[0];
-                }
-                if shared_end {
-                    end = stroke.points[stroke.points.len() - 1];
-                }
+            let straight = straight_graph_line(
+                &stroke.points,
+                std::f32::consts::FRAC_1_SQRT_2,
+                minimum,
+                shared_start,
+                shared_end,
+            );
+            let (points, path_data) = if let Some((start, end)) = straight {
                 (vec![start, end], None)
             } else {
                 let fitting_points = refine_stroke_centerline(&stroke, &source_lab, width, height);
@@ -4461,6 +4585,82 @@ pub fn select_missing_with_junctions(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_ridge_reaches_dark_paint_only_with_continuous_source_ink() {
+        for gap in [false, true] {
+            let width = 48;
+            let height = 32;
+            let background = [0.65, 0.1, 0.1];
+            let ink = [0.03; 3];
+            let mut paint = Raster::blank(width, height, background);
+            for y in 0..height {
+                for x in 32..width {
+                    paint.pixels[y * width + x] = ink;
+                }
+            }
+            let mut source = paint.clone();
+            for x in 10..32 {
+                if !gap || x < 29 {
+                    source.pixels[16 * width + x] = ink;
+                }
+            }
+            let original_end = Point { x: 28.5, y: 16.5 };
+            let mut strokes = vec![StructuralStroke {
+                points: vec![Point { x: 10.5, y: 16.5 }, original_end],
+                path_data: None,
+                precise_points: None,
+                color: ink,
+                width: 1.2,
+                role: "ridge",
+                width_samples: Vec::new(),
+            }];
+            extend_graph_to_dark_paint(
+                &mut strokes,
+                &lab_pixels(&source),
+                &lab_pixels(&paint),
+                width,
+                height,
+            );
+            let end = *strokes[0].points.last().unwrap();
+            if gap {
+                assert_eq!(end, original_end, "bridged an intentional source gap");
+            } else {
+                assert!(
+                    end.x >= 32.5 && end.x <= 33.0,
+                    "missed the receiving Paint: {end:?}"
+                );
+                assert_eq!(end.y, 16.5);
+            }
+            assert_eq!(strokes[0].points[0], Point { x: 10.5, y: 16.5 });
+        }
+    }
+
+    #[test]
+    fn straight_stroke_is_validated_after_restoring_shared_endpoints() {
+        // A long source-aligned run with a junction displaced by 2.6 px,
+        // as at the car's side-window corner. The unconstrained fit passes,
+        // but anchoring its end would tilt the whole run off the source.
+        let mut points = (0..=100)
+            .map(|x| Point {
+                x: x as f32,
+                y: 20.0,
+            })
+            .collect::<Vec<_>>();
+        points[100].y -= 2.6;
+        let tolerance = std::f32::consts::FRAC_1_SQRT_2;
+        assert!(straight_graph_line(&points, tolerance, 4.0, false, false).is_some());
+        assert!(straight_graph_line(&points, tolerance, 4.0, false, true).is_none());
+        points.reverse();
+        assert!(straight_graph_line(&points, tolerance, 4.0, true, false).is_none());
+        // A truly straight run still emits one line and retains both nodes.
+        for point in &mut points {
+            point.y = 20.0 - point.x * 0.15;
+        }
+        let (start, end) = straight_graph_line(&points, tolerance, 4.0, true, true).unwrap();
+        assert_eq!(start, points[0]);
+        assert_eq!(end, points[100]);
+    }
 
     #[test]
     fn dotted_continuations_require_source_marks_inside_the_gap() {

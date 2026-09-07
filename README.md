@@ -40,7 +40,7 @@ The first argument is the input raster; the second is the SVG file to create.
 | `--remove-chroma-key-background` | Remove a detected red, green, blue, cyan, magenta, or yellow background. |
 | `--paint-merge-passes <N>` | Region-merge passes, from 1 to 8 (1). |
 | `--no-adaptive-refinement` | Disable source-resolution detail refinement. |
-| `--adaptive-svg-budget-mib <MIB>` | Maximum additional SVG size for refinement (32). |
+| `--adaptive-svg-budget-mib <MIB>` | Maximum additional SVG size for refinement (0: unlimited, default). |
 | `--threads <N>` | Worker count; 0 selects half the detected CPUs, capped at 4 and at least 1 (0). |
 | `--quality-metrics` | Report full-SVG DeltaE00/SSIM to stderr; requires `diagnostics`. |
 | `--verbose` | Print a JSON diagnostic report to stderr; requires `diagnostics`. |

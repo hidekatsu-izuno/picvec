@@ -26,6 +26,7 @@ pub struct Config {
     /// Maximum number of source regions evaluated by the full vector model.
     pub adaptive_max_patches: usize,
     /// Maximum additional serialized SVG bytes accepted for refinements.
+    /// Zero means unlimited; local quality and efficiency checks still apply.
     pub adaptive_svg_budget_bytes: usize,
     /// Minimum local DeltaE00 reduction before a refined region is useful.
     pub adaptive_min_perceptual_gain: f32,
@@ -92,7 +93,7 @@ impl Default for Config {
             adaptive_refinement: true,
             adaptive_tile_dimension: 1400,
             adaptive_max_patches: 64,
-            adaptive_svg_budget_bytes: 32 * 1024 * 1024,
+            adaptive_svg_budget_bytes: 0,
             adaptive_min_perceptual_gain: 0.75,
             adaptive_min_predicted_rate: 2.5,
             adaptive_complexity_penalty: 1.0,
@@ -191,8 +192,8 @@ impl Config {
             "adaptive_max_patches must be at least 1",
         )?;
         require(
-            self.adaptive_svg_budget_bytes >= 1024,
-            "adaptive_svg_budget_bytes must be at least 1024",
+            self.adaptive_svg_budget_bytes == 0 || self.adaptive_svg_budget_bytes >= 1024,
+            "adaptive_svg_budget_bytes must be zero (unlimited) or at least 1024",
         )?;
         require(
             self.adaptive_min_perceptual_gain.is_finite()
