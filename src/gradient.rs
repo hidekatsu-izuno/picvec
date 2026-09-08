@@ -6791,7 +6791,7 @@ mod tests {
     fn curved_car_highlight_keeps_colour_beyond_the_bright_ridge() {
         // A crop of the native underpaint and its pre-fit ownership. Mask
         // channels are face membership, valid Paint samples, and effective
-        // bright-ridge membership (see docs/car-highlight-sampling.md).
+        // bright-ridge membership.
         // The ridge covers a majority of the face but
         // omits the curved right tip where the old fit invented a shadow.
         let input = image::load_from_memory(include_bytes!("test-data/car-highlight-source.png"))
