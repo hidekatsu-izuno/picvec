@@ -382,7 +382,8 @@ pub(super) fn align_stroke(
         return None;
     }
     let curves = ellipse.curves(start, sweep);
-    if !super::boundary_corridor_supported(source, &curves, super::fairing_raster_corridor()) {
+    if !super::boundary_corridor_supported(source, &curves, super::closed_contour_corridor(contour))
+    {
         return None;
     }
     Some((
@@ -394,6 +395,35 @@ pub(super) fn align_stroke(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn closed_models_share_a_budget_independent_of_location_and_winding() {
+        let data: Vec<[f32; 2]> =
+            serde_json::from_str(include_str!("test-data/round-window-outline.json")).unwrap();
+        for shift in [
+            Point::default(),
+            Point {
+                x: 1200.0,
+                y: -400.0,
+            },
+        ] {
+            for reverse in [false, true] {
+                let mut points: Vec<_> = data
+                    .iter()
+                    .map(|p| Point {
+                        x: p[0] + shift.x,
+                        y: p[1] + shift.y,
+                    })
+                    .collect();
+                if reverse {
+                    points.reverse();
+                }
+                let corridor =
+                    closed_corridor(&points, super::super::geometry_bezier::CLOSED_CORRIDOR);
+                assert!(fit_closed(&points, corridor).is_some());
+            }
+        }
+    }
 
     #[test]
     fn open_rotated_ellipse_keeps_shared_endpoints_and_one_model() {
@@ -526,7 +556,7 @@ mod tests {
             rectangle,
             vec![Point::default(); 30],
         ] {
-            assert!(fit_closed(&points, super::super::fairing_raster_corridor()).is_none());
+            assert!(fit_closed(&points, super::super::geometry_bezier::CLOSED_CORRIDOR).is_none());
         }
         for size in [6, 8, 10, 16] {
             let points: Vec<_> = (0..=4 * size)
@@ -550,7 +580,7 @@ mod tests {
                 })
                 .collect();
             assert!(
-                fit_closed(&points, super::super::fairing_raster_corridor()).is_none(),
+                fit_closed(&points, super::super::geometry_bezier::CLOSED_CORRIDOR).is_none(),
                 "small square {size}"
             );
         }

@@ -602,6 +602,129 @@ fn mixture_error(source: Lab, neighbours: &[Lab]) -> f32 {
     best
 }
 
+/// Test the topology of a tonal feature, rather than one quantized shade.
+/// A shaded stroke may have several palette owners; removing their last
+/// connecting pixel must not split it into separate pieces. Only components
+/// incident to the centre count (four-connectivity, as in the Paint graph).
+fn splits_tonal_connection(
+    labels: &[u32],
+    palette: &[Lab],
+    index: usize,
+    width: usize,
+    height: usize,
+    replacement: Lab,
+) -> bool {
+    let current = palette[labels[index] as usize].l;
+    let lower = current.min(replacement.l);
+    let upper = current.max(replacement.l);
+    let dark = current < replacement.l;
+    let x = index % width;
+    let y = index / width;
+    let mut values = [None; 9];
+    let mut levels = vec![lower, upper];
+    for (i, cell) in values.iter_mut().enumerate() {
+        let px = x as isize + (i % 3) as isize - 1;
+        let py = y as isize + (i / 3) as isize - 1;
+        if i == 4 || px < 0 || py < 0 || px >= width as isize || py >= height as isize {
+            continue;
+        }
+        let l = palette[labels[py as usize * width + px as usize] as usize].l;
+        *cell = Some(l);
+        if l > lower && l < upper {
+            levels.push(l);
+        }
+    }
+    // Connectivity can change at any neighbouring shade, not just halfway
+    // between old and new colours. Test each distinct level-set interval:
+    // the weak side of a shaded line may be absent from the midpoint mask.
+    levels.sort_by(f32::total_cmp);
+    levels.dedup();
+    levels.windows(2).any(|pair| {
+        let level = 0.5 * (pair[0] + pair[1]);
+        let occupied = values.map(|l| l.is_some_and(|l| if dark { l < level } else { l > level }));
+        disconnected_centre_neighbours(occupied)
+    })
+}
+
+fn disconnected_centre_neighbours(mut occupied: [bool; 9]) -> bool {
+    let mut components = 0;
+    for seed in [1, 3, 5, 7] {
+        if !occupied[seed] {
+            continue;
+        }
+        components += 1;
+        if components > 1 {
+            return true;
+        }
+        let mut stack = [0; 9];
+        stack[0] = seed;
+        let mut length = 1;
+        occupied[seed] = false;
+        while length > 0 {
+            length -= 1;
+            let i = stack[length];
+            for j in [
+                (i % 3 > 0).then(|| i - 1),
+                (i % 3 < 2).then(|| i + 1),
+                (i >= 3).then(|| i - 3),
+                (i < 6).then(|| i + 3),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                if occupied[j] {
+                    occupied[j] = false;
+                    stack[length] = j;
+                    length += 1;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// A line embedded in one paint has matching incident paints on its two
+/// sides. A material interface or a bevel between different paints does not
+/// supply that evidence and remains subject to ordinary AA simplification.
+fn source_supported_tonal_line(source: &[Lab], index: usize, width: usize, height: usize) -> bool {
+    let x = (index % width) as isize;
+    let y = (index / width) as isize;
+    let centre = source[index];
+    for radius in 1..=4_isize {
+        for (dx, dy) in [
+            (radius, 0),
+            (0, radius),
+            (radius, radius),
+            (radius, -radius),
+        ] {
+            let (ax, ay, bx, by) = (x - dx, y - dy, x + dx, y + dy);
+            if ax < 0
+                || ay < 0
+                || bx < 0
+                || by < 0
+                || ax >= width as isize
+                || bx >= width as isize
+                || ay >= height as isize
+                || by >= height as isize
+            {
+                continue;
+            }
+            let a = source[ay as usize * width + ax as usize];
+            let b = source[by as usize * width + bx as usize];
+            if !(centre.l + 6.0 < a.l.min(b.l) || centre.l - 6.0 > a.l.max(b.l)) {
+                continue;
+            }
+            // Incident shading may vary across the line. Its contrast must
+            // be dominated by the line, rather than requiring equal colours
+            // or treating a different-material interface as a medial ridge.
+            if 4.0 * delta_e2000(a, b) <= delta_e2000(centre, a).min(delta_e2000(centre, b)) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 #[allow(clippy::too_many_arguments)]
 fn merge_small_components(
     palette_map: &mut [u32],
@@ -769,6 +892,20 @@ fn merge_small_components(
                     let error = delta_e2000(value, colour);
                     let pixel_threshold = adaptive_tolerance((value.l + colour.l) * 0.5, config);
                     if error > (2.0 * pixel_threshold).max(35.0) {
+                        continue;
+                    }
+                    if (value.l - colour.l).abs() > 6.0
+                        && error > pixel_threshold
+                        && splits_tonal_connection(
+                            palette_map,
+                            palette_lab,
+                            index,
+                            width,
+                            height,
+                            colour,
+                        )
+                        && source_supported_tonal_line(source_lab, index, width, height)
+                    {
                         continue;
                     }
                     if selected
@@ -1440,11 +1577,18 @@ fn boundary_sleeve_assignment(
     let minimum_parent = parent_lab[first as usize]
         .l
         .min(parent_lab[second as usize].l);
+    let maximum_parent = parent_lab[first as usize]
+        .l
+        .max(parent_lab[second as usize].l);
     let mut lightness: Vec<_> = component
         .iter()
         .map(|&index| rgb_to_lab(image.pixels[index]).l)
         .collect();
-    if median_channel(&mut lightness) + 6.0 < minimum_parent {
+    let middle_lightness = median_channel(&mut lightness);
+    // A fragmented highlight can have no stable owner of its own. It must
+    // not become coverage between two darker faces merely because they are
+    // nearby. Keep some headroom for the bright ringing sleeves above.
+    if middle_lightness + 6.0 < minimum_parent || middle_lightness > maximum_parent + 12.0 {
         return None;
     }
 
@@ -4173,6 +4317,171 @@ mod tests {
     }
 
     #[test]
+    fn small_component_merge_keeps_a_shaded_bridge_and_an_authored_gap() {
+        let config = Config::default();
+        for reversed_palette in [false, true] {
+            let mut palette = vec![
+                Lab {
+                    l: 20.0,
+                    a: 0.0,
+                    b: 0.0,
+                },
+                Lab {
+                    l: 70.0,
+                    a: 0.0,
+                    b: 0.0,
+                },
+                Lab {
+                    l: 90.0,
+                    a: 0.0,
+                    b: 0.0,
+                },
+            ];
+            for gap in [false, true] {
+                let mut labels = vec![2; 49];
+                labels[23] = 0;
+                labels[25] = 0;
+                if !gap {
+                    labels[24] = 1;
+                }
+                if reversed_palette {
+                    for label in &mut labels {
+                        *label = 2 - *label;
+                    }
+                    palette.reverse();
+                }
+                let source = labels
+                    .iter()
+                    .map(|&l| palette[l as usize])
+                    .collect::<Vec<_>>();
+                merge_small_components(
+                    &mut labels,
+                    &palette,
+                    &source,
+                    7,
+                    7,
+                    &[8; 49],
+                    8,
+                    &config,
+                    false,
+                );
+                let middle = palette[labels[24] as usize].l;
+                if gap {
+                    assert_eq!(middle, 90.0, "authored gap filled");
+                } else {
+                    assert!(middle < 80.0, "shaded bridge removed: {middle}");
+                }
+                if reversed_palette {
+                    palette.reverse();
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tonal_line_support_requires_matching_incident_paints() {
+        for bright in [false, true] {
+            for different_paints in [false, true] {
+                let source = (0..81)
+                    .map(|i| {
+                        let x = i % 9;
+                        Lab {
+                            l: if x == 4 {
+                                if bright {
+                                    80.0
+                                } else {
+                                    20.0
+                                }
+                            } else if bright {
+                                20.0
+                            } else {
+                                80.0
+                            },
+                            a: if different_paints && x > 4 { 30.0 } else { 0.0 },
+                            b: 0.0,
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    source_supported_tonal_line(&source, 40, 9, 9),
+                    !different_paints
+                );
+            }
+        }
+        let shaded = (0..81)
+            .map(|i| Lab {
+                l: if i % 9 == 4 {
+                    30.0
+                } else if i % 9 < 4 {
+                    85.0
+                } else {
+                    90.0
+                },
+                a: 0.0,
+                b: 0.0,
+            })
+            .collect::<Vec<_>>();
+        assert!(source_supported_tonal_line(&shaded, 40, 9, 9));
+    }
+
+    #[test]
+    fn tonal_connectivity_crosses_palette_shades_without_protecting_edges() {
+        for bright in [false, true] {
+            let palette = [25.0, 45.0, 90.0].map(|l| Lab {
+                l: if bright { 100.0 - l } else { l },
+                a: 0.0,
+                b: 0.0,
+            });
+            for vertical in [false, true] {
+                let mut labels = vec![2; 25];
+                let step = if vertical { 5 } else { 1 };
+                labels[12] = 1;
+                labels[12 - step] = 0;
+                labels[12 + step] = 1;
+                assert!(splits_tonal_connection(
+                    &labels, &palette, 12, 5, 5, palette[2]
+                ));
+                // Recolouring into the darker incident shade keeps the line.
+                assert!(!splits_tonal_connection(
+                    &labels, &palette, 12, 5, 5, palette[0]
+                ));
+                labels[12 + step] = 2;
+                assert!(!splits_tonal_connection(
+                    &labels, &palette, 12, 5, 5, palette[2]
+                ));
+            }
+            let mut labels = vec![2; 25];
+            for y in 1..4 {
+                for x in 1..4 {
+                    labels[y * 5 + x] = 0;
+                }
+            }
+            labels[12] = 1;
+            assert!(!splits_tonal_connection(
+                &labels, &palette, 12, 5, 5, palette[2]
+            ));
+        }
+    }
+
+    #[test]
+    fn tonal_connectivity_keeps_the_weak_side_of_a_shaded_line() {
+        for bright in [false, true] {
+            let palette = [20.0, 30.0, 70.0, 90.0].map(|l| Lab {
+                l: if bright { 100.0 - l } else { l },
+                a: 0.0,
+                b: 0.0,
+            });
+            let mut labels = vec![3; 25];
+            labels[11] = 0;
+            labels[12] = 1;
+            labels[13] = 2;
+            assert!(splits_tonal_connection(
+                &labels, &palette, 12, 5, 5, palette[3]
+            ));
+        }
+    }
+
+    #[test]
     fn indexed_component_seeds_preserve_dense_reassignment_order() {
         let config = Config::default();
         for seed in 0..24_usize {
@@ -5070,6 +5379,36 @@ mod tests {
             assert!(!correction.paint_samples[index]);
         }
         assert_eq!(correction.split_regions, 1);
+    }
+
+    #[test]
+    fn bright_highlight_is_not_coverage_between_two_darker_faces() {
+        for length in [1, 5] {
+            let width = 7;
+            let height = 9;
+            let mut image = Raster::blank(width, height, [1.0, 0.20, 0.0]);
+            let mut labels = vec![0_u32; width * height];
+            for y in 0..height {
+                for x in 3..width {
+                    let index = y * width + x;
+                    image.pixels[index] = [1.0, 0.38, 0.11];
+                    labels[index] = 2;
+                }
+            }
+            for y in 2..2 + length {
+                image.pixels[y * width + 3] = [0.82, 1.0, 0.77];
+                labels[y * width + 3] = 1;
+            }
+            let mut roles = classify(&image);
+            roles.visible_ridge_centres.fill(false);
+            let correction = correct_antialias_partition(&image, &labels, 3, &roles);
+            for y in 2..2 + length {
+                let index = y * width + 3;
+                assert_ne!(correction.labels[index], correction.labels[y * width + 1]);
+                assert_ne!(correction.labels[index], correction.labels[y * width + 5]);
+                assert!(correction.paint_samples[index]);
+            }
+        }
     }
 
     #[test]

@@ -122,3 +122,85 @@ the tangents and shared-graph mapping of each actual interval.
 Fine shading subdivisions and local colour artifacts remain. The change
 reduces the complexity of supported contour intervals; it does not recreate
 the original illustration's authored shapes and gradients in full.
+
+## Short-interval extension (2026-09-08)
+
+The original search excludes intervals with fewer than 16 source observations
+or an endpoint displacement below 16 working pixels. A new fallback fits two
+existing cubic pieces to one cubic when their combined length is 2–32 working
+pixels. It also runs on short source chains previously excluded from `compact`.
+The regular one/two-cubic search retains its existing limits and runs first.
+
+The fallback uses samples of the existing curves, fixes both endpoints and
+their tangent directions, and rejects a corner or cusp at the removed node
+(incident tangent dot product below 0.98). Maximum ordered fitting residual is
+at most 0.20 working pixels, or the caller's tolerance if smaller; RMS is at
+most 60% of that limit. Bidirectional sampled baseline corridors, original-source
+corridors, persistent-corner protection and the final assembled-chain checks
+remain required. These are sampled geometric bounds, not a proof of identical
+rasterization. The existing graph validation still controls shared-contour
+adoption. The pass does not repeatedly refit its own output, avoiding cumulative
+drift. Analytic-piece protection and line protection remain in place.
+
+Regression tests exercise a short S-shaped contour, retained endpoints and
+tangents, retained change of curvature, successful shared-graph mapping, and
+rejection of a corner, a small bulge and unsupported source observations.
+
+### Sample comparison
+
+These measurements isolate short-pair compaction, before the subsequent
+[closed-outline reconstruction](closed-bezier-bands.md). The checked-in sample
+outputs also include that later change.
+
+Compared against `db159b8`, using release builds with diagnostics and
+`--threads 4 --verbose --quality-metrics`, with all other CLI settings left at
+their defaults. Counts below come from the completed SVG, using
+`scripts.picvec_eval.svg_metrics.svg_complexity`, including final structural
+corrections. Segments count lines and curves; they are not XML element counts.
+
+| Input | SVG segments, before → after | Reduction | SVG bytes, before → after |
+| --- | ---: | ---: | ---: |
+| `car.png` | 36,900 → 35,918 | 2.66% | 2,135,842 → 2,091,931 |
+| `boy_and_turtle.png` | 2,479 → 2,471 | 0.32% | 130,753 → 130,401 |
+| `viewport1.jpg` | 161,139 → 149,267 | 7.37% | 8,462,440 → 7,974,028 |
+
+Independent librsvg renders were compared at original input dimensions against
+the source, compositing transparency onto white. CIEDE2000 uses scikit-image;
+SSIM uses its default local windows with `channel_axis=2, data_range=1.0`.
+These differ from the CLI's embedded resvg and whole-image luminance SSIM.
+
+| Input | Mean ΔE00, before → after | Local-window SSIM, before → after |
+| --- | ---: | ---: |
+| `car.png` | 0.808058 → 0.808419 | 0.954165 → 0.954137 |
+| `boy_and_turtle.png` | 0.555421 → 0.555447 | 0.970043 → 0.970039 |
+| `viewport1.jpg` | 6.292128 → 6.293501 | 0.645609 → 0.645471 |
+
+To avoid hiding local regressions in the full-image mean, pixels changing by
+more than one 8-bit RGB level were dilated by three pixels and assessed
+separately. Mean ΔE00 in those neighbourhoods changes from 4.6070 to 4.6517
+(car), 3.3469 to 3.3903 (boy), and 8.6266 to 8.6299 (photo).
+The worst 48×48 tile, searched at a 24-pixel stride, increases by 0.1909,
+0.0062 and 0.1523 respectively. Those tiles were visually inspected at native
+resolution and with both SVGs rendered at 4×; no conspicuous loss of contour
+or detail was observed. Small numerical regressions remain; these three
+samples do not guarantee perceptual equivalence for every input.
+
+Region counts stay unchanged. XML path counts stay at 2,030 for car and 91 for
+boy; the photo changes from 14,766 to 14,785 because the changed Paint preview
+affects subsequent structural correction. Thus this change reduces curve/node
+complexity and bytes, not necessarily path elements. Shared-loop fallbacks and
+shared-curve downgrades remain zero on all three examples. Timing runs overlapped
+with compilation and other checks, so they do not establish a speed improvement.
+
+Validation for the isolated short-pair pass: all-feature/all-target release
+tests pass (253 passed, 4 ignored),
+as do formatting and diff-whitespace checks. Strict Clippy encounters an
+existing `needless_range_loop` warning at `src/stroke_model.rs:609`; with only
+that lint allowed, all-feature/all-target and default-library Clippy pass.
+
+```sh
+mise exec -- cargo test --release --locked --offline --all-features --all-targets
+mise exec -- cargo fmt --all --check
+mise exec -- cargo clippy --release --locked --offline --all-features --all-targets -- -D warnings -A clippy::needless_range_loop
+mise exec -- cargo clippy --release --locked --offline --lib -- -D warnings -A clippy::needless_range_loop
+```

@@ -17,7 +17,7 @@ use crate::color::{rgb_to_lab, Lab};
 use crate::config::Config;
 use crate::edge::{classify, dilate, dilate_square, perceptual_smooth, EdgeSummary};
 use crate::geometry::{
-    build_with_topology as build_geometry, fitted_alpha_contour_path_data, GeometrySummary,
+    build_with_source as build_geometry, fitted_alpha_contour_path_data, GeometrySummary,
 };
 use crate::gradient::{
     fit_all_without_topology, merge_partition, merge_source_supported_paints, refresh_summary,
@@ -1667,7 +1667,9 @@ fn vectorize_processing(
     );
     let exact_paint_merges =
         merge_exact_final_paints(&paint_reference, &mut segmentation, &mut paints);
-    if supported_paint_merges.merges > 0 || exact_paint_merges > 0 {
+    let simplified_layers =
+        crate::gradient::simplify_layered_paints(&paint_reference, &segmentation, &mut paints);
+    if supported_paint_merges.merges > 0 || exact_paint_merges > 0 || simplified_layers > 0 {
         refresh_summary(&mut gradient_report, &paints);
     }
 
@@ -1720,7 +1722,8 @@ fn vectorize_processing(
     report_progress(config, "source-alpha-mask", started, &mut checkpoint);
     let topology = HierarchicalTopology::build(&segmentation);
     report_progress(config, "exact-paint-merge", started, &mut checkpoint);
-    let (geometry, geometry_report) = build_geometry(&segmentation, &topology);
+    let (geometry, geometry_report) =
+        build_geometry(&segmentation, &topology, &geometry_edge_reference);
     report_progress(config, "shared-geometry", started, &mut checkpoint);
     // Resolve source ownership against the exact shared Paint partition.
     // Overlap is deliberately absent here: it is a seam underpaint, not an
@@ -1781,10 +1784,81 @@ fn vectorize_processing(
     ownership
         .structural
         .refine_interrupted_strokes(&processing, chroma_matte.filter(|_| source_alpha));
+    let outlines = crate::outline::propose(
+        &processing,
+        chroma_matte.filter(|_| source_alpha),
+        &segmentation,
+        &geometry_report.paint_closed_contours,
+    );
+    if !outlines.is_empty() {
+        let before = render_svg_preview(
+            (processing.width, processing.height),
+            (&geometry, &paints),
+            &ownership.structural,
+            ownership.paint_overlap,
+            excluded_regions.iter().all(|&excluded| !excluded),
+            &excluded_regions,
+            alpha_mask.as_ref(),
+            preview_background,
+        )?;
+        ownership.structural.outlines = outlines;
+        let after = render_svg_preview(
+            (processing.width, processing.height),
+            (&geometry, &paints),
+            &ownership.structural,
+            ownership.paint_overlap,
+            excluded_regions.iter().all(|&excluded| !excluded),
+            &excluded_regions,
+            alpha_mask.as_ref(),
+            preview_background,
+        )?;
+        ownership
+            .structural
+            .outlines
+            .retain(|band| band.supported_by_render(&processing_reference, &before, &after));
+    }
+    if !ownership.structural.strokes.is_empty() {
+        let preview = |ink: &StructuralInk| {
+            render_svg_preview(
+                (processing.width, processing.height),
+                (&geometry, &paints),
+                ink,
+                ownership.paint_overlap,
+                excluded_regions.iter().all(|&excluded| !excluded),
+                &excluded_regions,
+                alpha_mask.as_ref(),
+                preview_background,
+            )
+        };
+        let before = preview(&ownership.structural)?;
+        let mut probe = ownership.structural.clone();
+        for stroke in &mut probe.strokes {
+            stroke.color = [1.0; 3];
+        }
+        let white = preview(&probe)?;
+        for stroke in &mut probe.strokes {
+            stroke.color = [0.0; 3];
+        }
+        let black = preview(&probe)?;
+        ownership.structural.color_patches = crate::ink_color::propose(
+            &processing_reference,
+            &paint_render,
+            &before,
+            &white,
+            &black,
+        );
+        if !ownership.structural.color_patches.is_empty() {
+            let after = preview(&ownership.structural)?;
+            ownership
+                .structural
+                .color_patches
+                .retain(|patch| patch.improves(&processing_reference, &before, &after));
+        }
+    }
     ownership.summary.structural_strokes = ownership.structural.strokes.len();
     report_progress(config, "structural-selection", started, &mut checkpoint);
-    // The complete preview is report-only. Structural ownership is already
-    // authoritative, so the normal conversion path does not render it again.
+    // Outline candidates were checked above. This additional complete
+    // preview is only needed when diagnostic quality metrics are requested.
     #[cfg(feature = "diagnostics")]
     let quality = if config.compute_quality_metrics {
         let residual_render = render_svg_preview(
@@ -2346,6 +2420,272 @@ mod tests {
             alpha(32, 32),
             0,
             "enclosed source alpha should remain clear"
+        );
+    }
+
+    #[test]
+    fn shaded_shoulder_has_no_spurs_at_paint_junctions() {
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("shoulder.png");
+        let output = directory.path().join("shoulder.svg");
+        fs::write(&input, include_bytes!("test-data/shoulder-source.png")).unwrap();
+        vectorize(
+            &input,
+            &output,
+            &Config {
+                maximum_dimension: 802,
+                auto_dimension: false,
+                adaptive_refinement: false,
+                remove_chroma_key_background: true,
+                rayon_threads: 1,
+                ..Config::default()
+            },
+        )
+        .unwrap();
+        let document = fs::read_to_string(output).unwrap();
+        let tree = parse_svg_document(&document).unwrap();
+        let rendered = render_svg_tree_on(
+            &tree,
+            2508,
+            3208,
+            resvg::tiny_skia::Transform::from_scale(4.0, 4.0),
+            [1.0; 3],
+        )
+        .unwrap();
+        let mut positions = Vec::new();
+        for x in 195..239 {
+            let values: Vec<_> = (345 * 4..385 * 4)
+                .map(|y| rendered.get(x * 4, y)[1])
+                .collect();
+            let core = (0..values.len())
+                .min_by(|&a, &b| values[a].total_cmp(&values[b]))
+                .unwrap();
+            let crossing = (core + 1..values.len()).find(|&i| values[i] > 0.4).unwrap();
+            let t = (0.4 - values[crossing - 1]) / (values[crossing] - values[crossing - 1]);
+            positions.push((crossing as f32 - 1.0 + t) * 0.25);
+        }
+        let curvature: Vec<_> = positions
+            .windows(3)
+            .map(|p| (p[2] - 2.0 * p[1] + p[0]).abs())
+            .collect();
+        assert!(
+            curvature.iter().all(|&v| v < 0.6),
+            "rim spikes: {curvature:?}"
+        );
+        assert!(curvature.iter().sum::<f32>() / (curvature.len() as f32) < 0.12);
+    }
+
+    #[test]
+    fn round_window_control_does_not_reintroduce_polygonal_outer_ink() {
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("window.png");
+        let output = directory.path().join("window.svg");
+        fs::write(&input, include_bytes!("test-data/round-window-source.png")).unwrap();
+        vectorize(
+            &input,
+            &output,
+            &Config {
+                maximum_dimension: 705,
+                auto_dimension: false,
+                adaptive_refinement: false,
+                remove_chroma_key_background: true,
+                rayon_threads: 1,
+                ..Config::default()
+            },
+        )
+        .unwrap();
+        let document = fs::read_to_string(output).unwrap();
+        let tree = parse_svg_document(&document).unwrap();
+        let rendered = render_svg_tree_on(
+            &tree,
+            2820,
+            2752,
+            resvg::tiny_skia::Transform::from_scale(4.0, 4.0),
+            [1.0; 3],
+        )
+        .unwrap();
+        // These exterior samples were dark protrusions of the polygonal rim.
+        // Check serialized Paint plus residual strokes, not just ellipse fits.
+        for (x, y) in [(135, 100), (170, 116), (174, 112)] {
+            let p = rendered.get(x * 4, y * 4);
+            assert!(p[2] > 0.5 && p[0] < 0.2, "outer rim at {x},{y}: {p:?}");
+        }
+        let fill = rendered.get(157 * 4, 98 * 4);
+        assert!(fill[0] > 0.9 && fill[1] > 0.5 && fill[2] < 0.2);
+    }
+
+    #[test]
+    fn third_round_button_has_a_smooth_inner_rim_in_the_final_svg() {
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("buttons.png");
+        let output = directory.path().join("buttons.svg");
+        fs::write(&input, include_bytes!("test-data/round-buttons-source.png")).unwrap();
+        let summary = vectorize(
+            &input,
+            &output,
+            &Config {
+                maximum_dimension: 718,
+                auto_dimension: false,
+                adaptive_refinement: false,
+                remove_chroma_key_background: true,
+                rayon_threads: 1,
+                ..Config::default()
+            },
+        )
+        .unwrap();
+        assert!(summary.svg.outline_bands >= 3);
+        let document = fs::read_to_string(output).unwrap();
+        let tree = parse_svg_document(&document).unwrap();
+        let rendered = render_svg_tree_on(
+            &tree,
+            2872,
+            2764,
+            resvg::tiny_skia::Transform::from_scale(4.0, 4.0),
+            [1.0; 3],
+        )
+        .unwrap();
+        // Replacing a band's interior must retain the original exterior
+        // coverage. This blue backdrop sample previously became a white gap.
+        let backdrop = rendered.get(794, 348);
+        assert!(
+            backdrop[0] < 0.5 && backdrop[2] < 0.85,
+            "missing band underpaint: {backdrop:?}"
+        );
+        let mut positions = Vec::new();
+        for x in 208..233 {
+            let values: Vec<_> = (68 * 4..98 * 4)
+                .map(|y| rendered.get(x * 4, y)[1])
+                .collect();
+            let core = (0..values.len())
+                .min_by(|&a, &b| values[a].total_cmp(&values[b]))
+                .unwrap();
+            let crossing = (core + 1..values.len())
+                .find(|&i| values[i] > 0.55)
+                .unwrap();
+            let t = (0.55 - values[crossing - 1]) / (values[crossing] - values[crossing - 1]);
+            positions.push(68.0 + (crossing as f32 - 1.0 + t) * 0.25);
+        }
+        let curvature: Vec<_> = positions
+            .windows(3)
+            .map(|p| (p[2] - 2.0 * p[1] + p[0]).abs())
+            .collect();
+        assert!(curvature.iter().sum::<f32>() / (curvature.len() as f32) < 0.12);
+        assert!(curvature.iter().all(|&v| v < 0.4));
+    }
+
+    #[test]
+    fn pie_highlight_does_not_acquire_an_orange_notch() {
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("pie.png");
+        let output = directory.path().join("pie.svg");
+        fs::write(&input, include_bytes!("test-data/pie-highlight-source.png")).unwrap();
+        vectorize(
+            &input,
+            &output,
+            &Config {
+                maximum_dimension: 710,
+                auto_dimension: false,
+                adaptive_refinement: false,
+                remove_chroma_key_background: true,
+                rayon_threads: 1,
+                ..Config::default()
+            },
+        )
+        .unwrap();
+        let document = fs::read_to_string(output).unwrap();
+        let rendered = render_svg_document_on(&document, 564, 710, [1.0; 3]).unwrap();
+        // These bright native samples were assigned to the orange interior
+        // during antialias cleanup. Check the final emitted image, not just
+        // the intermediate partition or the number of simplified contours.
+        for y in [462, 463] {
+            let pixel = rendered.get(114, y);
+            assert!(
+                pixel[1] > 0.8 && pixel[2] > 0.6,
+                "highlight overwritten at (114,{y}): {pixel:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn wifi_inner_rim_is_visibly_smooth_after_final_serialization() {
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("wifi.png");
+        let output = directory.path().join("wifi.svg");
+        fs::write(&input, include_bytes!("test-data/wifi-source.png")).unwrap();
+        let summary = vectorize(
+            &input,
+            &output,
+            &Config {
+                maximum_dimension: 310,
+                auto_dimension: false,
+                adaptive_refinement: false,
+                remove_chroma_key_background: true,
+                rayon_threads: 1,
+                ..Config::default()
+            },
+        )
+        .unwrap();
+        assert!(summary.svg.outline_bands >= 2);
+        let document = fs::read_to_string(output).unwrap();
+        let tree = parse_svg_document(&document).unwrap();
+        let rendered = render_svg_tree_on(
+            &tree,
+            1240,
+            1060,
+            resvg::tiny_skia::Transform::from_scale(4.0, 4.0),
+            [1.0; 3],
+        )
+        .unwrap();
+        // A geometrically valid ellipse must not punch its brighter fill
+        // through the dot's dark rim when band color fitting is rejected.
+        for x in [148, 152, 154] {
+            let rim = rendered.get(x * 4, 203 * 4);
+            assert!(rim[1] < 0.4 && rim[2] < 0.5, "dot rim at {x}: {rim:?}");
+        }
+        let luminance = |p: [f32; 3]| p[0] * 0.2126 + p[1] * 0.7152 + p[2] * 0.0722;
+        // Track the visible inner edge of the upper side of the middle arc.
+        // The previous final SVG measured 0.093 px of second-difference
+        // roughness here at 4x; checking master counts did not detect it.
+        let mut positions = Vec::new();
+        for x in 95..206 {
+            let expected = 205.0 - (130.0_f32.powi(2) - (x as f32 - 150.0).powi(2)).sqrt();
+            let a = ((expected - 12.0) * 4.0) as usize;
+            let b = ((expected + 12.0) * 4.0) as usize;
+            let values: Vec<_> = (a..b).map(|y| luminance(rendered.get(x * 4, y))).collect();
+            let core = (0..values.len())
+                .min_by(|&a, &b| values[a].total_cmp(&values[b]))
+                .unwrap();
+            let crossing = (core + 1..values.len())
+                .find(|&i| values[i] > 0.42)
+                .expect("unbroken visible rim");
+            let t = (0.42 - values[crossing - 1]) / (values[crossing] - values[crossing - 1]);
+            positions.push((a as f32 + crossing as f32 - 1.0 + t) * 0.25);
+        }
+        let roughness = positions
+            .windows(3)
+            .map(|p| (p[2] - 2.0 * p[1] + p[0]).abs())
+            .sum::<f32>()
+            / (positions.len() - 2) as f32;
+        assert!(roughness < 0.08, "visible inner rim roughness: {roughness}");
+        let native = render_svg_document_on(&document, 310, 265, [1.0; 3]).unwrap();
+        let source = image::load_from_memory(include_bytes!("test-data/wifi-source.png"))
+            .unwrap()
+            .to_rgb8();
+        let mut error = 0.0;
+        let mut count = 0;
+        for (i, pixel) in source.pixels().enumerate() {
+            if pixel[2] as i16 > pixel[1] as i16 + 5 && pixel[2] as i16 > pixel[0] as i16 + 5 {
+                error += crate::color::delta_e2000(
+                    rgb_to_lab(pixel.0.map(|v| v as f32 / 255.0)),
+                    rgb_to_lab(native.pixels[i]),
+                );
+                count += 1;
+            }
+        }
+        assert!(
+            error / (count as f32) < 4.0,
+            "foreground colour error: {}",
+            error / count as f32
         );
     }
 

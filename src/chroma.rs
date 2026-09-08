@@ -230,6 +230,31 @@ fn coverage(pixel: [f32; 3], key: ChromaKey) -> f32 {
     (1.0 - signal / key_signal).clamp(0.0, 1.0)
 }
 
+fn is_shaded_backing(pixel: [f32; 3], key: ChromaKey) -> bool {
+    let channels = [0, 1, 2];
+    let high = || channels.iter().copied().filter(|&c| key.corner[c] > 0.5);
+    let low = channels.iter().copied().filter(|&c| key.corner[c] < 0.5);
+    // A backing may pick up one neighbouring colour channel at a fringe.
+    // Require a low channel to remain near zero, and the key's high channels
+    // to agree. Neutral contamination in every low channel instead provides
+    // evidence for a distinct same-hue foreground object.
+    minimum_channel(pixel, low) <= 24.0 / 255.0
+        && maximum_channel(pixel, high()) - minimum_channel(pixel, high()) <= 24.0 / 255.0
+}
+
+fn has_key_hue(pixel: [f32; 3], key: ChromaKey) -> bool {
+    let channels = [0, 1, 2];
+    let high = minimum_channel(
+        pixel,
+        channels.iter().copied().filter(|&c| key.corner[c] > 0.5),
+    );
+    let low = maximum_channel(
+        pixel,
+        channels.iter().copied().filter(|&c| key.corner[c] < 0.5),
+    );
+    high - low > 32.0 / 255.0 && high - low > high * 0.35
+}
+
 /// Pull a soft matte from an already keyed opaque raster, preserving distinct
 /// opaque interiors and estimating key contamination at their edges.
 pub(crate) fn pull_matte<R: RasterSource + ?Sized>(image: &R, key: ChromaKey) -> AlphaMatte {
@@ -242,18 +267,31 @@ pub(crate) fn pull_matte<R: RasterSource + ?Sized>(image: &R, key: ChromaKey) ->
     // reserve colour-difference inference for unsupported thin details.
     let distinct: Vec<bool> = (0..len)
         .map(|index| {
-            squared_distance(image.get(index % width, index / width), key.sampled)
-                > KEY_FOREGROUND_DISTANCE.powi(2)
+            let pixel = image.get(index % width, index / width);
+            // Shaded backing can be far from the sampled key in brightness
+            // while retaining its chromatic direction. Do not promote that
+            // evidence into an opaque anchor. Dark edges retain ordinary
+            // colour-difference coverage and are unmixed instead.
+            !is_shaded_backing(pixel, key)
+                && squared_distance(pixel, key.sampled) > KEY_FOREGROUND_DISTANCE.powi(2)
         })
         .collect();
     let interior = crate::edge::erode(&distinct, width, height, 2);
+    let background = connected_key_background(image, key, &interior);
+    let near_background = crate::edge::dilate(&background, width, height, 3);
+    // Disconnected key-coloured patches remain opaque even one pixel from
+    // the background. Weakly contaminated silhouette samples may still be
+    // unmixed locally; they cannot become background-owned from this fit.
     let mut values = Vec::with_capacity(len);
     for index in 0..len {
         let x = index % width;
         let y = index / width;
         let pixel = image.get(x, y);
         let mut alpha = coverage(pixel, key);
-        if interior[index] {
+        if interior[index]
+            || !near_background[index]
+            || (!background[index] && has_key_hue(pixel, key))
+        {
             alpha = 1.0;
         } else if squared_distance(pixel, key.sampled) > KEY_FRINGE_RESIDUAL.powi(2) && alpha < 1.0
         {
@@ -291,10 +329,177 @@ pub(crate) fn pull_matte<R: RasterSource + ?Sized>(image: &R, key: ChromaKey) ->
         }
         values.push((alpha * 65_535.0).round() as u16);
     }
+    clear_connected_key_shadows(image, key, &interior, &background, &mut values);
     AlphaMatte {
         width: image.width(),
         height: image.height(),
         values: AlphaValues::Unorm16(values),
+    }
+}
+
+/// Background removal starts at a sufficiently broad connected patch of
+/// the sampled key, not at every pixel with a similar hue. Flooding from
+/// those patches includes attached darker faces but cannot jump a different
+/// coloured outline to reach an isolated lamp or other foreground detail.
+fn connected_key_background<R: RasterSource + ?Sized>(
+    image: &R,
+    key: ChromaKey,
+    interior: &[bool],
+) -> Vec<bool> {
+    let (w, h) = (image.width(), image.height());
+    let len = w * h;
+    // Cap the size requirement: a large sheet must not turn a useful
+    // enclosed background patch into foreground merely by adding canvas.
+    let minimum_area = (len / 1024).clamp(64, 256);
+    let near: Vec<_> = (0..len)
+        .map(|i| {
+            squared_distance(image.get(i % w, i / w), key.sampled) <= KEY_SAMPLE_DISTANCE.powi(2)
+        })
+        .collect();
+    let neighbours = |i: usize| {
+        let (x, y) = (i % w, i / w);
+        [
+            (x > 0).then(|| i - 1),
+            (x + 1 < w).then(|| i + 1),
+            (y > 0).then(|| i - w),
+            (y + 1 < h).then(|| i + w),
+        ]
+    };
+    let mut seen = vec![false; len];
+    let mut seeds = VecDeque::new();
+    let mut component = Vec::new();
+    for start in 0..len {
+        if !near[start] || seen[start] {
+            continue;
+        }
+        component.clear();
+        component.push(start);
+        seen[start] = true;
+        let mut cursor = 0;
+        while cursor < component.len() {
+            let i = component[cursor];
+            cursor += 1;
+            for j in neighbours(i).into_iter().flatten() {
+                if near[j] && !seen[j] {
+                    seen[j] = true;
+                    component.push(j);
+                }
+            }
+        }
+        if component.len() >= minimum_area {
+            seeds.push_back(start);
+        }
+    }
+    let mut background = vec![false; len];
+    for &i in &seeds {
+        background[i] = true;
+    }
+    while let Some(i) = seeds.pop_front() {
+        for j in neighbours(i).into_iter().flatten() {
+            if background[j] || interior[j] {
+                continue;
+            }
+            let p = image.get(j % w, j / w);
+            if near[j] || has_key_hue(p, key) {
+                background[j] = true;
+                seeds.push_back(j);
+            }
+        }
+    }
+    background
+}
+
+/// Recover thick, key-coloured shadows connected to an already clear area.
+/// A thin antialias fringe has no eroded core and cannot seed this operation.
+/// Propagation is bounded around those cores so an attached fringe cannot
+/// carry the correction around an unrelated silhouette.
+fn clear_connected_key_shadows<R: RasterSource + ?Sized>(
+    image: &R,
+    key: ChromaKey,
+    interior: &[bool],
+    background: &[bool],
+    values: &mut [u16],
+) {
+    let (w, h) = (image.width(), image.height());
+    let key_signal = |p: [f32; 3]| {
+        let channels = [0, 1, 2];
+        let high = minimum_channel(p, channels.iter().copied().filter(|&c| key.corner[c] > 0.5));
+        let low = maximum_channel(p, channels.iter().copied().filter(|&c| key.corner[c] < 0.5));
+        (high, high - low)
+    };
+    let coloured_anchors: Vec<_> = interior
+        .iter()
+        .enumerate()
+        .map(|(i, &inside)| inside && key_signal(image.get(i % w, i / w)).1 > 24.0 / 255.0)
+        .collect();
+    let candidates: Vec<_> = values
+        .iter()
+        .enumerate()
+        .map(|(i, &alpha)| {
+            if alpha < 32768 || interior[i] || !background[i] {
+                return false;
+            }
+            let (x, y) = (i % w, i / w);
+            let (high, signal) = key_signal(image.get(x, y));
+            signal > 32.0 / 255.0
+                && signal > high * 0.35
+                && !(y.saturating_sub(3)..=(y + 3).min(h - 1)).any(|py| {
+                    (x.saturating_sub(3)..=(x + 3).min(w - 1))
+                        .any(|px| coloured_anchors[py * w + px])
+                })
+        })
+        .collect();
+    let cores = crate::edge::erode(&candidates, w, h, 1);
+    let mut seen = vec![false; values.len()];
+    let mut distance = vec![u8::MAX; values.len()];
+    let neighbours = |i: usize| {
+        let (x, y) = (i % w, i / w);
+        [
+            (x > 0).then(|| i - 1),
+            (x + 1 < w).then(|| i + 1),
+            (y > 0).then(|| i - w),
+            (y + 1 < h).then(|| i + w),
+        ]
+    };
+    for start in 0..values.len() {
+        if !candidates[start] || seen[start] {
+            continue;
+        }
+        let mut component = vec![start];
+        seen[start] = true;
+        let mut touches_clear = false;
+        let mut queue = VecDeque::new();
+        let mut cursor = 0;
+        while cursor < component.len() {
+            let i = component[cursor];
+            cursor += 1;
+            if cores[i] {
+                distance[i] = 0;
+                queue.push_back(i);
+            }
+            for j in neighbours(i).into_iter().flatten() {
+                touches_clear |= values[j] < 32768;
+                if candidates[j] && !seen[j] {
+                    seen[j] = true;
+                    component.push(j);
+                }
+            }
+        }
+        if !touches_clear {
+            continue;
+        }
+        while let Some(i) = queue.pop_front() {
+            values[i] = 0;
+            if distance[i] == 3 {
+                continue;
+            }
+            for j in neighbours(i).into_iter().flatten() {
+                if candidates[j] && distance[j] > distance[i] + 1 {
+                    distance[j] = distance[i] + 1;
+                    queue.push_back(j);
+                }
+            }
+        }
     }
 }
 
@@ -1297,7 +1502,9 @@ mod tests {
             border_coverage: 1.0,
         };
         // Half-covered neutral gray and black over green.
-        let source = Raster::new(2, 1, vec![[0.25, 0.75, 0.25], [0.0, 0.5, 0.0]]);
+        let mut source = Raster::blank(16, 16, key.sampled);
+        source.pixels[0] = [0.25, 0.75, 0.25];
+        source.pixels[1] = [0.0, 0.5, 0.0];
         let matte = pull_matte(&source, key);
         assert!((matte.get(0) - 0.5).abs() <= 0.5 / 65_535.0);
         assert!((matte.get(1) - 0.5).abs() <= 0.5 / 65_535.0);
@@ -1338,7 +1545,8 @@ mod tests {
                         [0, 1, 2].map(|c| foreground[c] * alpha + corner[c] * (1.0 - alpha));
                 }
             }
-            // An enclosed piece of the true backing must still disappear.
+            // A small isolated exact-key patch has no broad background seed
+            // and is now preserved, just like a lamp inside a dark housing.
             for y in 14..18 {
                 for x in 14..18 {
                     source.pixels[y * 32 + x] = corner;
@@ -1350,7 +1558,7 @@ mod tests {
                 for x in 6..26 {
                     let i = y * 32 + x;
                     if (14..18).contains(&x) && (14..18).contains(&y) {
-                        assert_eq!(matte.get(i), 0.0);
+                        assert_eq!(matte.get(i), 1.0);
                     } else {
                         assert!(
                             (matte.get(i) - 1.0).abs() < 1e-4,
@@ -1380,9 +1588,15 @@ mod tests {
             // Broad backing variations must not become opaque just because
             // erosion leaves an interior. These include the reported green
             // gap samples (0,242,0) and (0,239,0), plus channel contamination.
-            for (channel_shift, contamination) in
-                [(13.0, 0.0), (16.0, 0.0), (32.0, 16.0), (40.0, 16.0)]
-            {
+            for (channel_shift, contamination) in [
+                (13.0, 0.0),
+                (16.0, 0.0),
+                (32.0, 16.0),
+                (40.0, 16.0),
+                (85.0, 0.0),
+                (85.0, 12.0),
+                (100.0, 8.0),
+            ] {
                 for y in 4..36 {
                     for x in 4..36 {
                         source.pixels[y * 40 + x] = corner.map(|channel| {
@@ -1401,6 +1615,204 @@ mod tests {
                     .iter()
                     .all(|pixel| *pixel == corner));
             }
+        }
+    }
+
+    #[test]
+    fn isolated_shaded_key_colour_is_preserved_without_a_broad_seed() {
+        for corner in KEY_CORNERS {
+            let key = ChromaKey {
+                corner,
+                sampled: corner,
+                border_coverage: 1.0,
+            };
+            let source = Raster::blank(16, 16, corner.map(|v| v * 0.35));
+            let matte = pull_matte(&source, key);
+            assert!(matte.iter().all(|a| a == 1.0));
+            let separated = separate_foreground(&source, &matte, corner);
+            assert_eq!(separated.pixels, source.pixels);
+        }
+    }
+
+    #[test]
+    fn connected_key_shadow_requires_a_core_and_limits_fringe_propagation() {
+        for corner in KEY_CORNERS {
+            let key = ChromaKey {
+                corner,
+                sampled: corner,
+                border_coverage: 1.0,
+            };
+            let mut source = Raster::blank(40, 28, corner);
+            for y in 2..26 {
+                for x in 4..32 {
+                    source.pixels[y * 40 + x] = [0.0; 3];
+                }
+            }
+            let shadow = corner.map(|v| v * 0.35);
+            // A thick shaded patch extends across the black silhouette into
+            // clear backing; its attached one-pixel fringe extends inward.
+            for y in 6..13 {
+                for x in 26..35 {
+                    source.pixels[y * 40 + x] = shadow;
+                }
+            }
+            for x in 10..26 {
+                source.pixels[9 * 40 + x] = shadow;
+            }
+            // An isolated thick mark has no clear-background neighbour.
+            for y in 17..23 {
+                for x in 10..16 {
+                    source.pixels[y * 40 + x] = shadow;
+                }
+            }
+            let matte = pull_matte(&source, key);
+            assert_eq!(matte.get(9 * 40 + 30), 0.0);
+            assert!((matte.get(9 * 40 + 12) - 0.65).abs() < 1e-4);
+            assert_eq!(matte.get(20 * 40 + 12), 1.0);
+            assert_eq!(matte.get(14 * 40 + 24), 1.0);
+        }
+    }
+
+    #[test]
+    fn server_rack_lamps_keep_opaque_colour_at_native_and_reduced_sizes() {
+        let image = image::load_from_memory(include_bytes!("test-data/server-rack-key.png"))
+            .expect("server rack fixture");
+        let original = Raster::from_dynamic(&image);
+        for maximum in [836, 418] {
+            let source = original.resize_max(maximum);
+            let key = detect(&source).expect("outer green background");
+            let matte = pull_matte(&source, key);
+            let scale = source.width as f32 / original.width as f32;
+            assert_eq!(matte.get(10 * source.width + 10), 0.0);
+            for cy in [196, 343, 490, 636] {
+                for y in cy - 12..=cy + 12 {
+                    for x in 485..=502 {
+                        let (x, y) = ((x as f32 * scale) as usize, (y as f32 * scale) as usize);
+                        assert_eq!(
+                            matte.get(y * source.width + x),
+                            1.0,
+                            "lamp lost coverage at ({x}, {y}), size {maximum}"
+                        );
+                    }
+                }
+            }
+            let separated = separate_foreground(&source, &matte, key.sampled);
+            let i = (343.0 * scale) as usize * source.width + (492.0 * scale) as usize;
+            assert_eq!(separated.pixels[i], source.pixels[i]);
+        }
+    }
+
+    #[test]
+    fn broad_key_patches_seed_removal_but_isolated_small_patches_do_not() {
+        for corner in KEY_CORNERS {
+            let key = ChromaKey {
+                corner,
+                sampled: corner,
+                border_coverage: 1.0,
+            };
+            let mut source = Raster::blank(64, 48, [0.0; 3]);
+            for y in 4..20 {
+                for x in 4..20 {
+                    source.pixels[y * 64 + x] = corner;
+                }
+                for x in 20..28 {
+                    source.pixels[y * 64 + x] = corner.map(|c| c * 0.35);
+                }
+            }
+            for y in 30..34 {
+                for x in 42..46 {
+                    source.pixels[y * 64 + x] = corner;
+                }
+                for x in 46..50 {
+                    source.pixels[y * 64 + x] = corner.map(|c| c * 0.35);
+                }
+            }
+            let matte = pull_matte(&source, key);
+            assert_eq!(matte.get(12 * 64 + 12), 0.0);
+            assert_eq!(matte.get(12 * 64 + 24), 0.0);
+            assert_eq!(matte.get(32 * 64 + 44), 1.0);
+            assert_eq!(matte.get(32 * 64 + 48), 1.0);
+            assert_eq!(matte.get(24 * 64 + 32), 1.0);
+        }
+    }
+
+    #[test]
+    fn background_does_not_jump_a_one_pixel_outline_into_a_small_lamp() {
+        for corner in KEY_CORNERS {
+            let key = ChromaKey {
+                corner,
+                sampled: corner,
+                border_coverage: 1.0,
+            };
+            let mut source = Raster::blank(32, 32, corner);
+            for y in 10..16 {
+                for x in 10..16 {
+                    source.pixels[y * 32 + x] = [0.0; 3];
+                }
+            }
+            for y in 11..15 {
+                for x in 11..15 {
+                    source.pixels[y * 32 + x] = corner.map(|v| v * if x < 13 { 1.0 } else { 0.35 });
+                }
+            }
+            let matte = pull_matte(&source, key);
+            assert_eq!(matte.get(8 * 32 + 12), 0.0);
+            for y in 10..16 {
+                for x in 10..16 {
+                    assert_eq!(matte.get(y * 32 + x), 1.0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn enclosed_background_seed_requirement_is_capped_on_large_canvases() {
+        let key = ChromaKey {
+            corner: [0.0, 1.0, 0.0],
+            sampled: [0.0, 1.0, 0.0],
+            border_coverage: 1.0,
+        };
+        let mut source = Raster::blank(1024, 1024, [0.0; 3]);
+        for y in 400..416 {
+            for x in 400..416 {
+                source.pixels[y * 1024 + x] = key.sampled;
+            }
+        }
+        let matte = pull_matte(&source, key);
+        assert_eq!(matte.get(408 * 1024 + 408), 0.0);
+        assert_eq!(matte.get(390 * 1024 + 408), 1.0);
+    }
+
+    #[test]
+    fn shaded_key_gap_keeps_background_ownership() {
+        let image = image::load_from_memory(include_bytes!("test-data/shaded-key-gap.png"))
+            .expect("shaded backing fixture");
+        let source = Raster::from_dynamic(&image);
+        let key = ChromaKey {
+            corner: [0.0, 1.0, 0.0],
+            sampled: [0.0, 1.0, 0.0],
+            border_coverage: 1.0,
+        };
+        let matte = pull_matte(&source, key);
+        for (x, y) in [(44, 115), (45, 116), (46, 116), (47, 116)] {
+            assert!(
+                matte.get(y * source.width + x) < BACKGROUND_OWNERSHIP_ALPHA,
+                "shaded gap became foreground at ({x}, {y})"
+            );
+        }
+        for (x, y) in [(40, 108), (45, 132), (42, 129)] {
+            assert_eq!(
+                matte.get(y * source.width + x),
+                0.0,
+                "connected shadow survived at ({x}, {y})"
+            );
+        }
+        for (x, y) in [(20, 100), (80, 90)] {
+            assert_eq!(
+                matte.get(y * source.width + x),
+                1.0,
+                "blue clothing lost coverage at ({x}, {y})"
+            );
         }
     }
 

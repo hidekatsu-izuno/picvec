@@ -434,6 +434,67 @@ pub(super) fn fit(
     best.map(|(curves, _, _)| curves)
 }
 
+/// Small intervals do not have enough raster observations for the broad
+/// one/two-cubic search. Fit their existing curves instead, with a tighter
+/// movement limit and fixed endpoint tangents. Source support remains required.
+fn compact_pair(
+    source: &[Point],
+    pair: &[CurveSegment],
+    tolerance: f32,
+    start: Option<Point>,
+    end: Option<Point>,
+) -> Option<Vec<CurveSegment>> {
+    let [left @ CurveSegment::Cubic { .. }, right @ CurveSegment::Cubic { .. }] = pair else {
+        return None;
+    };
+    if left.end() != right.start()
+        || source.len() < 2
+        || !(2.0..=32.0).contains(&left.start().distance(right.end()))
+    {
+        return None;
+    }
+    let incoming = derivatives(*left, 1.0).0;
+    let outgoing = derivatives(*right, 0.0).0;
+    // A corner or a cusp is a meaningful node even on a tiny contour.
+    if dot(normalized(incoming), normalized(outgoing)) < 0.98 {
+        return None;
+    }
+    let reference = sample_curve_sequence(pair, 0.25);
+    let length: f32 = reference.windows(2).map(|p| p[0].distance(p[1])).sum();
+    if !(2.0..=32.0).contains(&length) {
+        return None;
+    }
+    let first = derivatives(*left, 0.0).0;
+    let last = derivatives(*right, 1.0).0;
+    if dot(first, first) < 1e-12 || dot(last, last) < 1e-12 {
+        return None;
+    }
+    let allowed = tolerance.min(0.20);
+    let (curve, metrics) = one(&reference, Some(first), Some(last))?;
+    if metrics.maximum > allowed || metrics.rms > allowed * 0.6 {
+        return None;
+    }
+    let candidate = vec![curve];
+    if !super::geometry_primitives::supports_tangents(&candidate, start, end)
+        || !super::boundary_corridor_supported(&reference, &candidate, allowed)
+        || !super::boundary_corridor_supported(source, &candidate, tolerance)
+    {
+        return None;
+    }
+    let rendered = sample_curve_sequence(&candidate, 0.25);
+    if super::persistent_open_corners(source)
+        .iter()
+        .any(|&(_, p)| {
+            super::nearest_point(&rendered, p).1
+                > (super::nearest_point(&reference, p).1 + 0.125).max(0.25)
+        })
+    {
+        return None;
+    }
+    trace(source, "short_cubic", Some(metrics), "supported");
+    Some(candidate)
+}
+
 pub(super) fn compact(
     source: &[Point],
     baseline: &[CurveSegment],
@@ -441,14 +502,16 @@ pub(super) fn compact(
     start: Option<Point>,
     end: Option<Point>,
 ) -> Vec<CurveSegment> {
-    if source.len() < 16 || baseline.len() < 2 {
+    if source.len() < 2 || baseline.len() < 2 {
         return baseline.to_vec();
     }
-    // Existing lines and consecutive pieces of an analytic arc are already
-    // compact models, even when the SVG encoder uses several cubic pieces.
+    // A short line can be a raster stair step within a longer smooth strand.
+    // Allow mixed line/cubic intervals; fit() still preserves source corners,
+    // shared endpoints, endpoint tangents and the bidirectional corridor.
+    // Preserve exact analytic line/arc runs already handled by the primitive fitter.
     let mut protected: Vec<bool> = baseline
         .iter()
-        .map(|c| matches!(c, CurveSegment::Line { .. }))
+        .map(|c| matches!(c, CurveSegment::Line { .. }) && c.start().distance(c.end()) <= 2.0)
         .collect();
     for (i, pair) in baseline.windows(2).enumerate() {
         if super::geometry_primitives::fit(&sample_curve_sequence(pair, 0.75), 0.25, None, None)
@@ -480,19 +543,42 @@ pub(super) fn compact(
         for n in counts {
             let first = knots[i];
             let last = knots[i + n];
-            if last < first + 15 {
+            if last <= first {
                 continue;
             }
             let mut observations = source[first..=last].to_vec();
             observations[0] = baseline[i].start();
             *observations.last_mut().unwrap() = baseline[i + n - 1].end();
-            if let Some(candidate) = fit(
+            let candidate = fit(
                 &observations,
                 &baseline[i..i + n],
                 tolerance,
                 (i == 0).then_some(start).flatten(),
                 (i + n == baseline.len()).then_some(end).flatten(),
-            ) {
+            )
+            .or_else(|| {
+                (n == 2).then(|| {
+                    compact_pair(
+                        &observations,
+                        &baseline[i..i + n],
+                        tolerance,
+                        (i == 0).then_some(start).flatten(),
+                        (i + n == baseline.len()).then_some(end).flatten(),
+                    )
+                })?
+            });
+            if let Some(candidate) = candidate {
+                if baseline[i..i + n]
+                    .iter()
+                    .any(|c| matches!(c, CurveSegment::Line { .. }))
+                    && !super::boundary_corridor_supported(
+                        &sample_curve_sequence(&baseline[i..i + n], 0.25),
+                        &candidate,
+                        0.25,
+                    )
+                {
+                    continue;
+                }
                 accepted = Some((n, candidate));
                 break;
             }
@@ -527,9 +613,244 @@ pub(super) fn compact(
     result
 }
 
+pub(super) const CLOSED_CORRIDOR: f32 = 2.5;
+
+fn simple_loop(points: &[Point]) -> bool {
+    use std::collections::HashMap;
+    let mut cells = HashMap::<(i32, i32), Vec<usize>>::new();
+    let cross = |a: Point, b: Point, p: Point| {
+        (b.x - a.x) as f64 * (p.y - a.y) as f64 - (b.y - a.y) as f64 * (p.x - a.x) as f64
+    };
+    for (i, edge) in points.windows(2).enumerate() {
+        let [a, b] = [edge[0], edge[1]];
+        if a.distance(b) < 1e-6 {
+            return false;
+        }
+        for y in (a.y.min(b.y) / 4.0).floor() as i32..=(a.y.max(b.y) / 4.0).floor() as i32 {
+            for x in (a.x.min(b.x) / 4.0).floor() as i32..=(a.x.max(b.x) / 4.0).floor() as i32 {
+                let bucket = cells.entry((x, y)).or_default();
+                for &j in bucket.iter() {
+                    if j + 1 == i || (j == 0 && i + 2 == points.len()) {
+                        continue;
+                    }
+                    let (c, d) = (points[j], points[j + 1]);
+                    if a.x.min(b.x) <= c.x.max(d.x)
+                        && c.x.min(d.x) <= a.x.max(b.x)
+                        && a.y.min(b.y) <= c.y.max(d.y)
+                        && c.y.min(d.y) <= a.y.max(b.y)
+                        && cross(a, b, c) * cross(a, b, d) <= 0.0
+                        && cross(c, d, a) * cross(c, d, b) <= 0.0
+                    {
+                        return false;
+                    }
+                }
+                bucket.push(i);
+            }
+        }
+    }
+    true
+}
+
+/// Fit a complete smooth material loop before shading junctions split it.
+/// The node budget is fixed; a complex silhouette keeps its existing model.
+pub(super) fn fit_closed(source: &[Point], tolerance: f32) -> Option<Vec<CurveSegment>> {
+    fit_closed_with_limit(source, tolerance, 8)
+}
+
+pub(super) fn fit_closed_with_limit(
+    source: &[Point],
+    tolerance: f32,
+    maximum_segments: usize,
+) -> Option<Vec<CurveSegment>> {
+    if source.len() < 80
+        || source.len() > 2400
+        || source.first() != source.last()
+        || !tolerance.is_finite()
+        || tolerance <= 0.0
+    {
+        return None;
+    }
+    // Thin material bands must not disappear within the geometric budget.
+    let perimeter: f32 = source.windows(2).map(|p| p[0].distance(p[1])).sum();
+    if super::signed_area(source).abs() / perimeter < 3.0 {
+        return None;
+    }
+    let mut points = resample_open_polyline(source, 1.0);
+    points.pop();
+    let count = points.len();
+    if count < 64 {
+        return None;
+    }
+    let turn = |i: usize, support: usize| {
+        let a = sub(points[i], points[(i + count - support) % count]);
+        let b = sub(points[(i + support) % count], points[i]);
+        (a.x * b.y - a.y * b.x).atan2(dot(a, b))
+    };
+    let corners: Vec<_> = (0..count)
+        .filter(|&i| {
+            let local = turn(i, 2);
+            let coarse = turn(i, 9);
+            local.abs() > 65.0_f32.to_radians()
+                && coarse.abs() > 45.0_f32.to_radians()
+                && local * coarse > 0.0
+                && (1..=2).all(|j| {
+                    turn((i + j) % count, 2).abs() <= local.abs()
+                        && turn((i + count - j) % count, 2).abs() <= local.abs()
+                })
+        })
+        .collect();
+    if corners.len() > 4 {
+        return None;
+    }
+    let smooth: Vec<_> = (0..count)
+        .map(|i| {
+            if corners.contains(&i) {
+                return points[i];
+            }
+            scale(
+                (0..5)
+                    .map(|j| points[(i + count + j - 2) % count])
+                    .fold(Point::default(), add),
+                0.2,
+            )
+        })
+        .collect();
+    let tangent = |i: usize| {
+        (!corners.contains(&i)).then(|| {
+            normalized(sub(
+                smooth[(i + 4) % count],
+                smooth[(i + count - 4) % count],
+            ))
+        })
+    };
+    let mut knots = corners.clone();
+    knots.push(0);
+    if knots.len() < 2 {
+        knots.push((1..count).max_by(|&a, &b| {
+            points[a]
+                .distance(points[0])
+                .total_cmp(&points[b].distance(points[0]))
+        })?);
+    }
+    knots.push(count);
+    knots.sort_unstable();
+    knots.dedup();
+    let allowed = tolerance.min(2.0);
+    loop {
+        let mut curves = Vec::new();
+        let mut worst = None::<(f32, usize)>;
+        for pair in knots.windows(2) {
+            let (a, b) = (pair[0], pair[1]);
+            let mut observations: Vec<_> = (a..=b).map(|i| points[i % count]).collect();
+            observations[0] = smooth[a % count];
+            *observations.last_mut()? = smooth[b % count];
+            let result = one(&observations, tangent(a % count), tangent(b % count));
+            let (score, split) = if let Some((curve, e)) = result {
+                curves.push(curve);
+                (
+                    (e.maximum / allowed).max(e.rms / (allowed * 0.6)),
+                    a + e.worst,
+                )
+            } else {
+                (f32::INFINITY, (a + b) / 2)
+            };
+            if score > 1.0 && worst.is_none_or(|w| score > w.0) {
+                if b - a < 8 {
+                    return None;
+                }
+                worst = Some((score, split.clamp(a + 4, b - 4)));
+            }
+        }
+        if let Some((_, split)) = worst {
+            if knots.len() > maximum_segments {
+                return None;
+            }
+            knots.push(split);
+            knots.sort_unstable();
+            continue;
+        }
+        let rendered = sample_curve_sequence(&curves, 0.5);
+        if !super::boundary_corridor_supported(source, &curves, tolerance)
+            || super::signed_area(source) * super::signed_area(&rendered) <= 0.0
+            || !simple_loop(&rendered)
+        {
+            return None;
+        }
+        return Some(curves);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[cfg(feature = "diagnostics")]
+    fn complete_bands_use_few_curves_and_map_every_shading_junction() {
+        let records: serde_json::Value =
+            serde_json::from_str(include_str!("test-data/wifi-closed-contours.json")).unwrap();
+        for (index, r) in records.as_array().unwrap().iter().enumerate() {
+            if ![0, 3, 5].contains(&index) {
+                continue;
+            }
+            let points: Vec<_> = r
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|p| Point {
+                    x: p[0].as_f64().unwrap() as f32,
+                    y: p[1].as_f64().unwrap() as f32,
+                })
+                .collect();
+            let candidate = fit_closed(&points, CLOSED_CORRIDOR).expect("complete curved band");
+            assert!(candidate.len() <= 8);
+            assert_eq!(candidate[0].start(), candidate.last().unwrap().end());
+            assert!(candidate.windows(2).all(|p| p[0].end() == p[1].start()));
+            let mut master = 0;
+            let mapping = super::super::geometry_mapping::map(
+                &points,
+                &candidate,
+                CLOSED_CORRIDOR,
+                &mut master,
+            )
+            .expect("ordered graph mapping");
+            assert_eq!(mapping.positions.len(), points.len());
+            assert!(mapping
+                .positions
+                .iter()
+                .zip(&points)
+                .all(|(a, b)| a.distance(*b) <= CLOSED_CORRIDOR));
+        }
+    }
+
+    #[test]
+    fn closed_fit_preserves_corners_and_rejects_thin_bands_and_crossings() {
+        let rectangle = |height: f32| {
+            let p = [
+                Point { x: 0.0, y: 0.0 },
+                Point { x: 80.0, y: 0.0 },
+                Point { x: 80.0, y: height },
+                Point { x: 0.0, y: height },
+                Point { x: 0.0, y: 0.0 },
+            ];
+            resample_open_polyline(&p, 1.0)
+        };
+        assert!(fit_closed(&rectangle(2.0), CLOSED_CORRIDOR).is_none());
+        let square = rectangle(80.0);
+        if let Some(curves) = fit_closed(&square, CLOSED_CORRIDOR) {
+            for corner in square.iter().step_by(80) {
+                assert!(curves.iter().any(|c| c.start().distance(*corner) < 0.01));
+            }
+        }
+        let crossing = [
+            Point { x: 0.0, y: 0.0 },
+            Point { x: 10.0, y: 10.0 },
+            Point { x: 0.0, y: 10.0 },
+            Point { x: 10.0, y: 0.0 },
+            Point { x: 0.0, y: 0.0 },
+        ];
+        assert!(!simple_loop(&crossing));
+        assert!(simple_loop(&rectangle(10.0)));
+    }
     fn baseline(points: &[Point]) -> Vec<CurveSegment> {
         let mut anchors: Vec<_> = points.iter().step_by(8).copied().collect();
         if anchors.last() != points.last() {
@@ -548,6 +869,110 @@ mod tests {
             second: p(c),
             end: p(d),
         }
+    }
+    #[test]
+    fn mixed_straight_pieces_compact_without_rounding_a_corner() {
+        let points = [
+            Point { x: 0.0, y: 0.0 },
+            Point { x: 8.0, y: 0.0 },
+            Point { x: 16.0, y: 0.0 },
+            Point { x: 24.0, y: 0.0 },
+        ];
+        let pieces = vec![
+            CurveSegment::Line {
+                start: points[0],
+                end: points[1],
+            },
+            cubic((8.0, 0.0), (10.0, 0.25), (14.0, 0.25), (16.0, 0.0)),
+            CurveSegment::Line {
+                start: points[2],
+                end: points[3],
+            },
+        ];
+        let source = sample_curve_sequence(&pieces, 1.0);
+        let result = compact(&source, &pieces, 1.0, None, None);
+        assert_eq!(
+            result,
+            vec![CurveSegment::Line {
+                start: points[0],
+                end: points[3]
+            }]
+        );
+        let corner = vec![
+            CurveSegment::Line {
+                start: points[0],
+                end: points[3],
+            },
+            CurveSegment::Line {
+                start: points[3],
+                end: Point { x: 24.0, y: 24.0 },
+            },
+        ];
+        let source = sample_curve_sequence(&corner, 1.0);
+        assert_eq!(compact(&source, &corner, 1.0, None, None), corner);
+    }
+
+    #[test]
+    fn short_s_curve_loses_a_node_without_losing_its_inflection_or_tangents() {
+        // Exact halves of a cubic with a visible change of curvature. Neither
+        // the old 16-pixel interval search nor analytic arc fitting covers it.
+        let pair = [
+            cubic((0.0, 0.0), (2.0, 0.0), (4.0, 0.75), (6.0, 1.5)),
+            cubic((6.0, 1.5), (8.0, 2.25), (10.0, 3.0), (12.0, 3.0)),
+        ];
+        let source = sample_curve_sequence(&pair, 1.0);
+        assert!(source.len() < 16);
+        let result = compact(&source, &pair, 0.5, None, None);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].start(), pair[0].start());
+        assert_eq!(result[0].end(), pair[1].end());
+        assert!(super::super::boundary_corridor_supported(
+            &sample_curve_sequence(&pair, 0.1),
+            &result,
+            0.20
+        ));
+        for (before, t) in [(pair[0], 0.0), (pair[1], 1.0)] {
+            assert!(
+                dot(
+                    normalized(derivatives(before, t).0),
+                    normalized(derivatives(result[0], t).0)
+                ) > 0.999_999
+            );
+        }
+        let curvature = |t| {
+            let (d, dd) = derivatives(result[0], t);
+            d.x * dd.y - d.y * dd.x
+        };
+        assert!(curvature(0.25) * curvature(0.75) < 0.0);
+        let mut next_master = 0;
+        assert!(
+            super::super::geometry_mapping::map(&source, &result, 0.5, &mut next_master).is_some()
+        );
+    }
+
+    #[test]
+    fn short_pair_keeps_corners_and_rejects_unsupported_source() {
+        let pair = [
+            cubic((0.0, 0.0), (2.0, 0.0), (4.0, 0.75), (6.0, 1.5)),
+            cubic((6.0, 1.5), (8.0, 2.25), (10.0, 3.0), (12.0, 3.0)),
+        ];
+        let mut source = sample_curve_sequence(&pair, 1.0);
+        let middle = source.len() / 2;
+        source[middle].y += 2.0;
+        assert!(compact_pair(&source, &pair, 0.5, None, None).is_none());
+        let corner = [
+            pair[0],
+            cubic((6.0, 1.5), (6.0, 3.5), (6.0, 5.5), (6.0, 7.5)),
+        ];
+        let source = sample_curve_sequence(&corner, 1.0);
+        assert!(compact_pair(&source, &corner, 0.5, None, None).is_none());
+        assert_eq!(compact(&source, &corner, 0.5, None, None), corner);
+        let bump = [
+            cubic((0.0, 0.0), (2.0, 0.0), (4.0, 1.5), (6.0, 1.5)),
+            cubic((6.0, 1.5), (8.0, 1.5), (10.0, 0.0), (12.0, 0.0)),
+        ];
+        let source = sample_curve_sequence(&bump, 1.0);
+        assert!(compact_pair(&source, &bump, 0.5, None, None).is_none());
     }
     #[test]
     fn single_cubic_uses_geometric_distance_with_nonuniform_observations() {

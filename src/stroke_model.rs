@@ -606,8 +606,8 @@ fn recover_alpha_boundary_polarity(
             let i = sy * image.width + sx;
             let weight = weight * matte.get(i);
             mass += weight;
-            for c in 0..3 {
-                color[c] += weight * image.pixels[i][c];
+            for (c, channel) in color.iter_mut().enumerate() {
+                *channel += weight * image.pixels[i][c];
             }
         }
         if mass > 1e-5 {

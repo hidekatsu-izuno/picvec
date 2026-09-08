@@ -6478,9 +6478,112 @@ fn save_paint_details(path: &str, paints: &[Paint]) {
     }
 }
 
+/// Replace repeated shaded geometry only when a single field reproduces the
+/// composite throughout its owner, including the least well matched pixels.
+pub(crate) fn simplify_layered_paints(
+    source: &Raster,
+    segmentation: &Segmentation,
+    paints: &mut [Paint],
+) -> usize {
+    let mut owners = vec![Vec::new(); paints.len()];
+    for (i, &label) in segmentation.labels.iter().enumerate() {
+        if matches!(paints[label as usize], Paint::Layered { .. }) {
+            owners[label as usize].push(i);
+        }
+    }
+    let mut reference = source.clone();
+    let mut changed = 0;
+    for (paint, pixels) in paints.iter_mut().zip(owners) {
+        if pixels.len() < 6 {
+            continue;
+        }
+        for &i in &pixels {
+            reference.pixels[i] = paint_at(paint, i, source.width);
+        }
+        let Some(candidate) = fit_outline_field(&reference, &pixels, 0.8) else {
+            continue;
+        };
+        let mut increase = 0.0;
+        let mut supported = true;
+        for &i in &pixels {
+            let original = rgb_to_lab(reference.pixels[i]);
+            let replacement = rgb_to_lab(paint_at(&candidate, i, source.width));
+            let target = rgb_to_lab(source.pixels[i]);
+            let delta = delta_e2000(original, replacement);
+            let loss = delta_e2000(target, replacement) - delta_e2000(target, original);
+            if delta > 3.0 || loss > 1.5 {
+                supported = false;
+                break;
+            }
+            increase += loss;
+        }
+        if supported && increase / pixels.len() as f32 <= 0.25 {
+            *paint = candidate;
+            changed += 1;
+        }
+    }
+    changed
+}
+
+pub(crate) fn fit_outline_field(
+    source: &Raster,
+    pixels: &[usize],
+    maximum_mean_error: f32,
+) -> Option<Paint> {
+    if pixels.is_empty() {
+        return None;
+    }
+    let labs: Vec<_> = pixels
+        .iter()
+        .map(|&i| rgb_to_lab(source.pixels[i]))
+        .collect();
+    // Sparse intervals cannot identify a gradient, but can support a constant
+    // field. Keep the same color-error limits for this simpler candidate.
+    if pixels.len() < 6 {
+        let color = std::array::from_fn(|channel| {
+            pixels
+                .iter()
+                .map(|&i| source.pixels[i][channel])
+                .sum::<f32>()
+                / pixels.len() as f32
+        });
+        let error = constant_paint_error_for_labs(&labs, rgb_to_lab(color));
+        return (error.mean <= maximum_mean_error && error.percentile <= maximum_mean_error * 2.0)
+            .then_some(Paint::Solid { color });
+    }
+    let (paint, stats) = office_gradient_candidate_with_labs(
+        source,
+        &labs,
+        pixels,
+        bounds(pixels, source.width),
+        (pixels.len() / 4 + 1).clamp(2, 5),
+    )?;
+    #[cfg(feature = "diagnostics")]
+    if std::env::var_os("PICVEC_OUTLINE_DIAGNOSTICS").is_some() {
+        eprintln!("outline paint mean={} p95={}", stats.mean, stats.percentile);
+    }
+    (stats.mean <= maximum_mean_error && stats.percentile <= maximum_mean_error * 2.0)
+        .then_some(paint)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sparse_outline_fields_keep_the_color_error_gate() {
+        let source = Raster::new(4, 1, vec![[0.2, 0.3, 0.4]; 4]);
+        for count in 1..=4 {
+            let samples: Vec<_> = (0..count).collect();
+            assert!(matches!(
+                fit_outline_field(&source, &samples, 5.0),
+                Some(Paint::Solid { .. })
+            ));
+        }
+        assert!(fit_outline_field(&source, &[], 5.0).is_none());
+        let contrasted = Raster::new(2, 1, vec![[0.0; 3], [1.0; 3]]);
+        assert!(fit_outline_field(&contrasted, &[0, 1], 5.0).is_none());
+    }
 
     #[test]
     fn primary_gate_keeps_smooth_local_highlights() {
@@ -7312,6 +7415,91 @@ mod tests {
         assert_eq!(report, SupportedPaintMergeReport::default());
         assert_eq!(segmentation.regions.len(), 2);
         assert_eq!(paints.len(), 2);
+    }
+
+    #[test]
+    fn redundant_layered_field_becomes_one_paint() {
+        let source = Raster::new(32, 16, vec![[0.4; 3]; 32 * 16]);
+        let segmentation = two_face_segmentation(&source);
+        let layered = Paint::Layered {
+            base: Box::new(Paint::Solid { color: [0.4; 3] }),
+            overlays: vec![PaintOverlay {
+                paint: Box::new(Paint::Solid { color: [0.4; 3] }),
+                opacity_stops: vec![
+                    OpacityStop {
+                        offset: 0.0,
+                        opacity: 0.8,
+                    },
+                    OpacityStop {
+                        offset: 1.0,
+                        opacity: 0.0,
+                    },
+                ],
+            }],
+        };
+        let mut paints = vec![layered.clone(), layered];
+        assert_eq!(
+            simplify_layered_paints(&source, &segmentation, &mut paints),
+            2
+        );
+        assert!(paints.iter().all(|p| !matches!(p, Paint::Layered { .. })));
+        for (i, &owner) in segmentation.labels.iter().enumerate() {
+            assert!(
+                delta_e2000(
+                    rgb_to_lab(source.pixels[i]),
+                    rgb_to_lab(paint_at(&paints[owner as usize], i, 32))
+                ) < 0.01
+            );
+        }
+    }
+
+    #[test]
+    fn layered_simplification_keeps_separate_local_highlights() {
+        let layered = Paint::Layered {
+            base: Box::new(Paint::Solid { color: [0.1; 3] }),
+            overlays: [Point { x: 5.0, y: 5.0 }, Point { x: 11.0, y: 24.0 }]
+                .into_iter()
+                .map(|center| PaintOverlay {
+                    paint: Box::new(Paint::Radial {
+                        origin: RadialOrigin::Fitted,
+                        center,
+                        radius: Point { x: 4.0, y: 4.0 },
+                        stops: vec![
+                            ColorStop {
+                                offset: 0.0,
+                                color: [0.9; 3],
+                            },
+                            ColorStop {
+                                offset: 1.0,
+                                color: [0.9; 3],
+                            },
+                        ],
+                    }),
+                    opacity_stops: vec![
+                        OpacityStop {
+                            offset: 0.0,
+                            opacity: 1.0,
+                        },
+                        OpacityStop {
+                            offset: 1.0,
+                            opacity: 0.0,
+                        },
+                    ],
+                })
+                .collect(),
+        };
+        let source = Raster::new(
+            32,
+            32,
+            (0..1024).map(|i| paint_at(&layered, i, 32)).collect(),
+        );
+        let segmentation = two_face_segmentation(&source);
+        let mut paints = vec![layered, Paint::Solid { color: [0.1; 3] }];
+        assert_eq!(
+            simplify_layered_paints(&source, &segmentation, &mut paints),
+            0
+        );
+        assert!(matches!(paints[0], Paint::Layered { .. }));
     }
 
     #[test]

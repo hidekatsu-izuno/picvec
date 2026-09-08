@@ -5,6 +5,7 @@ use serde::Serialize;
 
 use crate::color::{delta_e2000, Lab};
 use crate::hierarchy::HierarchicalTopology;
+use crate::raster::Raster;
 use crate::segment::Segmentation;
 use crate::union_find::UnionFind;
 
@@ -18,6 +19,10 @@ mod geometry_mapping;
 
 #[path = "geometry_ellipse.rs"]
 mod geometry_ellipse;
+
+pub(crate) fn closed_contour_corridor(source: &[Point]) -> f32 {
+    geometry_ellipse::closed_corridor(source, geometry_bezier::CLOSED_CORRIDOR)
+}
 
 pub(crate) fn align_ellipse_stroke(
     source: &[Point],
@@ -101,9 +106,13 @@ pub struct GeometrySummary {
     pub continuity_faired_masters: usize,
     /// Whole closed contours fitted to one ellipse before shared slicing.
     pub fitted_ellipse_contours: usize,
+    /// Complete non-elliptic loops represented by at most eight shared cubics.
+    pub fitted_bezier_contours: usize,
     /// Accepted Paint contours remain authoritative during residual selection.
     #[serde(skip)]
     pub paint_ellipse_contours: Vec<Vec<Point>>,
+    #[serde(skip)]
+    pub(crate) paint_closed_contours: Vec<ClosedContour>,
     pub regularized_corner_excursions: usize,
     pub regularized_corner_vertices: usize,
     /// Canonical curves replaced by their shared positioned-grid polyline
@@ -290,8 +299,11 @@ struct AdaptiveBoundaryGeometry {
     regularized_excursions: usize,
     optimal_polygons: usize,
     continuity_faired_master_ids: HashSet<usize>,
-    ellipse_master_ids: HashSet<usize>,
+    closed_master_ids: HashSet<usize>,
+    bezier_vertices: HashSet<u64>,
+    fitted_bezier_contours: usize,
     ellipse_contours: Vec<Vec<Point>>,
+    closed_contours: Vec<ClosedContour>,
 }
 
 type TaggedCurve = (f64, f64, usize, CurveSegment);
@@ -842,6 +854,52 @@ fn potrace_corner_curves(
     )]
 }
 
+/// Corners of a closed loop where two observed straight runs meet carry
+/// stronger evidence than a turn in a simplified polygon. Keep them
+/// independently of the smoothing scale; a one-pixel staircase does not
+/// provide that support.
+fn straight_run_corners(points: &[Point]) -> HashSet<usize> {
+    let n = points.len().saturating_sub(1);
+    if n < 3 {
+        return HashSet::new();
+    }
+    let turns: Vec<usize> = (0..n)
+        .filter(|&i| {
+            let a = points[(i + n - 1) % n];
+            let p = points[i];
+            let b = points[(i + 1) % n];
+            let u = normalized(Point {
+                x: p.x - a.x,
+                y: p.y - a.y,
+            });
+            let v = normalized(Point {
+                x: b.x - p.x,
+                y: b.y - p.y,
+            });
+            u.x * v.x + u.y * v.y < 1.0 - 1e-5
+        })
+        .collect();
+    if turns.len() < 3 {
+        return HashSet::new();
+    }
+    turns
+        .iter()
+        .enumerate()
+        .filter_map(|(j, &i)| {
+            let a = points[turns[(j + turns.len() - 1) % turns.len()]];
+            let p = points[i];
+            let b = points[turns[(j + 1) % turns.len()]];
+            let left = a.distance(p);
+            let right = p.distance(b);
+            if left < 3.0 || right < 3.0 {
+                return None;
+            }
+            let dot = ((p.x - a.x) * (b.x - p.x) + (p.y - a.y) * (b.y - p.y)) / (left * right);
+            (dot <= 65.0_f32.to_radians().cos()).then_some(i)
+        })
+        .collect()
+}
+
 fn potrace_master_curves(
     points: &[Point],
     closed: bool,
@@ -1000,12 +1058,96 @@ fn point_segment_distance(point: Point, start: Point, end: Point) -> f32 {
     })
 }
 
+// A geometric excursion can also be an authored hook. Check the swept
+// area against the source before discarding it; the already regularized
+// contour cannot serve as an independent fidelity reference.
+fn excursion_changes_supported_paint(
+    polygon: &[Point],
+    pair: RegionPair,
+    segmentation: &Segmentation,
+    reference: &Raster,
+    uncertainty: f32,
+) -> bool {
+    if pair.0 < 0 || pair.1 < 0 {
+        return false;
+    }
+    let min_x = polygon
+        .iter()
+        .map(|p| p.x)
+        .fold(f32::INFINITY, f32::min)
+        .floor()
+        .max(0.0) as usize;
+    let min_y = polygon
+        .iter()
+        .map(|p| p.y)
+        .fold(f32::INFINITY, f32::min)
+        .floor()
+        .max(0.0) as usize;
+    let max_x = (polygon
+        .iter()
+        .map(|p| p.x)
+        .fold(f32::NEG_INFINITY, f32::max)
+        .ceil()
+        .max(0.0) as usize)
+        .min(segmentation.width);
+    let max_y = (polygon
+        .iter()
+        .map(|p| p.y)
+        .fold(f32::NEG_INFINITY, f32::max)
+        .ceil()
+        .max(0.0) as usize)
+        .min(segmentation.height);
+    for y in min_y..max_y {
+        for x in min_x..max_x {
+            let centre = Point {
+                x: x as f32 + 0.5,
+                y: y as f32 + 0.5,
+            };
+            let mut inside = false;
+            let mut distance = f32::INFINITY;
+            for i in 0..polygon.len() {
+                let a = polygon[i];
+                let b = polygon[(i + 1) % polygon.len()];
+                if (a.y > centre.y) != (b.y > centre.y)
+                    && centre.x < a.x + (centre.y - a.y) * (b.x - a.x) / (b.y - a.y)
+                {
+                    inside = !inside;
+                }
+                distance = distance.min(point_segment_distance(centre, a, b));
+            }
+            // Boundary coverage can legitimately move within its fitting
+            // corridor. Only independently supported interior paint vetoes
+            // an excursion replacement.
+            if !inside || distance <= uncertainty {
+                continue;
+            }
+            let index = y * segmentation.width + x;
+            let owner = segmentation.labels[index] as i32;
+            let other = if owner == pair.0 {
+                pair.1
+            } else if owner == pair.1 {
+                pair.0
+            } else {
+                continue;
+            };
+            let source = crate::color::rgb_to_lab(reference.pixels[index]);
+            let old = segmentation.regions[owner as usize].mean_lab;
+            let new = segmentation.regions[other as usize].mean_lab;
+            if delta_e2000(source, new) > delta_e2000(source, old) + 2.0 {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn regularize_short_corner_excursions(
     points: &[Point],
     edge_pairs: &[RegionPair],
     protected_vertices: &HashSet<u64>,
     stride: usize,
     corridor: f32,
+    source: Option<(&Segmentation, &Raster)>,
 ) -> RegularizedStrand {
     if points.len() < 24 {
         return RegularizedStrand {
@@ -1205,8 +1347,13 @@ fn regularize_short_corner_excursions(
                     + (intersection.y - incoming_anchor.y) * first_direction.y;
                 let forward_out = (outgoing_anchor.x - intersection.x) * second_direction.x
                     + (outgoing_anchor.y - intersection.y) * second_direction.y;
-                if forward_in < -1.0
-                    || forward_out < -1.0
+                // The replacement must continue along both supported rays.
+                // A crossing behind either anchor reverses the contour and
+                // can cut off the end of a narrow crescent or hooked stroke.
+                // Raster uncertainty belongs in the normal-distance checks,
+                // not in the sign of this tangential progress.
+                if forward_in < 0.0
+                    || forward_out < 0.0
                     || forward_in > maximum_ray
                     || forward_out > maximum_ray
                 {
@@ -1283,6 +1430,17 @@ fn regularize_short_corner_excursions(
                     );
                 }
                 if deviation < minimum_deviation {
+                    continue;
+                }
+                if source.is_some_and(|(segmentation, reference)| {
+                    excursion_changes_supported_paint(
+                        &polygon_points,
+                        rotated_pairs[start_index],
+                        segmentation,
+                        reference,
+                        uncertainty,
+                    )
+                }) {
                     continue;
                 }
                 candidates.push(ExcursionCandidate {
@@ -2799,6 +2957,7 @@ fn fit_alpha_contour(points: &[Point]) -> (Vec<Point>, Vec<CurveSegment>) {
         &HashSet::new(),
         1,
         0.5,
+        None,
     );
     source = regularized.points;
     // Keep sharp turns detected before fairing, including the tips of narrow
@@ -4533,16 +4692,29 @@ fn contextual_continuity_classes(
     // faces whose CIEDE2000 distance is within three just-noticeable
     // differences.
     const THREE_JND_DELTA_E: f32 = 6.9;
+    // Hue variations within a shaded rim can exceed the absolute color
+    // threshold while remaining much weaker than its shared material edge.
+    // Preserve their Paint labels, but let that dominant edge use one master.
+    // Require a common contrasting neighbour and similar lightness so this
+    // cannot bridge a highlight and a shadow through a third face.
+    let continuous = |a: usize, b: usize| {
+        let difference = delta_e2000(labs[a], labs[b]);
+        difference <= THREE_JND_DELTA_E
+            || ((labs[a].l - labs[b].l).abs() <= THREE_JND_DELTA_E
+                && adjacency[a].keys().any(|&c| {
+                    c != b
+                        && adjacency[b].contains_key(&c)
+                        && delta_e2000(labs[a], labs[c]).min(delta_e2000(labs[b], labs[c]))
+                            >= 4.0 * difference
+                }))
+    };
     let mut durable = UnionFind::new(labs.len());
     for label in 0..labs.len() {
         if !has_interior[label] {
             continue;
         }
         for &neighbour in adjacency[label].keys() {
-            if neighbour > label
-                && has_interior[neighbour]
-                && delta_e2000(labs[label], labs[neighbour]) <= THREE_JND_DELTA_E
-            {
+            if neighbour > label && has_interior[neighbour] && continuous(label, neighbour) {
                 durable.union(label, neighbour);
             }
         }
@@ -4560,7 +4732,7 @@ fn contextual_continuity_classes(
             for second in first + 1..durable_neighbours.len() {
                 let first_label = durable_neighbours[first];
                 let second_label = durable_neighbours[second];
-                if delta_e2000(labs[first_label], labs[second_label]) <= THREE_JND_DELTA_E {
+                if continuous(first_label, second_label) {
                     durable.union(first_label, second_label);
                 }
             }
@@ -4731,6 +4903,7 @@ fn is_shallow_continuity_arc(track: &[u64], stride: usize) -> bool {
 
 fn fit_adaptive_boundary_geometry(
     segmentation: &Segmentation,
+    source: Option<&Raster>,
     stride: usize,
     strands: &[Vec<u64>],
     protected_vertices: &HashSet<u64>,
@@ -4745,9 +4918,10 @@ fn fit_adaptive_boundary_geometry(
     let mut optimal_polygons = 0_usize;
     let mut regularized_excursions = 0_usize;
     let mut continuity_faired_master_ids = HashSet::<usize>::new();
-    let mut ellipse_master_ids = HashSet::<usize>::new();
+    let mut closed_master_ids = HashSet::<usize>::new();
     let mut ellipse_tracks = Vec::new();
     let mut ellipse_contours = Vec::new();
+    let mut closed_contours = Vec::new();
     #[cfg(feature = "diagnostics")]
     let strand_diagnostics_enabled = std::env::var_os("PICVEC_STRAND_DIAGNOSTICS").is_some();
     #[cfg(feature = "diagnostics")]
@@ -4781,6 +4955,7 @@ fn fit_adaptive_boundary_geometry(
                 protected_vertices,
                 stride,
                 0.5,
+                source.map(|reference| (segmentation, reference)),
             );
             let mut master_id = strand_index.saturating_mul(MASTER_IDS_PER_STRAND);
             // Use Potrace's standard corner threshold for material
@@ -5762,12 +5937,15 @@ fn fit_adaptive_boundary_geometry(
             }
         }
     }
-    // Apply supported ellipses after free-curve continuity fitting so a later
-    // face cannot overwrite one side of an already fitted closed contour.
+    // Apply supported whole-loop models after free-curve continuity fitting
+    // so a later face cannot overwrite one side of a fitted closed contour.
+    // Prefer ellipses; bounded cubic loops also cover curved bands and caps.
     // Partial overlaps are left alone; every accepted model owns its complete
     // contour and both incident faces reuse the same ordered master slices.
     ellipse_tracks.sort_by_key(|track| std::cmp::Reverse(track.len()));
     let mut ellipse_vertices = HashSet::new();
+    let mut bezier_vertices = HashSet::new();
+    let mut fitted_bezier_contours = 0;
     for track in ellipse_tracks {
         if track.iter().any(|v| {
             ellipse_vertices.contains(v)
@@ -5779,7 +5957,10 @@ fn fit_adaptive_boundary_geometry(
             .iter()
             .map(|&v| point_from_vertex(v, stride))
             .collect();
-        let corridor = geometry_ellipse::closed_corridor(&source, fairing_raster_corridor());
+        // Compare complete-loop models under the same localization budget.
+        // An ellipse must not lose to a less constrained cubic solely because
+        // it was tested with the tighter budget used for open edge fitting.
+        let corridor = closed_contour_corridor(&source);
         let fitted = geometry_ellipse::fit_closed(&source, corridor);
         #[cfg(feature = "diagnostics")]
         if continuity_diagnostics_enabled {
@@ -5790,9 +5971,33 @@ fn fit_adaptive_boundary_geometry(
                 "corridor": corridor,
             }));
         }
+        let is_ellipse = fitted.is_some();
+        let corridor = if is_ellipse {
+            corridor
+        } else {
+            geometry_bezier::CLOSED_CORRIDOR
+        };
+        let fitted = fitted.or_else(|| geometry_bezier::fit_closed(&source, corridor));
         let Some(curves) = fitted else {
             continue;
         };
+        if !is_ellipse {
+            // Count geometric masters, not their per-face slices. A whole
+            // loop must actually reduce the existing representation.
+            let masters: HashSet<_> = track
+                .windows(2)
+                .flat_map(|v| {
+                    edge_spans
+                        .get(&EdgeKey::new(v[0], v[1]))
+                        .into_iter()
+                        .flatten()
+                        .map(|s| s.master_id)
+                })
+                .collect();
+            if curves.len() >= masters.len() {
+                continue;
+            }
+        }
         let Some(mapping) = geometry_mapping::map(&source, &curves, corridor, &mut next_master_id)
         else {
             continue;
@@ -5800,13 +6005,37 @@ fn fit_adaptive_boundary_geometry(
         #[cfg(feature = "diagnostics")]
         if continuity_diagnostics_enabled {
             continuity_diagnostics.push(serde_json::json!({
-                "kind": "ellipse",
+                "kind": if is_ellipse { "ellipse" } else { "closed_bezier" },
                 "source": source.iter().map(|p| [p.x, p.y]).collect::<Vec<_>>(),
                 "segments": curves.len(),
             }));
         }
+        closed_contours.push(ClosedContour {
+            points: sample_curve_sequence(&curves, 0.75),
+            curves: curves.clone(),
+            is_ellipse,
+            fallback: if is_ellipse {
+                geometry_bezier::fit_closed(&source, geometry_bezier::CLOSED_CORRIDOR).map(
+                    |curves| {
+                        Box::new(ClosedContour {
+                            points: sample_curve_sequence(&curves, 0.75),
+                            curves,
+                            is_ellipse: false,
+                            fallback: None,
+                        })
+                    },
+                )
+            } else {
+                None
+            },
+        });
         let weight = 4_000_000 + track.len();
-        ellipse_contours.push(sample_curve_sequence(&curves, 0.5));
+        if is_ellipse {
+            ellipse_contours.push(sample_curve_sequence(&curves, 0.5));
+        } else {
+            fitted_bezier_contours += 1;
+            bezier_vertices.extend(track.iter().copied());
+        }
         for (&vertex, &point) in track.iter().zip(&mapping.positions) {
             proposals.entry(vertex).or_default().push((weight, point));
             validated_proposals.insert((vertex, weight));
@@ -5814,7 +6043,7 @@ fn fit_adaptive_boundary_geometry(
         }
         for (vertices, mut pieces) in track.windows(2).zip(mapping.edges) {
             for span in &pieces {
-                ellipse_master_ids.insert(span.master_id);
+                closed_master_ids.insert(span.master_id);
                 continuity_faired_master_ids.insert(span.master_id);
             }
             let edge = EdgeKey::new(vertices[0], vertices[1]);
@@ -5905,8 +6134,11 @@ fn fit_adaptive_boundary_geometry(
         regularized_excursions,
         optimal_polygons,
         continuity_faired_master_ids,
-        ellipse_master_ids,
+        closed_master_ids,
+        bezier_vertices,
+        fitted_bezier_contours,
         ellipse_contours,
+        closed_contours,
     }
 }
 
@@ -6118,6 +6350,7 @@ fn shared_chain_diagnostic(
 
 fn build_shared_chains(
     segmentation: &Segmentation,
+    source: Option<&Raster>,
     stride: usize,
     directed_edges: &[Vec<GridEdge>],
     pair_edges: &HashMap<RegionPair, Vec<EdgeKey>>,
@@ -6128,8 +6361,14 @@ fn build_shared_chains(
     GeometrySummary,
 ) {
     let (_, _, strands, junctions) = boundary_topology(stride, directed_edges, pair_edges);
-    let adaptive =
-        fit_adaptive_boundary_geometry(segmentation, stride, &strands, &junctions, pair_edges);
+    let adaptive = fit_adaptive_boundary_geometry(
+        segmentation,
+        source,
+        stride,
+        &strands,
+        &junctions,
+        pair_edges,
+    );
     let positions = adaptive.vertex_positions.clone();
     let mut chains = Vec::<SharedChain>::new();
     let mut lookup = HashMap::<EdgeKey, (usize, u64, u64)>::new();
@@ -6215,9 +6454,9 @@ fn build_shared_chains(
             };
             let closed = track.first() == track.last();
             let (raw, mut segments) = adaptive_chain_curves(&raw_edges, &adaptive, stride);
-            let has_ellipse = raw_edges.iter().any(|&(start, end)| {
+            let has_closed_master = raw_edges.iter().any(|&(start, end)| {
                 adaptive.edge_spans.get(&EdgeKey::new(start, end)).is_some_and(|spans| {
-                    spans.iter().any(|span| adaptive.ellipse_master_ids.contains(&span.master_id))
+                    spans.iter().any(|span| adaptive.closed_master_ids.contains(&span.master_id))
                 })
             });
             if segments.is_empty() {
@@ -6256,7 +6495,11 @@ fn build_shared_chains(
             // corridor. Incident chains must use the same budget: a tighter
             // downstream check would reject a valid endpoint and restore the
             // original pixel staircase along the neighbouring colour boundary.
-            let source_corridor = if fair_continuity_edges > 0
+            // Include incident internal chains: their shared endpoint moves
+            // with the loop even when they contain no loop segment themselves.
+            let source_corridor = if track.iter().any(|v| adaptive.bezier_vertices.contains(v)) {
+                geometry_bezier::CLOSED_CORRIDOR
+            } else if fair_continuity_edges > 0
                 || raw[0].distance(source[0]) > 1.0
                 || raw[raw.len() - 1].distance(source[source.len() - 1]) > 1.0
             {
@@ -6333,7 +6576,7 @@ fn build_shared_chains(
             };
             #[cfg(feature = "diagnostics")]
             let mut smoothing_candidate_diagnostics = Vec::new();
-            if !has_ellipse && source.len() >= 16 && segments.len() > 1 {
+            if !has_closed_master && source.len() >= 16 && segments.len() > 1 {
                 let mut candidate_points: Vec<Point> = track
                     .iter()
                     .map(|&vertex| point_from_vertex(vertex, stride))
@@ -6350,6 +6593,21 @@ fn build_shared_chains(
                         fixed_indices.insert(index);
                     }
                 }
+                // A closed shared contour has no junction endpoint whose
+                // position is owned by another master. Apply this local
+                // corner-preserving replacement only to such complete loops.
+                let observed_corners = if closed {
+                    straight_run_corners(&candidate_points)
+                } else {
+                    HashSet::new()
+                };
+                fixed_indices.extend(observed_corners.iter().copied());
+                let corner_error = |curves: &[CurveSegment]| {
+                    let samples = sample_curve_sequence(curves, 0.25);
+                    observed_corners.iter().map(|&i| samples.iter()
+                        .map(|p| p.distance(candidate_points[i])).fold(f32::INFINITY, f32::min))
+                        .fold(0.0_f32, f32::max)
+                };
                 let candidate_start_tangent = (!closed && source.len() >= 48).then(|| {
                     let start = segments[0].start();
                     match segments[0] {
@@ -6389,7 +6647,10 @@ fn build_shared_chains(
                         candidate_end_tangent,
                     );
                     let accepted = !candidate.is_empty()
-                        && candidate.len() < best.len()
+                        && (candidate.len() < best.len()
+                            || (!observed_corners.is_empty()
+                                && candidate.len() == best.len()
+                                && corner_error(&candidate) + 0.05 < corner_error(&best)))
                         && raster_boundary_supported(
                             &source,
                             &sample_curve_sequence(&candidate, 0.25),
@@ -6480,7 +6741,7 @@ fn build_shared_chains(
             };
             // The direct fairing is the final model-selection stage in the
             // Python graph builder, after corridor fallback and compaction.
-            if !has_ellipse {
+            if !has_closed_master {
                 segments = bounded_fairing_direct_shared_boundary(&source, &segments, closed, false);
             }
             if !segments.is_empty() {
@@ -6586,7 +6847,7 @@ fn build_shared_chains(
                     },
                 };
             }
-            if !has_ellipse {
+            if !has_closed_master {
                 segments = geometry_primitives::regularize(&source, &segments, 1.0, None, None);
             }
             let discontinuous = segments.windows(2).any(|pair| {
@@ -6734,7 +6995,9 @@ fn build_shared_chains(
             regularized_corner_vertices: adaptive.regularized_observations.len(),
             shared_curve_downgrades,
             fitted_ellipse_contours: adaptive.ellipse_contours.len(),
+            fitted_bezier_contours: adaptive.fitted_bezier_contours,
             paint_ellipse_contours: adaptive.ellipse_contours,
+            paint_closed_contours: adaptive.closed_contours,
             ..GeometrySummary::default()
         },
     )
@@ -7034,19 +7297,32 @@ fn hole_is_covered_by_later_regions(
 }
 
 pub fn build(segmentation: &Segmentation) -> (Vec<RegionGeometry>, GeometrySummary) {
-    build_internal(segmentation, None)
+    build_internal(segmentation, None, None)
 }
 
 pub fn build_with_topology(
     segmentation: &Segmentation,
     topology: &HierarchicalTopology,
 ) -> (Vec<RegionGeometry>, GeometrySummary) {
-    build_internal(segmentation, Some(topology))
+    build_internal(segmentation, Some(topology), None)
+}
+
+pub(crate) fn build_with_source(
+    segmentation: &Segmentation,
+    topology: &HierarchicalTopology,
+    reference: &Raster,
+) -> (Vec<RegionGeometry>, GeometrySummary) {
+    assert_eq!(
+        (segmentation.width, segmentation.height),
+        (reference.width, reference.height)
+    );
+    build_internal(segmentation, Some(topology), Some(reference))
 }
 
 fn build_internal(
     segmentation: &Segmentation,
     topology: Option<&HierarchicalTopology>,
+    source: Option<&Raster>,
 ) -> (Vec<RegionGeometry>, GeometrySummary) {
     let count = segmentation.regions.len();
     let order_ranks = paint_order_ranks(segmentation);
@@ -7055,7 +7331,7 @@ fn build_internal(
     let pair_edges = pair_boundary_edges(segmentation, stride, topology);
     let source_edges = edges.iter().map(Vec::len).sum();
     let (shared_chains, shared_lookup, positions, shared_report) =
-        build_shared_chains(segmentation, stride, &edges, &pair_edges);
+        build_shared_chains(segmentation, source, stride, &edges, &pair_edges);
     let mut endpoint_degree = HashMap::<(i64, i64), usize>::new();
     let mut endpoint_order = Vec::<(i64, i64)>::new();
     for chain in &shared_chains {
@@ -7240,11 +7516,126 @@ fn build_internal(
     (geometries, summary)
 }
 
+/// Preserve the accepted master instead of refitting it from a tessellation.
+#[derive(Clone, Debug)]
+pub(crate) struct ClosedContour {
+    pub points: Vec<Point>,
+    curves: Vec<CurveSegment>,
+    pub is_ellipse: bool,
+    pub fallback: Option<Box<ClosedContour>>,
+}
+impl ClosedContour {
+    #[cfg(test)]
+    pub fn from_points(points: &[Point]) -> Self {
+        let curves = geometry_bezier::fit_closed(points, geometry_bezier::CLOSED_CORRIDOR).unwrap();
+        Self {
+            points: sample_curve_sequence(&curves, 0.75),
+            curves,
+            is_ellipse: false,
+            fallback: None,
+        }
+    }
+}
+
+/// A pair of smooth boundaries, with corresponding intervals for colour changes.
+#[derive(Clone, Debug)]
+pub(crate) struct OutlineGeometry {
+    pub contour: Vec<Point>,
+    pub outer: String,
+    pub inner: String,
+    outer_edges: Vec<Vec<AdaptiveCurveSpan>>,
+    inner_edges: Vec<Vec<AdaptiveCurveSpan>>,
+}
+impl OutlineGeometry {
+    pub fn patch(&self, start: f32, end: f32) -> String {
+        Self::strip(&self.outer_edges, &self.inner_edges, start, end)
+    }
+    pub fn repair_patch(&self, deeper: &Self, start: f32, end: f32) -> String {
+        Self::strip(&self.inner_edges, &deeper.inner_edges, start, end)
+    }
+    fn strip(
+        outer_edges: &[Vec<AdaptiveCurveSpan>],
+        inner_edges: &[Vec<AdaptiveCurveSpan>],
+        start: f32,
+        end: f32,
+    ) -> String {
+        let n = outer_edges.len();
+        let a = (start * n as f32).round() as usize;
+        let b = (end * n as f32).round() as usize;
+        let slices = |edges: &[Vec<AdaptiveCurveSpan>]| {
+            let mut spans = Vec::<AdaptiveCurveSpan>::new();
+            for &span in edges[a..b].iter().flatten() {
+                if let Some(last) = spans
+                    .last_mut()
+                    .filter(|last| last.master_id == span.master_id)
+                {
+                    last.end_parameter = span.end_parameter;
+                } else {
+                    spans.push(span);
+                }
+            }
+            spans
+                .into_iter()
+                .map(|s| curve_interval(s.curve, s.start_parameter, s.end_parameter))
+                .collect::<Vec<_>>()
+        };
+        let mut outer = slices(outer_edges);
+        let inner = slices(inner_edges);
+        outer.push(CurveSegment::Line {
+            start: outer.last().unwrap().end(),
+            end: inner.last().unwrap().end(),
+        });
+        outer.extend(inner.into_iter().rev().map(CurveSegment::reversed));
+        outer.push(CurveSegment::Line {
+            start: outer.last().unwrap().end(),
+            end: outer[0].start(),
+        });
+        structural_curve_path_data(&outer, true)
+    }
+}
+
+/// Fit the two edges of an outline from one common normal-offset model.
+pub(crate) fn inset_outline(
+    contour: &ClosedContour,
+    width: f32,
+    offset: Point,
+) -> Option<OutlineGeometry> {
+    let outer = &contour.curves;
+    let guide = sample_curve_sequence(outer, 0.5);
+    let n = guide.len() - 1;
+    let sign = signed_area(&guide).signum();
+    let mut inner: Vec<_> = (0..n)
+        .map(|i| {
+            let a = guide[(i + n - 2) % n];
+            let b = guide[(i + 2) % n];
+            let d = normalized(Point {
+                x: b.x - a.x,
+                y: b.y - a.y,
+            });
+            Point {
+                x: guide[i].x - sign * d.y * width + offset.x,
+                y: guide[i].y + sign * d.x * width + offset.y,
+            }
+        })
+        .collect();
+    inner.push(inner[0]);
+    let fitted = geometry_ellipse::fit_closed(&inner, 0.75)
+        .or_else(|| geometry_bezier::fit_closed_with_limit(&inner, 0.75, 16))?;
+    let outer_mapping = geometry_mapping::map(&guide, outer, 0.5, &mut 0)?;
+    let inner_mapping = geometry_mapping::map(&inner, &fitted, 1.0, &mut 0)?;
+    Some(OutlineGeometry {
+        contour: guide,
+        outer: structural_curve_path_data(outer, true),
+        inner: structural_curve_path_data(&fitted, true),
+        outer_edges: outer_mapping.edges,
+        inner_edges: inner_mapping.edges,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::color::rgb_to_lab;
-    use crate::raster::Raster;
     use crate::segment::{RegionStats, Segmentation, SegmentationSummary};
 
     #[test]
@@ -7271,6 +7662,174 @@ mod tests {
     }
 
     #[test]
+    fn corner_regularization_preserves_narrow_crescent_tips() {
+        let contour = include_str!("test-data/narrow-crescent-contour.txt")
+            .lines()
+            .map(|line| {
+                let mut values = line.split_whitespace().map(|v| v.parse::<f32>().unwrap());
+                Point {
+                    x: values.next().unwrap(),
+                    y: values.next().unwrap(),
+                }
+            })
+            .collect::<Vec<_>>();
+        // Neither placement nor the direction of contour traversal may turn
+        // a genuine narrow tip into a removable corner excursion.
+        for reflected in [false, true] {
+            for reversed in [false, true] {
+                let mut raw = contour
+                    .iter()
+                    .map(|p| Point {
+                        x: 100.0 + if reflected { -p.x } else { p.x },
+                        y: 100.0 + p.y,
+                    })
+                    .collect::<Vec<_>>();
+                if reversed {
+                    raw.reverse();
+                }
+                let result = regularize_short_corner_excursions(
+                    &raw,
+                    &vec![RegionPair::new(0, 1); raw.len() - 1],
+                    &HashSet::new(),
+                    256,
+                    0.5,
+                    None,
+                );
+                assert!(
+                    result.changed.is_empty(),
+                    "crescent tip removed: reflected={reflected}, reversed={reversed}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn source_supported_hooks_survive_excursion_removal() {
+        let contour = include_str!("test-data/hooked-contour.txt")
+            .lines()
+            .map(|line| {
+                let values = line
+                    .split_whitespace()
+                    .map(|v| v.parse::<f32>().unwrap())
+                    .collect::<Vec<_>>();
+                Point {
+                    x: values[0],
+                    y: values[1],
+                }
+            })
+            .collect::<Vec<_>>();
+        let width = 96;
+        let height = 96;
+        for reflected in [false, true] {
+            for reversed in [false, true] {
+                for inverted in [false, true] {
+                    let mut raw = contour
+                        .iter()
+                        .map(|p| Point {
+                            x: 40.0 + if reflected { -p.x } else { p.x },
+                            y: 20.0 + p.y,
+                        })
+                        .collect::<Vec<_>>();
+                    if reversed {
+                        raw.reverse();
+                    }
+                    let pairs = vec![RegionPair::new(0, 1); raw.len() - 1];
+                    let without_source = regularize_short_corner_excursions(
+                        &raw,
+                        &pairs,
+                        &HashSet::new(),
+                        width + 1,
+                        0.5,
+                        None,
+                    );
+                    assert!(
+                        !without_source.changed.is_empty(),
+                        "fixture must exercise excursion removal"
+                    );
+                    let rasterize = |points: &[Point]| -> Vec<u32> {
+                        (0..width * height)
+                            .map(|index| {
+                                let x = (index % width) as f32 + 0.5;
+                                let y = (index / width) as f32 + 0.5;
+                                let mut inside = false;
+                                for i in 0..points.len() {
+                                    let a = points[i];
+                                    let b = points[(i + 1) % points.len()];
+                                    if (a.y > y) != (b.y > y)
+                                        && x < a.x + (y - a.y) * (b.x - a.x) / (b.y - a.y)
+                                    {
+                                        inside = !inside;
+                                    }
+                                }
+                                u32::from(inside)
+                            })
+                            .collect()
+                    };
+                    let colours = if inverted {
+                        [[0.05; 3], [0.95; 3]]
+                    } else {
+                        [[0.95; 3], [0.05; 3]]
+                    };
+                    let labels = rasterize(&raw);
+                    let canonical = Raster::new(
+                        width,
+                        height,
+                        labels.iter().map(|&i| colours[i as usize]).collect(),
+                    );
+                    let regions = (0..2)
+                        .map(|i| RegionStats {
+                            id: i as u32,
+                            area: labels.iter().filter(|&&v| v == i as u32).count(),
+                            min_x: 0,
+                            min_y: 0,
+                            max_x: width,
+                            max_y: height,
+                            mean_rgb: colours[i],
+                            mean_lab: rgb_to_lab(colours[i]),
+                        })
+                        .collect();
+                    let segmentation = Segmentation {
+                        width,
+                        height,
+                        labels,
+                        paint_keys: vec![0, 1],
+                        paint_samples: vec![true; width * height],
+                        canonical: canonical.clone(),
+                        regions,
+                        summary: SegmentationSummary::default(),
+                    };
+                    let authored = regularize_short_corner_excursions(
+                        &raw,
+                        &pairs,
+                        &HashSet::new(),
+                        width + 1,
+                        0.5,
+                        Some((&segmentation, &canonical)),
+                    );
+                    assert!(authored.changed.is_empty(), "authored hook removed: reflected={reflected}, reversed={reversed}, inverted={inverted}");
+                    let corrected = Raster::new(
+                        width,
+                        height,
+                        rasterize(&without_source.points)
+                            .iter()
+                            .map(|&i| colours[i as usize])
+                            .collect(),
+                    );
+                    let spurious = regularize_short_corner_excursions(
+                        &raw,
+                        &pairs,
+                        &HashSet::new(),
+                        width + 1,
+                        0.5,
+                        Some((&segmentation, &corrected)),
+                    );
+                    assert!(!spurious.changed.is_empty(), "unsupported spur retained");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn cube_bottom_corner_excursion_is_regularized() {
         let raw = include_str!("test-data/cube-bottom-corner.txt")
             .lines()
@@ -7288,6 +7847,7 @@ mod tests {
             &HashSet::new(),
             1601,
             0.5,
+            None,
         );
         assert!(!result.corners.is_empty(), "cube spike survived");
         assert!(result.points.iter().all(|point| point.y < 387.0));
@@ -7665,6 +8225,57 @@ mod tests {
     }
 
     #[test]
+    fn dominant_shared_edge_connects_shades_without_merging_distinct_materials() {
+        let shades = [
+            Lab {
+                l: 4.0,
+                a: 13.5,
+                b: -17.2,
+            },
+            Lab {
+                l: 6.6,
+                a: 22.0,
+                b: -31.8,
+            },
+            Lab {
+                l: 80.5,
+                a: -12.8,
+                b: -27.0,
+            },
+        ];
+        assert!(delta_e2000(shades[0], shades[1]) > 6.9);
+        for order in [[0, 1, 2], [2, 1, 0]] {
+            let labs: Vec<_> = order.iter().map(|&i| shades[i]).collect();
+            let adjacency: Vec<_> = (0..3)
+                .map(|a| (0..3).filter(|&b| a != b).map(|b| (b, 8)).collect())
+                .collect();
+            let classes = contextual_continuity_classes(&labs, &adjacency, &[true; 3]);
+            let index = |label| order.iter().position(|&i| i == label).unwrap();
+            assert_eq!(classes[index(0)], classes[index(1)]);
+            assert_ne!(classes[index(0)], classes[index(2)]);
+        }
+        let adjacency = vec![
+            HashMap::from([(1, 8)]),
+            HashMap::from([(0, 8)]),
+            HashMap::new(),
+        ];
+        let separate = contextual_continuity_classes(&shades, &adjacency, &[true; 3]);
+        assert_ne!(separate[0], separate[1], "no shared contrasting edge");
+        let mut different_lightness = shades;
+        different_lightness[1].l = 25.0;
+        let adjacency = vec![
+            HashMap::from([(1, 8), (2, 8)]),
+            HashMap::from([(0, 8), (2, 8)]),
+            HashMap::from([(0, 8), (1, 8)]),
+        ];
+        let separate = contextual_continuity_classes(&different_lightness, &adjacency, &[true; 3]);
+        assert_ne!(
+            separate[0], separate[1],
+            "a real lightness edge must remain separate"
+        );
+    }
+
+    #[test]
     fn perceptually_close_adjacent_patch_shares_continuity_class() {
         let labs = vec![
             Lab {
@@ -7890,7 +8501,7 @@ mod tests {
         let stride = width + 1;
         let (edges, _) = region_boundary_edges(&segmentation, stride, None);
         let pairs = pair_boundary_edges(&segmentation, stride, None);
-        let (chains, lookup, ..) = build_shared_chains(&segmentation, stride, &edges, &pairs);
+        let (chains, lookup, ..) = build_shared_chains(&segmentation, None, stride, &edges, &pairs);
         let mut checked = HashSet::new();
         let mut lines = 0;
         for (&pair, edges) in &pairs {
@@ -7987,7 +8598,8 @@ mod tests {
             let stride = width + 1;
             let (edges, _) = region_boundary_edges(&segmentation, stride, None);
             let pairs = pair_boundary_edges(&segmentation, stride, None);
-            let (chains, lookup, ..) = build_shared_chains(&segmentation, stride, &edges, &pairs);
+            let (chains, lookup, ..) =
+                build_shared_chains(&segmentation, None, stride, &edges, &pairs);
             let mut checked = HashSet::new();
             for (&pair, edges) in &pairs {
                 if pair.0 != 1 && pair.1 != 1 {
@@ -8104,7 +8716,8 @@ mod tests {
             let stride = width + 1;
             let (edges, _) = region_boundary_edges(&segmentation, stride, None);
             let pairs = pair_boundary_edges(&segmentation, stride, None);
-            let (chains, lookup, ..) = build_shared_chains(&segmentation, stride, &edges, &pairs);
+            let (chains, lookup, ..) =
+                build_shared_chains(&segmentation, None, stride, &edges, &pairs);
             let mut checked = HashSet::new();
             let mut diagonal_segments = 0;
             for (&pair, edges) in &pairs {
@@ -8237,6 +8850,74 @@ mod tests {
         assert!(summary.continuity_faired_masters > 0, "{summary:?}");
         assert_eq!(summary.shared_loop_fallbacks, 0, "{summary:?}");
         assert_eq!(summary.shared_loop_discontinuities, 0, "{summary:?}");
+    }
+
+    #[test]
+    fn small_rectangular_insets_keep_observed_corners() {
+        for (w, h, x0, y0) in [(6, 8, 8, 7), (8, 6, 9, 8), (10, 12, 5, 6)] {
+            let width = 32;
+            let height = 32;
+            let colours = [[0.8; 3], [0.05; 3]];
+            let labels: Vec<u32> = (0..width * height)
+                .map(|i| {
+                    let (x, y) = (i % width, i / width);
+                    u32::from(x >= x0 && x < x0 + w && y >= y0 && y < y0 + h)
+                })
+                .collect();
+            let regions = (0..2)
+                .map(|label| {
+                    let pixels: Vec<_> = labels
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, &v)| (v == label as u32).then_some(i))
+                        .collect();
+                    RegionStats {
+                        id: label as u32,
+                        area: pixels.len(),
+                        min_x: pixels.iter().map(|i| i % width).min().unwrap(),
+                        min_y: pixels.iter().map(|i| i / width).min().unwrap(),
+                        max_x: pixels.iter().map(|i| i % width + 1).max().unwrap(),
+                        max_y: pixels.iter().map(|i| i / width + 1).max().unwrap(),
+                        mean_rgb: colours[label],
+                        mean_lab: rgb_to_lab(colours[label]),
+                    }
+                })
+                .collect();
+            let segmentation = Segmentation {
+                width,
+                height,
+                canonical: Raster::new(
+                    width,
+                    height,
+                    labels.iter().map(|&v| colours[v as usize]).collect(),
+                ),
+                labels,
+                regions,
+                paint_keys: vec![0, 1],
+                paint_samples: vec![true; width * height],
+                summary: SegmentationSummary::default(),
+            };
+            let (geometry, summary) = build(&segmentation);
+            let inset = geometry.iter().find(|g| g.region == 1).unwrap();
+            for (x, y) in [(x0, y0), (x0 + w, y0), (x0 + w, y0 + h), (x0, y0 + h)] {
+                let corner = Point {
+                    x: x as f32,
+                    y: y as f32,
+                };
+                let distance = inset
+                    .loops
+                    .iter()
+                    .flatten()
+                    .map(|p| p.distance(corner))
+                    .fold(f32::INFINITY, f32::min);
+                assert!(
+                    distance < 0.35,
+                    "lost observed corner {corner:?}: {distance}; {}",
+                    inset.path_data
+                );
+            }
+            assert_eq!(summary.shared_loop_discontinuities, 0);
+        }
     }
 
     #[test]
@@ -8525,7 +9206,7 @@ mod tests {
         let (directed_edges, _) = region_boundary_edges(&segmentation, stride, None);
         let pair_edges = pair_boundary_edges(&segmentation, stride, None);
         let (chains, lookup, ..) =
-            build_shared_chains(&segmentation, stride, &directed_edges, &pair_edges);
+            build_shared_chains(&segmentation, None, stride, &directed_edges, &pair_edges);
         let chain_ids: Vec<usize> = (0..height)
             .map(|y| lookup[&EdgeKey::new(vertex_id(3, y, stride), vertex_id(3, y + 1, stride))].0)
             .collect();
@@ -8593,7 +9274,7 @@ mod tests {
         let (directed_edges, _) = region_boundary_edges(&segmentation, stride, None);
         let pair_edges = pair_boundary_edges(&segmentation, stride, None);
         let (chains, lookup, ..) =
-            build_shared_chains(&segmentation, stride, &directed_edges, &pair_edges);
+            build_shared_chains(&segmentation, None, stride, &directed_edges, &pair_edges);
         let upper = lookup[&EdgeKey::new(vertex_id(3, 2, stride), vertex_id(3, 3, stride))].0;
         let lower = lookup[&EdgeKey::new(vertex_id(3, 3, stride), vertex_id(3, 4, stride))].0;
         assert_ne!(upper, lower);

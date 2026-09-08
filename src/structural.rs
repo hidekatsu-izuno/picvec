@@ -42,7 +42,9 @@ pub struct StructuralSummary {
 
 #[derive(Clone, Debug)]
 pub struct StructuralInk {
+    pub(crate) color_patches: Vec<crate::ink_color::ColorPatch>,
     pub strokes: Vec<StructuralStroke>,
+    pub(crate) outlines: Vec<crate::outline::OutlineBand>,
     /// Medial-ridge core plus source-modelled AA shoulders transferred out of Paint.
     pub paint_ownership_mask: Vec<bool>,
     /// Role-filtered raster lines frozen during Paint regularization. This is
@@ -296,6 +298,8 @@ impl StructuralInk {
 
     pub fn empty() -> Self {
         Self {
+            color_patches: Vec::new(),
+            outlines: Vec::new(),
             strokes: Vec::new(),
             paint_ownership_mask: Vec::new(),
             source_line_mask: Vec::new(),
@@ -1688,6 +1692,8 @@ pub fn analyse(source: &Raster, roles: &mut EdgeRoles) -> (Raster, StructuralInk
     (
         paint_reference,
         StructuralInk {
+            color_patches: Vec::new(),
+            outlines: Vec::new(),
             strokes,
             paint_ownership_mask: underpaint_ownership,
             source_line_mask,
@@ -2241,9 +2247,17 @@ fn extend_graph_to_dark_paint(
                 .l
             };
             let in_paint = |p: Point| {
-                [-radius, 0.0, radius]
-                    .iter()
-                    .all(|&d| sample(paint, p, d) <= ink + 4.0)
+                // A narrow unpainted sliver can lie between the centre and
+                // either shoulder. Require the whole receiving cross-section
+                // to contain ink before terminating the source-backed bridge.
+                // Test the drawn width, not the wider sampling radius used
+                // to identify the lighter surroundings of a medial ridge.
+                let half_width = 0.5 * stroke.width.max(0.4);
+                let steps = (4.0 * half_width).ceil() as usize;
+                (0..=steps).all(|i| {
+                    let offset = -half_width + 2.0 * half_width * i as f32 / steps as f32;
+                    sample(paint, p, offset) <= ink + 4.0
+                })
             };
             let anchor = Point {
                 x: endpoint.x - tangent.0 * radius * 2.0,
@@ -4569,6 +4583,8 @@ pub fn select_missing_with_junctions(
         })
         .count();
     StructuralInk {
+        color_patches: Vec::new(),
+        outlines: Vec::new(),
         strokes,
         paint_ownership_mask: structural.paint_ownership_mask.clone(),
         source_line_mask: structural.source_line_mask.clone(),
@@ -4585,6 +4601,182 @@ pub fn select_missing_with_junctions(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn serialized_interior_colour_patch_preserves_the_stroke_silhouette() {
+        let render = |ink: &StructuralInk| {
+            let (document, _) = crate::svg::serialize(24, 24, &[], &[], ink, 0.0, true);
+            let tree =
+                resvg::usvg::Tree::from_str(&document, &resvg::usvg::Options::default()).unwrap();
+            let mut pixmap = resvg::tiny_skia::Pixmap::new(24, 24).unwrap();
+            pixmap.fill(resvg::tiny_skia::Color::WHITE);
+            resvg::render(
+                &tree,
+                resvg::tiny_skia::Transform::identity(),
+                &mut pixmap.as_mut(),
+            );
+            Raster::new(
+                24,
+                24,
+                pixmap
+                    .pixels()
+                    .iter()
+                    .map(|p| {
+                        [
+                            p.red() as f32 / 255.0,
+                            p.green() as f32 / 255.0,
+                            p.blue() as f32 / 255.0,
+                        ]
+                    })
+                    .collect(),
+            )
+        };
+        let mut ink = StructuralInk::empty();
+        ink.strokes.push(StructuralStroke {
+            points: vec![Point { x: 3.5, y: 12.0 }, Point { x: 20.5, y: 12.0 }],
+            path_data: None,
+            precise_points: None,
+            color: [0.0; 3],
+            width: 4.0,
+            role: "ridge",
+            width_samples: vec![(4.0, 2)],
+        });
+        let before = render(&ink);
+        let mut source = before.clone();
+        for x in (8..14).chain(17..19) {
+            source.pixels[12 * 24 + x] = [0.9, 0.05, 0.1];
+        }
+        let paint = Raster::blank(24, 24, [1.0; 3]);
+        let mut probe = ink.clone();
+        probe.strokes[0].color = [1.0; 3];
+        let white = render(&probe);
+        ink.color_patches = crate::ink_color::propose(&source, &paint, &before, &white, &before);
+        assert_eq!(ink.color_patches.len(), 2);
+        let (_, summary) = crate::svg::serialize(24, 24, &[], &[], &ink, 0.0, true);
+        assert_eq!(
+            summary.structural_color_patches, 1,
+            "same-colour interiors must share one path"
+        );
+        let after = render(&ink);
+        assert!(ink.color_patches[0].improves(&source, &before, &after));
+        for i in 0..24 * 24 {
+            if i / 24 == 12 && ((8..14).contains(&(i % 24)) || (17..19).contains(&(i % 24))) {
+                assert!(after.pixels[i][0] > 0.8 && after.pixels[i][1] < 0.1);
+            } else {
+                assert_eq!(
+                    after.pixels[i], before.pixels[i],
+                    "stroke changed outside recovered interior at {i}"
+                );
+            }
+        }
+        ink.color_patches[0].path = "M8 0h6v24h-6z".to_string();
+        let clipped = render(&ink);
+        for i in 0..24 * 24 {
+            if before.pixels[i] == [1.0; 3] {
+                assert_eq!(
+                    clipped.pixels[i], [1.0; 3],
+                    "patch escaped the original ink at {i}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn terminal_ridge_joins_paint_covering_its_drawn_width() {
+        for stroke_width in [2.0_f32, 4.0, 6.0] {
+            let (width, height) = (48, 32);
+            let background = [0.65; 3];
+            let ink = [0.03; 3];
+            let mut source = Raster::blank(width, height, background);
+            let mut paint = source.clone();
+            let half = (stroke_width * 0.5) as usize;
+            for y in 16 - half..=16 + half {
+                for x in 10..width {
+                    source.pixels[y * width + x] = ink;
+                    if x >= 32 {
+                        paint.pixels[y * width + x] = ink;
+                    }
+                }
+            }
+            let mut strokes = vec![StructuralStroke {
+                points: vec![Point { x: 10.5, y: 16.5 }, Point { x: 28.5, y: 16.5 }],
+                path_data: None,
+                precise_points: None,
+                color: ink,
+                width: stroke_width,
+                role: "ridge",
+                width_samples: Vec::new(),
+            }];
+            extend_graph_to_dark_paint(
+                &mut strokes,
+                &lab_pixels(&source),
+                &lab_pixels(&paint),
+                width,
+                height,
+            );
+            assert!(
+                strokes[0].points.last().unwrap().x >= 32.0,
+                "receiving ink need only cover the drawn width {stroke_width}"
+            );
+        }
+    }
+
+    #[test]
+    fn terminal_ridge_does_not_stop_across_an_unpainted_sliver() {
+        for sliver_row in [15, 18] {
+            for source_gap in [false, true] {
+                let (width, height) = (48, 32);
+                let background = [0.65; 3];
+                let ink = [0.03; 3];
+                let mut source = Raster::blank(width, height, background);
+                for y in 0..height {
+                    for x in 28..width {
+                        source.pixels[y * width + x] = ink;
+                    }
+                }
+                for x in 10..28 {
+                    source.pixels[16 * width + x] = ink;
+                }
+                let mut paint = source.clone();
+                // The old three samples (centre and two shoulders) all see
+                // ink, while a one-pixel Paint hole lies between them.
+                for x in 28..35 {
+                    paint.pixels[sliver_row * width + x] = background;
+                }
+                if source_gap {
+                    for x in 30..33 {
+                        source.pixels[16 * width + x] = background;
+                    }
+                }
+                let end = Point { x: 28.5, y: 16.5 };
+                let mut strokes = vec![StructuralStroke {
+                    points: vec![Point { x: 10.5, y: 16.5 }, end],
+                    path_data: None,
+                    precise_points: None,
+                    color: ink,
+                    width: 4.0,
+                    role: "ridge",
+                    width_samples: Vec::new(),
+                }];
+                extend_graph_to_dark_paint(
+                    &mut strokes,
+                    &lab_pixels(&source),
+                    &lab_pixels(&paint),
+                    width,
+                    height,
+                );
+                let actual = *strokes[0].points.last().unwrap();
+                if source_gap {
+                    assert_eq!(actual.x, end.x, "must not bridge authored gaps");
+                } else {
+                    assert!(
+                        actual.x >= 35.0,
+                        "must overlap solid receiving Paint: {actual:?}"
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn terminal_ridge_reaches_dark_paint_only_with_continuous_source_ink() {

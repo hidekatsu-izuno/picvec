@@ -22,6 +22,7 @@ pub struct SvgSummary {
     pub linear_gradients: usize,
     pub radial_gradients: usize,
     pub structural_strokes: usize,
+    pub structural_color_patches: usize,
     pub gradient_stops: usize,
     pub linear_cubics_to_lines: usize,
     pub redundant_segments_removed: usize,
@@ -30,6 +31,10 @@ pub struct SvgSummary {
     pub paint_paths_merged: usize,
     pub paint_batches: usize,
     pub alpha_mask_paths: usize,
+    pub outline_bands: usize,
+    pub outline_color_patches: usize,
+    pub outline_paint_regions_removed: usize,
+    pub outline_structural_strokes_removed: usize,
     pub bytes: usize,
 }
 
@@ -43,6 +48,7 @@ impl SvgSummary {
         self.linear_gradients += other.linear_gradients;
         self.radial_gradients += other.radial_gradients;
         self.structural_strokes += other.structural_strokes;
+        self.structural_color_patches += other.structural_color_patches;
         self.gradient_stops += other.gradient_stops;
         self.linear_cubics_to_lines += other.linear_cubics_to_lines;
         self.redundant_segments_removed += other.redundant_segments_removed;
@@ -51,6 +57,10 @@ impl SvgSummary {
         self.paint_paths_merged += other.paint_paths_merged;
         self.paint_batches += other.paint_batches;
         self.alpha_mask_paths += other.alpha_mask_paths;
+        self.outline_bands += other.outline_bands;
+        self.outline_color_patches += other.outline_color_patches;
+        self.outline_paint_regions_removed += other.outline_paint_regions_removed;
+        self.outline_structural_strokes_removed += other.outline_structural_strokes_removed;
     }
 }
 
@@ -666,7 +676,12 @@ pub(crate) fn serialize_filtered_with_alpha(
         definitions.push_str("</mask>");
     }
     for (region, paint) in paints.iter().enumerate() {
-        if excluded_regions.get(region).copied().unwrap_or(false) {
+        if excluded_regions.get(region).copied().unwrap_or(false)
+            || structural.outlines.iter().any(|band| {
+                band.hidden.contains(&(region as u32))
+                    && !band.boundary_underpaint.contains(&(region as u32))
+            })
+        {
             continue;
         }
         match paint {
@@ -703,13 +718,44 @@ pub(crate) fn serialize_filtered_with_alpha(
             Paint::Solid { .. } => {}
         }
     }
+    summary.outline_bands = structural.outlines.len();
+    for (i, band) in structural.outlines.iter().enumerate() {
+        summary.outline_color_patches += band.patches.len();
+        for (_, paint) in &band.patches {
+            if let Some(key) = paint_key(paint) {
+                register_gradient(
+                    paint,
+                    None,
+                    key,
+                    &mut gradient_ids,
+                    &mut definitions,
+                    &mut summary,
+                );
+            }
+        }
+        let _ = write!(definitions, "<clipPath id=\"outline-inner-{i}\"><path d=\"{}\"/></clipPath><clipPath id=\"outline-outer-{i}\"><path d=\"{}\"/></clipPath>", band.inner, band.outer);
+    }
     let mut paint_elements = Vec::<Option<PaintElement>>::with_capacity(geometries.len());
+    let mut band_elements: Vec<Vec<Option<PaintElement>>> =
+        structural.outlines.iter().map(|_| Vec::new()).collect();
     for geometry in geometries {
         if excluded_regions
             .get(geometry.region as usize)
             .copied()
             .unwrap_or(false)
         {
+            continue;
+        }
+        let band = structural
+            .outlines
+            .iter()
+            .enumerate()
+            .find(|(_, band)| band.regions.contains(&geometry.region));
+        if band.is_some_and(|(_, band)| {
+            band.hidden.contains(&geometry.region)
+                && !band.boundary_underpaint.contains(&geometry.region)
+        }) {
+            summary.outline_paint_regions_removed += 1;
             continue;
         }
         let paint = &paints[geometry.region as usize];
@@ -780,13 +826,35 @@ pub(crate) fn serialize_filtered_with_alpha(
                 }
             }
         };
-        append_paint_elements(
-            &mut paint_elements,
-            optimized,
-            paint,
-            &gradient_ids,
-            paint_overlap,
-        );
+        if let Some((_, band)) = band {
+            if band.boundary_underpaint.contains(&geometry.region) {
+                // Shared geometry may extend a fraction beyond the fitted
+                // outer contour. Preserve its coverage underneath the new
+                // opaque band, rather than cutting a hole in the backdrop.
+                append_paint_elements(
+                    &mut paint_elements,
+                    optimized.clone(),
+                    paint,
+                    &gradient_ids,
+                    paint_overlap,
+                );
+            }
+            if band.hidden.contains(&geometry.region) {
+                continue;
+            }
+        }
+        let elements = if let Some((i, _)) = band {
+            &mut band_elements[i]
+        } else {
+            &mut paint_elements
+        };
+        let first_element = elements.len();
+        append_paint_elements(elements, optimized, paint, &gradient_ids, paint_overlap);
+        if let Some((i, _)) = band {
+            for element in elements[first_element..].iter_mut().flatten() {
+                let _ = write!(element.attributes, " clip-path=\"url(#outline-inner-{i})\"");
+            }
+        }
     }
     batch_equal_paint_paths(&mut paint_elements, &mut summary);
     let mut body = String::new();
@@ -795,9 +863,35 @@ pub(crate) fn serialize_filtered_with_alpha(
         let kind = write_geometry(&mut body, &element.geometry, &element.attributes);
         count_element(&mut summary, kind);
     }
+    for (i, (band, mut elements)) in structural.outlines.iter().zip(band_elements).enumerate() {
+        // A complete underpaint prevents complementary antialias coverage
+        // at the inner clip from exposing the page through a hairline seam.
+        let fill = fill_value(&band.patches[0].1, &gradient_ids);
+        let _ = write!(body, "<path d=\"{}\" fill=\"{fill}\"/>", band.outer);
+        summary.path_elements += 1;
+        for (path, paint) in &band.patches {
+            let fill = fill_value(paint, &gradient_ids);
+            let _ = write!(body, "<path data-outline-band=\"true\" d=\"{path}\" fill=\"{fill}\" stroke=\"{fill}\" stroke-width=\"0.25\" clip-path=\"url(#outline-outer-{i})\" fill-rule=\"evenodd\"/>");
+            summary.path_elements += 1;
+        }
+        batch_equal_paint_paths(&mut elements, &mut summary);
+        for element in elements.into_iter().flatten() {
+            let kind = write_geometry(&mut body, &element.geometry, &element.attributes);
+            count_element(&mut summary, kind);
+        }
+    }
     body.push_str("</g>");
     body.push_str("<g id=\"structural-ink-layer\" fill=\"none\" stroke-linecap=\"round\" stroke-linejoin=\"round\">");
-    for stroke in &structural.strokes {
+    let mut patch_mask_uses = String::new();
+    for (stroke_index, stroke) in structural.strokes.iter().enumerate() {
+        if structural
+            .outlines
+            .iter()
+            .any(|band| band.hides_stroke(&stroke.points, stroke.width))
+        {
+            summary.outline_structural_strokes_removed += 1;
+            continue;
+        }
         let data = stroke
             .path_data
             .clone()
@@ -810,6 +904,21 @@ pub(crate) fn serialize_filtered_with_alpha(
             rgb_hex(stroke.color),
             number(stroke.width)
         );
+        if !structural.color_patches.is_empty() {
+            let _ = write!(attributes, " id=\"ink-color-source-{stroke_index}\"");
+            let _ = write!(
+                patch_mask_uses,
+                "<use href=\"#ink-color-source-{stroke_index}\"/>"
+            );
+        }
+        if let Some((i, _)) = structural
+            .outlines
+            .iter()
+            .enumerate()
+            .find(|(_, band)| band.clips_stroke(&stroke.points))
+        {
+            let _ = write!(attributes, " clip-path=\"url(#outline-inner-{i})\"");
+        }
         if matches!(stroke.role, "boundary-stroke" | "sampled-ink") {
             // Recovery owns a measured interval, not an inferred round cap.
             // The original Paint retains its tips and intentional breaks.
@@ -828,6 +937,23 @@ pub(crate) fn serialize_filtered_with_alpha(
         summary.structural_strokes += 1;
     }
     body.push_str("</g>");
+    if !structural.color_patches.is_empty() {
+        let _ = write!(definitions, "<mask id=\"ink-color-coverage\" maskUnits=\"userSpaceOnUse\" x=\"0\" y=\"0\" width=\"{width}\" height=\"{height}\" style=\"mask-type:alpha\"><g fill=\"none\" stroke-linecap=\"round\" stroke-linejoin=\"round\">{patch_mask_uses}</g></mask>");
+        body.push_str("<g data-ink-color-patches=\"true\" mask=\"url(#ink-color-coverage)\">");
+        let mut colors = std::collections::BTreeMap::<String, String>::new();
+        for patch in &structural.color_patches {
+            colors
+                .entry(rgb_hex(patch.color))
+                .or_default()
+                .push_str(&patch.path);
+        }
+        for (color, path) in colors {
+            let _ = write!(body, "<path d=\"{path}\" fill=\"{color}\"/>");
+            summary.path_elements += 1;
+            summary.structural_color_patches += 1;
+        }
+        body.push_str("</g>");
+    }
     if alpha_mask.is_some() {
         body = format!("<g mask=\"url(#source-alpha-mask)\">{body}</g>");
     }
