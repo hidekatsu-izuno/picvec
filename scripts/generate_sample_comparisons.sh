@@ -28,9 +28,11 @@ pairs=(
     "car|Car|car.png|car.svg"
     "cliparts|Clip art|cliparts.png|cliparts.svg"
     "cliparts-6x6|Clip art 6x6|cliparts-6x6.png|cliparts-6x6.svg"
+    "remojii|Remojii|remojii.png|remojii.svg"
     "viewport1|Viewport 1|viewport1.jpg|viewport1.svg"
     "viewport2|Viewport 2|viewport2.jpg|viewport2.svg"
     "wikipedia_logo_1_0|Wikipedia logo|wikipedia_logo_1_0.png|wikipedia_logo_1_0.svg"
+    "vectorization-stress-still-life|Vectorization stress still life|vectorization-stress-still-life.png|vectorization-stress-still-life.svg"
 )
 
 for specification in "${pairs[@]}"; do

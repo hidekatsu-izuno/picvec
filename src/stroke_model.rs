@@ -59,6 +59,90 @@ fn offset(p: Point, n: Point, d: f32) -> Point {
     }
 }
 
+/// A ridge seed is medial, unlike a boundary seed. Refine only a clearly
+/// over-wide, isolated straight ridge; searching the wide boundary profile
+/// can jump to a neighbouring parallel ink band instead of this one.
+pub(super) fn refine_isolated_ridge(
+    image: &Raster,
+    start: Point,
+    end: Point,
+    width: f32,
+) -> Option<(Point, Point, f32)> {
+    let length = start.distance(end);
+    if width < 3.0 || length < width * 6.0 {
+        return None;
+    }
+    let normal = Point {
+        x: (start.y - end.y) / length,
+        y: (end.x - start.x) / length,
+    };
+    let reach = width * 0.75 + 0.5;
+    let count = (reach * 4.0).ceil() as i32;
+    let samples = ((length / 2.0) as usize).clamp(8, 64);
+    let mut measured = Vec::new();
+    for i in 1..samples {
+        let t = i as f32 / samples as f32;
+        let p = Point {
+            x: start.x + (end.x - start.x) * t,
+            y: start.y + (end.y - start.y) * t,
+        };
+        let values: Vec<_> = (-count..=count)
+            .map(|j| luma(sample(image, offset(p, normal, j as f32 * 0.25))))
+            .collect();
+        let middle = count as usize;
+        let search = (width * 2.0).ceil() as usize;
+        let core = (middle.saturating_sub(search)..=(middle + search).min(values.len() - 1))
+            .min_by(|&a, &b| values[a].total_cmp(&values[b]))
+            .unwrap();
+        let ink = values[core];
+        if ink > 0.15 || values[0].min(*values.last().unwrap()) - ink < 0.08 {
+            continue;
+        }
+        // Match outline recovery's persistent-core crossing. Half-height
+        // also includes the broad shaded shoulder beside a narrow dark rim.
+        let thresholds = [
+            ink + 0.35 * (values[0] - ink),
+            ink + 0.35 * (values[values.len() - 1] - ink),
+        ];
+        let Some(left) = (0..core).rev().find(|&j| values[j] >= thresholds[0]) else {
+            continue;
+        };
+        let Some(right) = (core + 1..values.len()).find(|&j| values[j] >= thresholds[1]) else {
+            continue;
+        };
+        let crossing = |a: usize, b: usize, threshold: f32| {
+            let t = (threshold - values[a]) / (values[b] - values[a]);
+            (a as f32 + t * (b as f32 - a as f32) - middle as f32) * 0.25
+        };
+        let low = crossing(left, left + 1, thresholds[0]);
+        let high = crossing(right - 1, right, thresholds[1]);
+        measured.push((high - low, 0.5 * (low + high)));
+    }
+    if measured.len() * 4 < (samples - 1) * 3 {
+        return None;
+    }
+    let mut widths: Vec<_> = measured.iter().map(|p| p.0).collect();
+    let mut shifts: Vec<_> = measured.iter().map(|p| p.1).collect();
+    widths.sort_by(f32::total_cmp);
+    shifts.sort_by(f32::total_cmp);
+    let n = measured.len();
+    let refined = widths[n / 2];
+    let shift = shifts[n / 2];
+    if refined < 0.5
+        || refined > width * 0.65
+        || widths[n * 9 / 10] - widths[n / 10] > 0.75
+        || shifts[n * 9 / 10] - shifts[n / 10] > 0.75
+        || shift.abs() > width * 0.5
+    {
+        return None;
+    }
+    Some((
+        offset(start, normal, shift),
+        offset(end, normal, shift),
+        refined,
+    ))
+}
+
 fn profile(image: &Raster, edge: &SourceEdge, i: usize, bright: bool) -> Option<Profile> {
     let value = |color| {
         if bright {
@@ -902,6 +986,59 @@ pub(super) fn refine_interrupted(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn window_bottom_ridge_uses_its_own_core_instead_of_the_whole_trim() {
+        let input = image::open(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("sample/input/car.png"),
+        )
+        .unwrap();
+        let source = Raster::from_dynamic(&input);
+        let (a, b, width) = refine_isolated_ridge(
+            &source,
+            Point {
+                x: 815.252,
+                y: 503.51,
+            },
+            Point {
+                x: 749.156,
+                y: 513.332,
+            },
+            4.886,
+        )
+        .expect("the source contains a narrow, continuous lower-window line");
+        assert!((1.0..2.5).contains(&width), "measured width: {width}");
+        let y = a.y + (780.5 - a.x) * (b.y - a.y) / (b.x - a.x);
+        assert!(
+            (509.0..510.0).contains(&y),
+            "line missed the source core: {y}"
+        );
+    }
+
+    #[test]
+    fn isolated_ridge_refinement_preserves_a_wide_band_and_rejects_a_step() {
+        for step in [false, true] {
+            let pixels = (0..48)
+                .flat_map(|y| {
+                    (0..128).map(move |_| {
+                        if (18..24).contains(&y) || (step && y >= 24) {
+                            [0.02; 3]
+                        } else {
+                            [0.7; 3]
+                        }
+                    })
+                })
+                .collect();
+            let source = Raster::new(128, 48, pixels);
+            assert!(refine_isolated_ridge(
+                &source,
+                Point { x: 8.5, y: 21.0 },
+                Point { x: 119.5, y: 21.0 },
+                6.0,
+            )
+            .is_none());
+        }
+    }
 
     #[test]
     fn dotted_ink_keeps_its_gaps_and_ignores_invisible_black() {

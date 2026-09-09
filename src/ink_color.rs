@@ -1,5 +1,5 @@
 //! Recover independent interior colours lost by a single-colour stroke.
-use crate::color::{delta_e2000, rgb_to_lab};
+use crate::color::{delta_e_ok, rgb_to_oklab};
 use crate::raster::Raster;
 use std::fmt::Write;
 
@@ -16,9 +16,9 @@ impl ColorPatch {
             .pixels
             .iter()
             .map(|&i| {
-                let lab = rgb_to_lab(source.pixels[i]);
-                delta_e2000(lab, rgb_to_lab(before.pixels[i]))
-                    - delta_e2000(lab, rgb_to_lab(after.pixels[i]))
+                let lab = rgb_to_oklab(source.pixels[i]);
+                delta_e_ok(lab, rgb_to_oklab(before.pixels[i]))
+                    - delta_e_ok(lab, rgb_to_oklab(after.pixels[i]))
             })
             .sum();
         gain > 2.0 * self.pixels.len() as f32
@@ -35,6 +35,7 @@ pub(crate) fn propose(
     let width = source.width;
     let height = source.height;
     let mut candidates = vec![false; width * height];
+    let mut foreground = vec![false; width * height];
     for (i, candidate) in candidates.iter_mut().enumerate() {
         // White/black renders measure the actual serialized stroke coverage,
         // including its fitted curve, caps, outline clips and alpha mask.
@@ -50,6 +51,7 @@ pub(crate) fn propose(
         let direction = std::array::from_fn::<_, 3, _>(|c| ink[c] - base[c]);
         let denominator: f32 = direction.iter().map(|v| v * v).sum();
         if denominator < 1e-6 {
+            foreground[i] = delta_e_ok(rgb_to_oklab(observed), rgb_to_oklab(ink)) <= 5.0;
             continue;
         }
         let alpha = (0..3)
@@ -62,13 +64,29 @@ pub(crate) fn propose(
         if alpha < 0.5 {
             continue;
         }
-        let alpha = alpha.min(1.0);
+        foreground[i] = true;
+        // Keep the projection unbounded when testing for a third colour.
+        // A too-light fitted ink yields alpha > 1 for its dark core. Clamping
+        // here turns that same colour direction into a false residual and
+        // paints the raster's alternating core coverage as square patches.
         let residual = (0..3)
             .map(|c| (observed[c] - base[c] - alpha * direction[c]).powi(2))
             .sum::<f32>()
             .sqrt();
         // Coverage changes of the existing two colours are not missing paint.
-        *candidate = residual > 0.06 && delta_e2000(rgb_to_lab(observed), rgb_to_lab(ink)) > 5.0;
+        *candidate = residual > 0.06 && delta_e_ok(rgb_to_oklab(observed), rgb_to_oklab(ink)) > 5.0;
+    }
+    // Independent interior paint needs a foreground collar. Coverage of the
+    // fitted stroke alone also admits source/background antialias pixels
+    // when the stroke is too wide or slightly displaced. Their square runs
+    // would reinstate the raster staircase along a smooth vector boundary.
+    for (i, candidate) in candidates.iter_mut().enumerate() {
+        let (x, y) = (i % width, i / width);
+        *candidate &= x > 0
+            && y > 0
+            && x + 1 < width
+            && y + 1 < height
+            && (y - 1..=y + 1).all(|py| (x - 1..=x + 1).all(|px| foreground[py * width + px]));
     }
     // Spatial support belongs to the material, not to an exactly uniform
     // colour bucket: a tiny shaded interior can contain several colours.
@@ -90,7 +108,7 @@ pub(crate) fn propose(
         if !candidates[start] || visited[start] {
             continue;
         }
-        let anchor = rgb_to_lab(source.pixels[start]);
+        let anchor = rgb_to_oklab(source.pixels[start]);
         let mut pixels = vec![start];
         visited[start] = true;
         let mut cursor = 0;
@@ -108,7 +126,7 @@ pub(crate) fn propose(
             for j in neighbours.into_iter().flatten() {
                 if !visited[j]
                     && candidates[j]
-                    && delta_e2000(anchor, rgb_to_lab(source.pixels[j])) <= 4.0
+                    && delta_e_ok(anchor, rgb_to_oklab(source.pixels[j])) <= 4.0
                 {
                     visited[j] = true;
                     pixels.push(j);
@@ -156,11 +174,11 @@ pub(crate) fn propose(
     });
     let mut palette = Vec::new();
     for patch in &mut result {
-        let lab = rgb_to_lab(patch.color);
+        let lab = rgb_to_oklab(patch.color);
         let nearest = palette
             .iter()
             .enumerate()
-            .map(|(i, &(rgb, representative))| (i, rgb, delta_e2000(lab, representative)))
+            .map(|(i, &(rgb, representative))| (i, rgb, delta_e_ok(lab, representative)))
             .min_by(|a, b| a.2.total_cmp(&b.2));
         if let Some((_, rgb, error)) = nearest.filter(|v| v.2 <= 4.0) {
             let _ = error;
@@ -175,6 +193,51 @@ pub(crate) fn propose(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn antialias_at_a_displaced_stroke_edge_is_not_an_interior_colour() {
+        let paint = Raster::new(24, 16, vec![[0.9, 0.8, 0.7]; 384]);
+        let mut source = paint.clone();
+        let mut before = paint.clone();
+        let mut white = paint.clone();
+        let mut black = paint.clone();
+        for x in 3..21 {
+            for y in 6..10 {
+                let i = y * 24 + x;
+                source.pixels[i] = [0.05; 3];
+                before.pixels[i] = [0.05; 3];
+                white.pixels[i] = [1.0; 3];
+                black.pixels[i] = [0.0; 3];
+            }
+            // The other incident paint differs from the paint underlay.
+            // This 70%-covered edge consequently fails the two-colour fit,
+            // despite not being an independent mark inside the source ink.
+            source.pixels[6 * 24 + x] = [0.065, 0.275, 0.335];
+            source.pixels[5 * 24 + x] = [0.1, 0.8, 1.0];
+        }
+        assert!(propose(&source, &paint, &before, &white, &black).is_empty());
+    }
+
+    #[test]
+    fn darker_ink_on_the_same_colour_axis_is_not_a_patch_material() {
+        let paint = Raster::new(12, 8, vec![[0.6; 3]; 96]);
+        let before = Raster::new(12, 8, vec![[0.12; 3]; 96]);
+        let white = Raster::new(12, 8, vec![[1.0; 3]; 96]);
+        let black = Raster::new(12, 8, vec![[0.0; 3]; 96]);
+        let mut source = before.clone();
+        // Raster phase alternates between a dark core and partial coverage.
+        // A brighter uniform stroke is a colour-estimation error, not a
+        // connected secondary material to be traced as pixel rectangles.
+        for x in 2..10 {
+            source.pixels[3 * 12 + x] = [0.01; 3];
+            source.pixels[4 * 12 + x] = [0.04; 3];
+        }
+        assert!(propose(&source, &paint, &before, &white, &black).is_empty());
+        for x in 3..8 {
+            source.pixels[3 * 12 + x] = [0.02, 0.04, 0.4];
+        }
+        assert!(!propose(&source, &paint, &before, &white, &black).is_empty());
+    }
 
     #[test]
     fn interior_colours_are_distinct_from_coverage_and_isolated_noise() {

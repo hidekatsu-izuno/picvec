@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-/// Reproducible controls corresponding to the current raster2svg defaults.
+/// Native vectorization controls. Perceptual distances use 100-scaled OKLab;
+/// lightness settings use its L coordinate in 0..100.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -28,12 +29,12 @@ pub struct Config {
     /// Maximum additional serialized SVG bytes accepted for refinements.
     /// Zero means unlimited; local quality and efficiency checks still apply.
     pub adaptive_svg_budget_bytes: usize,
-    /// Minimum local DeltaE00 reduction before a refined region is useful.
+    /// Minimum local 100-scaled OKLab distance reduction before a refined region is useful.
     pub adaptive_min_perceptual_gain: f32,
     /// Minimum coarse perceptual gain divided by the square root of partition
     /// cost required before the source-resolution candidate is evaluated.
     pub adaptive_min_predicted_rate: f32,
-    /// DeltaE00 charged per added SVG byte/source-pixel. This is the common
+    /// 100-scaled OKLab distance charged per added SVG byte/source-pixel. This is the common
     /// rate-distortion control for both flat artwork and photographic detail.
     pub adaptive_complexity_penalty: f32,
     /// Source/base linear scale below which a second resolution adds too
@@ -43,18 +44,22 @@ pub struct Config {
     pub smoothing_spatial_sigma: f64,
     pub smoothing_dark_delta_e: f32,
     pub smoothing_light_delta_e: f32,
-    pub dark_knee_lstar: f32,
+    /// OKLab lightness at the dark/midtone transition (0..100).
+    pub dark_knee_lightness: f32,
     pub segmentation_min_size: u32,
     pub segmentation_reference_dimension: u32,
     pub local_detail_adaptation: bool,
     pub local_detail_window: f32,
     pub local_detail_density_pivot: f32,
+    /// Multiplier converting palette tolerances to 100 * OKLab distance.
+    /// Also applies to the protected-ridge cap; not a universal DeltaE conversion.
+    pub oklab_palette_threshold_scale: f32,
     pub quantization_dark_delta_e: f32,
     pub quantization_light_delta_e: f32,
     pub gradient_merge_error: f32,
     /// Final source-supported merge rounds; additional rounds trade time for fewer faces.
     pub paint_merge_passes: usize,
-    /// Maximum within-region DeltaE00 range treated unconditionally as Solid.
+    /// Maximum within-region 100-scaled OKLab distance range treated unconditionally as Solid.
     pub solid_color_max_delta_e: f32,
     pub minimum_gradient_area: u32,
     pub shared_boundary_overlap: f32,
@@ -100,21 +105,22 @@ impl Default for Config {
             adaptive_min_source_scale: 1.5,
             smoothing_radius: 4,
             smoothing_spatial_sigma: 1.15,
-            smoothing_dark_delta_e: 1.8,
+            smoothing_dark_delta_e: 1.5,
             smoothing_light_delta_e: 4.5,
-            dark_knee_lstar: 45.0,
+            dark_knee_lightness: 52.6,
             segmentation_min_size: 24,
             segmentation_reference_dimension: 384,
             local_detail_adaptation: true,
             local_detail_window: 12.0,
             local_detail_density_pivot: 0.35,
+            oklab_palette_threshold_scale: 1.0,
             quantization_dark_delta_e: 2.5,
             quantization_light_delta_e: 5.0,
-            gradient_merge_error: 2.3,
+            gradient_merge_error: 1.8,
             paint_merge_passes: 1,
-            solid_color_max_delta_e: 1.5,
+            solid_color_max_delta_e: 1.2,
             minimum_gradient_area: 64,
-            shared_boundary_overlap: 0.2,
+            shared_boundary_overlap: 0.3,
             maximum_gradient_stops: 5,
             paint_primary_sample_budget: 64,
             paint_primary_min_region_density: 0.015,
@@ -133,15 +139,16 @@ impl Config {
     /// quantization and Paint merging so later passes cannot erase it again.
     pub(crate) fn tonal_detail_scale(&self, lightness: f32) -> f32 {
         let lightness = lightness.clamp(0.0, 100.0);
-        let (distance, endpoint) = if lightness < self.dark_knee_lstar {
+        let (distance, endpoint) = if lightness < self.dark_knee_lightness {
             (
-                (self.dark_knee_lstar - lightness) / self.dark_knee_lstar.max(1.0),
+                (self.dark_knee_lightness - lightness) / self.dark_knee_lightness.max(1.0),
                 0.50,
             )
         } else {
             (
-                (lightness - self.dark_knee_lstar) / (100.0 - self.dark_knee_lstar).max(1.0),
-                0.30,
+                (lightness - self.dark_knee_lightness)
+                    / (100.0 - self.dark_knee_lightness).max(1.0),
+                0.45,
             )
         };
         let smooth = distance * distance * (3.0 - 2.0 * distance);
@@ -159,6 +166,12 @@ impl Config {
             }
         }
 
+        require(
+            self.oklab_palette_threshold_scale.is_finite()
+                && self.oklab_palette_threshold_scale > 0.0
+                && self.oklab_palette_threshold_scale <= 10.0,
+            "oklab_palette_threshold_scale must be finite and in (0, 10]",
+        )?;
         require(
             self.maximum_input_dimension >= 64,
             "maximum_input_dimension must be at least 64",
@@ -242,8 +255,9 @@ impl Config {
             )?;
         }
         require(
-            self.dark_knee_lstar.is_finite() && (0.0..=100.0).contains(&self.dark_knee_lstar),
-            "dark_knee_lstar must be finite and between 0 and 100",
+            self.dark_knee_lightness.is_finite()
+                && (0.0..=100.0).contains(&self.dark_knee_lightness),
+            "dark_knee_lightness must be finite and between 0 and 100",
         )?;
         require(
             self.segmentation_min_size >= 1,
@@ -321,9 +335,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn oklab_settings_reject_invalid_scales_and_preserve_serde_defaults() {
+        let old: Config = serde_json::from_str("{}").unwrap();
+        assert_eq!(old.oklab_palette_threshold_scale, 1.0);
+        for scale in [0.0, -1.0, f32::NAN, f32::INFINITY, 10.1] {
+            assert!(Config {
+                oklab_palette_threshold_scale: scale,
+                ..Config::default()
+            }
+            .validate()
+            .is_err());
+        }
+        let config = Config {
+            oklab_palette_threshold_scale: 0.5,
+            ..Config::default()
+        };
+        let decoded: Config =
+            serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
+        assert_eq!(decoded.oklab_palette_threshold_scale, 0.5);
+        assert!(decoded.validate().is_ok());
+    }
+
+    #[test]
     fn tonal_budgets_tighten_smoothly_toward_both_extremes() {
         let config = Config::default();
-        let knee = config.dark_knee_lstar;
+        let knee = config.dark_knee_lightness;
         assert_eq!(config.tonal_detail_scale(knee), 1.0);
         assert!(config.tonal_detail_scale(0.0) < config.tonal_detail_scale(20.0));
         assert!(config.tonal_detail_scale(20.0) < config.tonal_detail_scale(knee));
@@ -337,9 +373,9 @@ mod tests {
                     < 0.03
             );
         }
-        for dark_knee_lstar in [0.0, 100.0] {
+        for dark_knee_lightness in [0.0, 100.0] {
             let config = Config {
-                dark_knee_lstar,
+                dark_knee_lightness,
                 ..Config::default()
             };
             for lightness in [0.0, 50.0, 100.0] {

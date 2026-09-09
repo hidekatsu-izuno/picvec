@@ -5,14 +5,14 @@
 //! from Paint fitting.  A thin line can otherwise lose every centre sample,
 //! so the Python reference detects dark/bright ridge centres once more on the
 //! final canonical geometry, removes ridge shoulders, and restores only local
-//! L* extrema.  This module preserves that ordering.
+//! OKLab lightness extrema.  This module preserves that ordering.
 
 use std::collections::VecDeque;
 
 use rayon::prelude::*;
 
-use crate::color::{delta_e2000, Lab};
-use crate::edge::{lab_pixels, preprocess_lab_pixels};
+use crate::color::{delta_e_ok, Oklab};
+use crate::edge::oklab_pixels;
 use crate::raster::Raster;
 
 #[derive(Clone, Debug)]
@@ -32,13 +32,13 @@ pub struct StrongRidgeBranches {
 #[derive(Clone, Debug)]
 pub struct RidgeAnalysis {
     evidence: RidgeEvidence,
-    labs: Vec<Lab>,
+    labs: Vec<Oklab>,
 }
 
 pub fn analyze(image: &Raster) -> RidgeAnalysis {
     RidgeAnalysis {
         evidence: detect(image),
-        labs: lab_pixels(image),
+        labs: oklab_pixels(image),
     }
 }
 
@@ -241,7 +241,7 @@ fn meijering_polarities(
 pub fn debug_bright_parts(image: &Raster) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
     let width = image.width;
     let height = image.height;
-    let labs = preprocess_lab_pixels(image);
+    let labs = oklab_pixels(image);
     let luminance: Vec<f32> = labs.iter().map(|value| value.l / 100.0).collect();
     let scale = width.max(height) as f64 / 1024.0;
     let sigmas: Vec<f64> = [1.0, 1.5, 2.0, 3.0, 4.0]
@@ -403,10 +403,7 @@ fn hysteresis(values: &[f32], width: usize, height: usize, low: f32, high: f32) 
 pub fn detect(image: &Raster) -> RidgeEvidence {
     let width = image.width;
     let height = image.height;
-    // ClassicalLineRidgeDetector uses preprocess.srgb_to_lab rather than
-    // skimage.rgb2lab.  Their matrices differ enough to move normalized ridge
-    // responses across the strong-branch threshold.
-    let labs = preprocess_lab_pixels(image);
+    let labs = oklab_pixels(image);
     let luminance: Vec<f32> = labs.par_iter().map(|value| value.l / 100.0).collect();
     let scale = width.max(height) as f64 / 1024.0;
     let sigmas: Vec<f64> = [1.0, 1.5, 2.0, 3.0, 4.0]
@@ -453,7 +450,7 @@ pub fn detect(image: &Raster) -> RidgeEvidence {
 
 fn propagate_black_ridges(
     candidates: &[bool],
-    labs: &[Lab],
+    labs: &[Oklab],
     width: usize,
     height: usize,
 ) -> Vec<bool> {
@@ -464,18 +461,18 @@ fn propagate_black_ridges(
             continue;
         }
         let value = labs[index];
-        seeds[index] = delta_e2000(
+        seeds[index] = delta_e_ok(
             value,
-            Lab {
+            Oklab {
                 l: 0.0,
                 a: 0.0,
                 b: 0.0,
             },
-        ) <= 2.3;
-        support[index] = value.l <= 25.0
-            && delta_e2000(
+        ) <= 16.35;
+        support[index] = value.l <= 35.3
+            && delta_e_ok(
                 value,
-                Lab {
+                Oklab {
                     l: value.l,
                     a: 0.0,
                     b: 0.0,
@@ -629,7 +626,7 @@ pub fn strong_branches_from_analysis(
         .iter()
         .zip(&black_ridges)
         .zip(labs)
-        .map(|((&candidate, &black), lab)| candidate && !black && lab.a.hypot(lab.b) >= 18.0)
+        .map(|((&candidate, &black), lab)| candidate && !black && lab.a.hypot(lab.b) >= 6.0)
         .collect();
     let minimum_span = 14.0 * image.width.max(image.height) as f32 / 1024.0;
     StrongRidgeBranches {
@@ -711,7 +708,7 @@ pub fn adjust_paint_samples_from_analysis(
         .iter()
         .zip(&dark_black)
         .zip(labs)
-        .map(|((&candidate, &black), lab)| black || candidate && lab.a.hypot(lab.b) >= 18.0)
+        .map(|((&candidate, &black), lab)| black || candidate && lab.a.hypot(lab.b) >= 6.0)
         .collect();
     let lightness: Vec<f32> = labs.iter().map(|lab| lab.l).collect();
     let minima = local_extreme(&lightness, image.width, image.height, true);

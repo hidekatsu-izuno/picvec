@@ -1,0 +1,171 @@
+{
+  "renderer": "resvg 0.48.1, opaque white, 1254x1254",
+  "input_sha256": "7bac8b1676a62a6ddfc4519d3e17f92c4b76f78cd4b947efddc1eb45baa20cf7",
+  "roi_xyxy": {
+    "fender": [
+      330,
+      565,
+      530,
+      645
+    ],
+    "bumper": [
+      220,
+      685,
+      335,
+      815
+    ]
+  },
+  "source_filter": "R > 190 and G < 160 at pair start",
+  "direction_rule": "8-pixel horizontal/vertical pairs; every source 1-pixel step <= 3 in all RGB channels; abs(source OKLab L difference) > 0.35; opposite sign and abs(rendered L difference) > 0.15 counts as reversed; OKLab scaled by 100",
+  "legacy_fender_rule": "x=[320,530), y=[565,645); both pixels pass source filter; adjacent horizontal/vertical pairs with max source RGB step <= 3 and max rendered RGB step > source step + 8",
+  "versions": {
+    "before": {
+      "svg_sha256": "11ef3baa9cba0f35ce7a6ebc8c92656cd9d94d22931d237dba5fb3bd64ee7e5f",
+      "svg_bytes": 2839469,
+      "whole_image_delta_e_ok_mean": 0.6613175868988037,
+      "areas": {
+        "fender": {
+          "rgb_mae": 1.881857104629382,
+          "delta_e_ok_mean": 0.5354174375534058,
+          "reliable_pairs": 18489,
+          "reversed_pairs": 274,
+          "reversed_fraction": 0.014819622478230298,
+          "lightness_difference_mae": 0.26919329166412354
+        },
+        "bumper": {
+          "rgb_mae": 1.7862103751988516,
+          "delta_e_ok_mean": 0.49474531412124634,
+          "reliable_pairs": 10414,
+          "reversed_pairs": 176,
+          "reversed_fraction": 0.016900326483579798,
+          "lightness_difference_mae": 0.30756208300590515
+        }
+      },
+      "legacy_fender": {
+        "rgb_mae": 1.9532982686828841,
+        "artificial_steps": 281
+      }
+    },
+    "after": {
+      "svg_sha256": "680b310baf90afd877d9dcbcaf5a0e63d56efec65d5f157f876df66593361db4",
+      "svg_bytes": 3094715,
+      "whole_image_delta_e_ok_mean": 0.6548701524734497,
+      "areas": {
+        "fender": {
+          "rgb_mae": 1.7118678084024619,
+          "delta_e_ok_mean": 0.49488991498947144,
+          "reliable_pairs": 18489,
+          "reversed_pairs": 141,
+          "reversed_fraction": 0.007626156092811942,
+          "lightness_difference_mae": 0.232869490981102
+        },
+        "bumper": {
+          "rgb_mae": 1.5986885500329802,
+          "delta_e_ok_mean": 0.4618628919124603,
+          "reliable_pairs": 10414,
+          "reversed_pairs": 139,
+          "reversed_fraction": 0.013347416938736317,
+          "lightness_difference_mae": 0.29473671317100525
+        }
+      },
+      "legacy_fender": {
+        "rgb_mae": 1.7876835415296954,
+        "artificial_steps": 166
+      }
+    }
+  },
+  "validation": {
+    "normal_tests_passed": 299,
+    "normal_tests_ignored": 4,
+    "explicit_full_car_test": "passed; three defect pixels max RGB channel error <= 10; previous direction, RGB MAE and artificial-step gates retained",
+    "clippy": "passed with -D warnings",
+    "default_cargo_check": "passed",
+    "fmt_check": "passed",
+    "unchanged_input_images": 8,
+    "final_cli_matches_measured_svg": true,
+    "independent_renderer": "librsvg: defect pixels max RGB channel errors 1, 0, 1, matching resvg"
+  },
+  "defect_pixels": [
+    {
+      "xy": [
+        335,
+        655
+      ],
+      "source_rgb": [
+        253,
+        93,
+        86
+      ],
+      "before": {
+        "rgb": [
+          243,
+          73,
+          67
+        ],
+        "max_channel_error": 20
+      },
+      "after": {
+        "rgb": [
+          252,
+          94,
+          86
+        ],
+        "max_channel_error": 1
+      }
+    },
+    {
+      "xy": [
+        528,
+        592
+      ],
+      "source_rgb": [
+        250,
+        94,
+        89
+      ],
+      "before": {
+        "rgb": [
+          243,
+          77,
+          71
+        ],
+        "max_channel_error": 18
+      },
+      "after": {
+        "rgb": [
+          250,
+          94,
+          89
+        ],
+        "max_channel_error": 0
+      }
+    },
+    {
+      "xy": [
+        286,
+        752
+      ],
+      "source_rgb": [
+        223,
+        39,
+        38
+      ],
+      "before": {
+        "rgb": [
+          203,
+          31,
+          34
+        ],
+        "max_channel_error": 20
+      },
+      "after": {
+        "rgb": [
+          223,
+          38,
+          38
+        ],
+        "max_channel_error": 1
+      }
+    }
+  ]
+}

@@ -13,7 +13,7 @@ use crate::adaptive::{
     refinements_cover_canvas, AdaptiveRefinementSummary, EmbeddedRefinement, SourceRect,
 };
 use crate::chroma::{self, AlphaMatte, AlphaTransparencySummary, ChromaKeySummary};
-use crate::color::{rgb_to_lab, Lab};
+use crate::color::{rgb_to_oklab, Oklab};
 use crate::config::Config;
 use crate::edge::{classify, dilate, dilate_square, perceptual_smooth, EdgeSummary};
 use crate::geometry::{
@@ -524,7 +524,7 @@ fn resize_processing<R: RasterSource + ?Sized>(
 fn estimate_dimension<R: RasterSource + ?Sized>(image: &R, config: &Config) -> ComplexityProbe {
     let probe_max = image.width().max(image.height()).min(1024) as u32;
     let probe = image.resize_max(probe_max);
-    let lab: Vec<Lab> = probe.pixels.iter().copied().map(rgb_to_lab).collect();
+    let lab: Vec<Oklab> = probe.pixels.iter().copied().map(rgb_to_oklab).collect();
     let at = |x: isize, y: isize| {
         let px = x.clamp(0, probe.width.saturating_sub(1) as isize) as usize;
         let py = y.clamp(0, probe.height.saturating_sub(1) as isize) as usize;
@@ -1499,7 +1499,7 @@ fn vectorize_processing(
                 .iter()
                 .copied()
                 .map(|pixel| {
-                    let lab = rgb_to_lab(pixel);
+                    let lab = rgb_to_oklab(pixel);
                     [lab.l, lab.a, lab.b]
                 })
                 .collect(),
@@ -2094,7 +2094,7 @@ mod tests {
                     max_x: 1,
                     max_y: 1,
                     mean_rgb: [0.25, 0.5, 0.75],
-                    mean_lab: rgb_to_lab([0.25, 0.5, 0.75]),
+                    mean_lab: rgb_to_oklab([0.25, 0.5, 0.75]),
                 },
                 crate::segment::RegionStats {
                     id: 1,
@@ -2104,7 +2104,7 @@ mod tests {
                     max_x: 2,
                     max_y: 1,
                     mean_rgb: [0.25, 0.5, 0.75],
-                    mean_lab: rgb_to_lab([0.25, 0.5, 0.75]),
+                    mean_lab: rgb_to_oklab([0.25, 0.5, 0.75]),
                 },
             ],
             summary: SegmentationSummary::default(),
@@ -2636,13 +2636,55 @@ mod tests {
             [1.0; 3],
         )
         .unwrap();
-        // A geometrically valid ellipse must not punch its brighter fill
-        // through the dot's dark rim when band color fitting is rejected.
-        for x in [148, 152, 154] {
-            let rim = rendered.get(x * 4, 203 * 4);
-            assert!(rim[1] < 0.4 && rim[2] < 0.5, "dot rim at {x}: {rim:?}");
-        }
+        // Locate the rim in the source after removing its green key. A fixed
+        // y=203 dark-colour assertion instead darkens the source's cyan fill
+        // when a different perceptual partition moves the fitted boundary.
+        let source_image = Raster::from_dynamic(
+            &image::load_from_memory(include_bytes!("test-data/wifi-source.png")).unwrap(),
+        );
+        let key = chroma::detect(&source_image).unwrap();
+        let matte = chroma::pull_matte(&source_image, key);
+        let foreground = chroma::separate_foreground(&source_image, &matte, key.sampled);
+        let reference = chroma::composite_over(&foreground, &matte, [1.0; 3]);
         let luminance = |p: [f32; 3]| p[0] * 0.2126 + p[1] * 0.7152 + p[2] * 0.0722;
+        let mut rim_colour_error = 0.0;
+        for x in 148..=154 {
+            let y = (200..=204)
+                .min_by(|&a, &b| {
+                    luminance(reference.get(x, a)).total_cmp(&luminance(reference.get(x, b)))
+                })
+                .unwrap();
+            let expected = reference.get(x, y);
+            // Allow at most one source pixel of subpixel boundary movement.
+            let colour_error =
+                |pixel| crate::color::delta_e_ok(rgb_to_oklab(expected), rgb_to_oklab(pixel));
+            let actual = ((y - 1) * 4..=(y + 1) * 4)
+                .map(|row| rendered.get(x * 4, row))
+                .min_by(|a, b| colour_error(*a).total_cmp(&colour_error(*b)))
+                .unwrap();
+            let error = colour_error(actual);
+            assert!(
+                error < 12.0,
+                "source rim colour at {x},{y}: {error}, {actual:?}"
+            );
+            rim_colour_error += error;
+            let source_contrast = luminance(reference.get(x, 205)) - luminance(expected);
+            // Colour matching may select a partially covered rim pixel. Use
+            // the actual darkest core, not that antialias sample, for contrast.
+            let core_luminance = ((y - 1) * 4..=(y + 1) * 4)
+                .map(|row| luminance(rendered.get(x * 4, row)))
+                .fold(f32::INFINITY, f32::min);
+            let rendered_contrast = luminance(rendered.get(x * 4, 205 * 4)) - core_luminance;
+            assert!(
+                rendered_contrast >= source_contrast * 0.75,
+                "dot rim contrast at {x}: {rendered_contrast} vs source {source_contrast}"
+            );
+        }
+        assert!(
+            rim_colour_error / 7.0 < 6.0,
+            "mean rim colour error: {}",
+            rim_colour_error / 7.0
+        );
         // Track the visible inner edge of the upper side of the middle arc.
         // The previous final SVG measured 0.093 px of second-difference
         // roughness here at 4x; checking master counts did not detect it.
@@ -2675,9 +2717,9 @@ mod tests {
         let mut count = 0;
         for (i, pixel) in source.pixels().enumerate() {
             if pixel[2] as i16 > pixel[1] as i16 + 5 && pixel[2] as i16 > pixel[0] as i16 + 5 {
-                error += crate::color::delta_e2000(
-                    rgb_to_lab(pixel.0.map(|v| v as f32 / 255.0)),
-                    rgb_to_lab(native.pixels[i]),
+                error += crate::color::delta_e_ok(
+                    rgb_to_oklab(pixel.0.map(|v| v as f32 / 255.0)),
+                    rgb_to_oklab(native.pixels[i]),
                 );
                 count += 1;
             }
@@ -3070,8 +3112,8 @@ mod tests {
         let mut error = 0_u64;
         let mut channels = 0_u64;
         // The curved highlight above the front wheel, excluding the lamp.
-        // The previous output measures 4.087 levels with this resvg renderer.
-        // Require more than a 10% reduction, including antialiased boundaries.
+        // Keep the existing colour-error gate, including antialiased boundaries.
+        // The reproducible pre-OKLab HEAD measures 3.737 with this renderer.
         for y in 565..645 {
             for x in 320..530 {
                 let reference = source.get_pixel(x, y).0;
@@ -3089,6 +3131,73 @@ mod tests {
                 }
             }
         }
+        // Previously reported fender/bumper artifacts and the lower window
+        // ridge: evaluate the final
+        // composite as well as the field fit, so antialias seams are included.
+        for (x, y) in [(335, 655), (528, 592), (286, 752), (780, 506), (780, 509)] {
+            let expected = source.get_pixel(x, y).0;
+            let pixel = pixmap.pixels()[(y * 1254 + x) as usize];
+            let actual = [pixel.red(), pixel.green(), pixel.blue()];
+            let worst = expected
+                .into_iter()
+                .zip(actual)
+                .map(|(a, b)| a.abs_diff(b))
+                .max()
+                .unwrap();
+            assert!(
+                worst <= 10,
+                "false colour at ({x},{y}): {actual:?} != {expected:?}"
+            );
+        }
+        // A good interior colour fit does not guarantee a smooth boundary.
+        // Track the native upper wheel-arch step at subpixel precision and
+        // measure its turning separately from the shading above it.
+        let mut edge_positions = [Vec::new(), Vec::new()];
+        for x in 360..491 {
+            let y = (620..694)
+                .min_by_key(|&y| {
+                    i16::from(source.get_pixel(x, y + 1)[1]) - i16::from(source.get_pixel(x, y)[1])
+                })
+                .unwrap();
+            let mut weights = [0.0_f64; 2];
+            let mut moments = [0.0_f64; 2];
+            for offset in -4_i32..5 {
+                let row = (y as i32 + offset) as u32;
+                let a = pixmap.pixels()[(row * 1254 + x) as usize].green();
+                let b = pixmap.pixels()[((row + 1) * 1254 + x) as usize].green();
+                let steps = [
+                    source.get_pixel(x, row)[1].saturating_sub(source.get_pixel(x, row + 1)[1]),
+                    a.saturating_sub(b),
+                ];
+                for (i, step) in steps.into_iter().enumerate() {
+                    weights[i] += f64::from(step);
+                    moments[i] += f64::from(step) * (f64::from(row) + 0.5);
+                }
+            }
+            for i in 0..2 {
+                assert!(weights[i] > 0.0);
+                edge_positions[i].push(moments[i] / weights[i]);
+            }
+        }
+        let roughness = edge_positions[1]
+            .windows(3)
+            .map(|p| (p[2] - 2.0 * p[1] + p[0]).abs())
+            .sum::<f64>()
+            / (edge_positions[1].len() - 2) as f64;
+        let displacement = edge_positions[0]
+            .iter()
+            .zip(&edge_positions[1])
+            .map(|(a, b)| (a - b).abs())
+            .sum::<f64>()
+            / edge_positions[0].len() as f64;
+        assert!(
+            roughness < 0.16,
+            "wheel-arch contour roughness: {roughness} (pre-OKLab: 0.149; regression: 0.180)"
+        );
+        assert!(
+            displacement < 0.4,
+            "wheel-arch contour moved {displacement}px from source"
+        );
         assert!(channels > 40_000);
         let mean_error = error as f64 / channels as f64;
         assert!(
@@ -3097,6 +3206,103 @@ mod tests {
             summary.geometry.regions,
             directory.keep().display()
         );
+        // Inspect both sides of the narrow window rim in the final SVG.
+        // The old fill-only contour fit hid a broken/stepped outer ink edge,
+        // and pixel colour repairs introduced a 0.81px kink on the inner one.
+        let enlarged = render_svg_tree_on(
+            &tree,
+            5016,
+            5016,
+            resvg::tiny_skia::Transform::from_scale(4.0, 4.0),
+            [1.0; 3],
+        )
+        .unwrap();
+        let mut rim_edges = [Vec::new(), Vec::new()];
+        for x in 775..885 {
+            let glass_edge = (332..364)
+                .max_by_key(|&y| {
+                    i16::from(source.get_pixel(x, y + 1)[2]) - i16::from(source.get_pixel(x, y)[2])
+                })
+                .unwrap();
+            let core = (glass_edge - 3..=glass_edge)
+                .min_by_key(|&y| source.get_pixel(x, y).0.into_iter().max().unwrap())
+                .unwrap();
+            let start = (core - 2) * 4;
+            let levels: Vec<_> = (start..start + 20)
+                .map(|y| {
+                    enlarged
+                        .get(x as usize * 4 + 2, y as usize)
+                        .into_iter()
+                        .fold(0.0_f32, f32::max)
+                })
+                .collect();
+            let threshold = 30.0 / 255.0;
+            let first = levels
+                .iter()
+                .position(|&v| v < threshold)
+                .expect("window ink gap");
+            let last = levels.iter().rposition(|&v| v < threshold).unwrap();
+            assert!(
+                first > 0 && last + 1 < levels.len(),
+                "rim left its source corridor at {x}"
+            );
+            for (edge, (a, b)) in [(first - 1, first), (last, last + 1)]
+                .into_iter()
+                .enumerate()
+            {
+                let t = (threshold - levels[a]) / (levels[b] - levels[a]);
+                rim_edges[edge].push((start as f32 + a as f32 + 0.5 + t) * 0.25);
+            }
+        }
+        for (edge, positions) in rim_edges.iter().enumerate() {
+            let turns: Vec<_> = positions
+                .windows(3)
+                .map(|p| (p[2] - 2.0 * p[1] + p[0]).abs())
+                .collect();
+            assert!(
+                turns.iter().all(|&v| v < 0.4),
+                "window rim {edge} kink: {turns:?}"
+            );
+            if edge == 1 {
+                let roughness = turns.iter().sum::<f32>() / turns.len() as f32;
+                assert!(roughness < 0.08, "window inner rim roughness: {roughness}");
+            }
+        }
+        // The neighbouring grey trim has a separate boundary. Checking the
+        // glass-facing edge alone missed its former >1px staircase.
+        let mut grey_edges = [Vec::new(), Vec::new(), Vec::new()];
+        for x in 775..885 {
+            let y = (332..364)
+                .max_by_key(|&y| {
+                    i16::from(source.get_pixel(x, y + 1)[2]) - i16::from(source.get_pixel(x, y)[2])
+                })
+                .unwrap();
+            let start = (y - 11) * 4;
+            let levels: Vec<_> = (start..(y - 3) * 4)
+                .map(|row| {
+                    let rgb = enlarged.get(x as usize * 4 + 2, row as usize);
+                    0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]
+                })
+                .collect();
+            for (edge, threshold) in [40.0_f32, 50.0, 60.0].into_iter().enumerate() {
+                let threshold = threshold / 255.0;
+                let i = levels
+                    .windows(2)
+                    .position(|p| p[0] < threshold && p[1] >= threshold)
+                    .unwrap_or_else(|| panic!("grey trim edge missing at {x}"));
+                let t = (threshold - levels[i]) / (levels[i + 1] - levels[i]);
+                grey_edges[edge].push((start as f32 + i as f32 + 0.5 + t) * 0.25);
+            }
+        }
+        for positions in grey_edges {
+            let turns: Vec<_> = positions
+                .windows(3)
+                .map(|p| (p[2] - 2.0 * p[1] + p[0]).abs())
+                .collect();
+            assert!(turns.iter().all(|&v| v < 0.55), "grey trim kink: {turns:?}");
+            let mean = turns.iter().sum::<f32>() / turns.len() as f32;
+            assert!(mean < 0.09, "grey trim roughness: {mean}");
+        }
     }
 
     #[test]
@@ -3425,9 +3631,9 @@ mod tests {
         )
         .unwrap();
         let quality = summary.quality.unwrap();
-        assert!(quality.delta_e00_mean.is_finite());
-        assert!(quality.delta_e00_p90.is_finite());
-        assert!(quality.delta_e00_p99.is_finite());
+        assert!(quality.delta_e_ok_mean.is_finite());
+        assert!(quality.delta_e_ok_p90.is_finite());
+        assert!(quality.delta_e_ok_p99.is_finite());
         assert!(quality.global_ssim.is_finite());
         fs::remove_dir_all(directory).unwrap();
     }

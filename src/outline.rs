@@ -8,12 +8,14 @@ use std::collections::{HashMap, HashSet};
 pub(crate) struct OutlineBand {
     pub outer: String,
     pub inner: String,
+    pub underpaint: Paint,
+    pub inner_underpaint: Option<(String, Paint)>,
     pub patches: Vec<(String, Paint)>,
     pub regions: HashSet<u32>,
     pub hidden: HashSet<u32>,
     pub boundary_underpaint: HashSet<u32>,
     pub contour: Vec<Point>,
-    /// Depth of the repaired collar, including the ink and its inner fill.
+    /// Depth from the outer repair boundary through the ink and inner fill.
     pub width: f32,
     pub pixels: Vec<(usize, bool)>,
 }
@@ -49,13 +51,13 @@ impl OutlineBand {
                 .all(|&p| distance(p, &self.contour) + width * 0.5 < self.width - 0.25)
     }
     pub fn supported_by_render(&self, source: &Raster, before: &Raster, after: &Raster) -> bool {
-        use crate::color::{delta_e2000, rgb_to_lab};
+        use crate::color::{delta_e_ok, rgb_to_oklab};
         let mut sums = [0.0; 4];
         let mut rim_count = 0;
         for &(i, rim) in &self.pixels {
-            let lab = rgb_to_lab(source.pixels[i]);
-            let old = delta_e2000(lab, rgb_to_lab(before.pixels[i]));
-            let new = delta_e2000(lab, rgb_to_lab(after.pixels[i]));
+            let lab = rgb_to_oklab(source.pixels[i]);
+            let old = delta_e_ok(lab, rgb_to_oklab(before.pixels[i]));
+            let new = delta_e_ok(lab, rgb_to_oklab(after.pixels[i]));
             sums[0] += old;
             sums[1] += new;
             if rim {
@@ -130,13 +132,101 @@ fn ellipse_inset(profiles: &[(Point, f32)], initial_width: f32) -> (f32, Point) 
     (width, offset)
 }
 
+// A closed paint face can describe either side of its surrounding ink.
+// Locate the outer crossing before measuring inward from a glass/fill edge;
+// otherwise a real outline has a negative measured width and is discarded.
+fn source_outer_offset(source: &Raster, points: &[Point]) -> Option<f32> {
+    let n = points.len().checked_sub(1)?;
+    if n < 7 {
+        return None;
+    }
+    let sign = points
+        .windows(2)
+        .map(|p| p[0].x * p[1].y - p[1].x * p[0].y)
+        .sum::<f32>()
+        .signum();
+    let mut offsets = Vec::new();
+    let mut total = 0;
+    for i in (0..n).step_by(3) {
+        total += 1;
+        let a = points[(i + n - 3) % n];
+        let b = points[(i + 3) % n];
+        let length = a.distance(b).max(0.001);
+        let normal = Point {
+            x: sign * (a.y - b.y) / length,
+            y: sign * (b.x - a.x) / length,
+        };
+        let values = (0..41)
+            .map(|j| {
+                let t = j as f32 * 0.25 - 5.0;
+                luminance(
+                    source.pixels[index(
+                        source,
+                        Point {
+                            x: points[i].x + normal.x * t,
+                            y: points[i].y + normal.y * t,
+                        },
+                    )],
+                )
+            })
+            .collect::<Vec<_>>();
+        let core = (8..33).min_by(|&a, &b| values[a].total_cmp(&values[b]))?;
+        let ink = values[core];
+        if values[0] - ink < 0.04 || values[40] - ink < 0.08 {
+            continue;
+        }
+        let threshold = ink + 0.35 * (values[0] - ink);
+        if let Some(j) = (0..core).rev().find(|&j| values[j] > threshold) {
+            let amount = (values[j] - threshold) / (values[j] - values[j + 1]).max(1e-6);
+            offsets.push((j as f32 + amount) * 0.25 - 5.0);
+        }
+    }
+    if offsets.is_empty() || offsets.len() * 4 < total * 3 {
+        #[cfg(feature = "diagnostics")]
+        if std::env::var_os("PICVEC_OUTLINE_DIAGNOSTICS").is_some() {
+            eprintln!(
+                "outline outer crossing at {:?}: {}/{} supported",
+                points[0],
+                offsets.len(),
+                total
+            );
+        }
+        return None;
+    }
+    offsets.sort_by(f32::total_cmp);
+    let shift = -offsets[offsets.len() / 2];
+    #[cfg(feature = "diagnostics")]
+    if std::env::var_os("PICVEC_OUTLINE_DIAGNOSTICS").is_some() {
+        eprintln!(
+            "outline outer crossing at {:?}: shift={shift}, spread={}",
+            points[0],
+            offsets[offsets.len() * 9 / 10] - offsets[offsets.len() / 10]
+        );
+    }
+    ((0.5..=4.0).contains(&shift)
+        && offsets[offsets.len() * 9 / 10] - offsets[offsets.len() / 10] <= 3.5)
+        .then_some(shift)
+}
+
 pub(crate) fn propose(
     source: &Raster,
     matte: Option<&AlphaMatte>,
     segmentation: &Segmentation,
     contours: &[crate::geometry::ClosedContour],
 ) -> Vec<OutlineBand> {
+    propose_with_alignment(source, matte, segmentation, contours, false)
+}
+
+fn propose_with_alignment(
+    source: &Raster,
+    matte: Option<&AlphaMatte>,
+    segmentation: &Segmentation,
+    contours: &[crate::geometry::ClosedContour],
+    realigned: bool,
+) -> Vec<OutlineBand> {
     let mut result: Vec<OutlineBand> = Vec::new();
+    let repair_error = 6.2;
+    let coverage = 0.35;
     // A geometric ellipse can be valid while its shaded band cannot meet the
     // color/path budget. Retain the bounded cubic alternative in that case;
     // an already proposed primary band owns its regions and excludes it.
@@ -206,7 +296,7 @@ pub(crate) fn propose(
             if fill - ink < 0.08 {
                 continue;
             }
-            let threshold = ink + 0.35 * (fill - ink);
+            let threshold = ink + coverage * (fill - ink);
             let Some(end) =
                 (core + 1..33).find(|&j| luminance(source.pixels[indices[j]]) > threshold)
             else {
@@ -222,9 +312,32 @@ pub(crate) fn propose(
         }
         #[cfg(feature = "diagnostics")]
         if std::env::var_os("PICVEC_OUTLINE_DIAGNOSTICS").is_some() {
-            eprintln!("outline profile n={} support={}/{}", n, widths.len(), total);
+            eprintln!(
+                "outline profile n={} support={}/{} start={:?}",
+                n,
+                widths.len(),
+                total,
+                contour[0]
+            );
         }
         if widths.len() * 4 < total * 3 {
+            if !realigned && matte.is_none() {
+                if let Some(shift) = source_outer_offset(source, contour) {
+                    if let Some(aligned) = crate::geometry::offset_outline(model, shift) {
+                        #[cfg(feature = "diagnostics")]
+                        if std::env::var_os("PICVEC_OUTLINE_DIAGNOSTICS").is_some() {
+                            eprintln!("outline align start={:?} shift={shift}", contour[0]);
+                        }
+                        for band in
+                            propose_with_alignment(source, matte, segmentation, &[aligned], true)
+                        {
+                            if result.iter().all(|b| b.regions.is_disjoint(&band.regions)) {
+                                result.push(band);
+                            }
+                        }
+                    }
+                }
+            }
             continue;
         }
         widths.sort_by(f32::total_cmp);
@@ -249,7 +362,13 @@ pub(crate) fn propose(
         if widths[widths.len() * 9 / 10] - widths[widths.len() / 10] > 3.5 {
             continue;
         }
-        let Some(shape) = crate::geometry::inset_outline(model, width, offset) else {
+        let shape = if realigned {
+            crate::geometry::offset_outline(model, -width)
+                .and_then(|inner| crate::geometry::outline_between(model, &inner))
+        } else {
+            crate::geometry::inset_outline(model, width, offset)
+        };
+        let Some(shape) = shape else {
             #[cfg(feature = "diagnostics")]
             if std::env::var_os("PICVEC_OUTLINE_DIAGNOSTICS").is_some() {
                 eprintln!("outline inset rejected");
@@ -259,8 +378,35 @@ pub(crate) fn propose(
         // Merely clipping at the ink edge leaves protrusions from the old
         // colour faces. Rebuild a narrow strip of the adjacent fill as well.
         let clearance = width + 1.25;
-        let Some(deeper) = crate::geometry::inset_outline(model, clearance, offset) else {
+        let deeper = if realigned {
+            crate::geometry::offset_outline(model, -clearance)
+                .and_then(|inner| crate::geometry::outline_between(model, &inner))
+        } else {
+            crate::geometry::inset_outline(model, clearance, offset)
+        };
+        let Some(deeper) = deeper else {
             continue;
+        };
+        let exterior = if realigned {
+            let Some(extended) = crate::geometry::offset_outline(model, 1.25) else {
+                continue;
+            };
+            let Some(band) = crate::geometry::outline_between_on(model, &extended, model) else {
+                continue;
+            };
+            Some(band)
+        } else {
+            None
+        };
+        let inner_backdrop = if realigned {
+            let Some(middle) = crate::geometry::offset_outline(model, -width * 0.5)
+                .and_then(|inner| crate::geometry::outline_between(model, &inner))
+            else {
+                continue;
+            };
+            Some(middle.inner)
+        } else {
+            None
         };
         let repair_colors: Vec<_> = colors
             .iter()
@@ -276,6 +422,24 @@ pub(crate) fn propose(
                     },
                 );
                 (i, pixel)
+            })
+            .collect();
+        let exterior_colors: Vec<_> = colors
+            .iter()
+            .map(|&(i, _)| {
+                let a = contour[(i + n - 3) % n];
+                let b = contour[(i + 3) % n];
+                let len = a.distance(b).max(0.001);
+                (
+                    i,
+                    index(
+                        source,
+                        Point {
+                            x: contour[i].x - sign * (a.y - b.y) / len * 1.25,
+                            y: contour[i].y - sign * (b.x - a.x) / len * 1.25,
+                        },
+                    ),
+                )
             })
             .collect();
         // Single-pixel ink cores alternate with antialias coverage. Estimate
@@ -301,7 +465,23 @@ pub(crate) fn propose(
         };
         let color_reference = smooth_reference(&colors);
         let repair_reference = smooth_reference(&repair_colors);
+        let exterior_reference = smooth_reference(&exterior_colors);
+        // At black, even one 8-bit RGB level spans about 6.7 scaled OKLab
+        // units. A mixed 0/1 core can exceed the old mean-error budget solely
+        // through quantization. Keep the tighter budget for coloured rims.
+        let mut ink_lightness: Vec<_> = colors
+            .iter()
+            .map(|&(_, i)| crate::color::rgb_to_oklab(color_reference.pixels[i]).l)
+            .collect();
+        ink_lightness.sort_by(f32::total_cmp);
+        let ink_error = if ink_lightness[ink_lightness.len() / 2] < 20.0 {
+            4.0
+        } else {
+            3.1
+        };
         let mut patches = Vec::new();
+        let mut underpaint = None;
+        let mut inner_underpaint = None;
         let mut intervals = vec![(0.0_f32, 1.0_f32, 0_u8)];
         while let Some((a, b, depth)) = intervals.pop() {
             let mut pixels: Vec<_> = colors
@@ -318,10 +498,32 @@ pub(crate) fn propose(
                 .collect();
             repair_pixels.sort_unstable();
             repair_pixels.dedup();
-            let ink = crate::gradient::fit_outline_field(&color_reference, &pixels, 5.0);
+            let ink = crate::gradient::fit_outline_field(&color_reference, &pixels, ink_error);
             let repair =
-                crate::gradient::fit_outline_field(&repair_reference, &repair_pixels, 10.0);
-            if let (Some(paint), Some(repair)) = (ink, repair) {
+                crate::gradient::fit_outline_field(&repair_reference, &repair_pixels, repair_error);
+            let outside = if exterior.is_some() {
+                let mut pixels: Vec<_> = exterior_colors
+                    .iter()
+                    .filter(|(i, _)| (*i as f32 / n as f32) >= a && (*i as f32 / n as f32) < b)
+                    .map(|&(_, i)| i)
+                    .collect();
+                pixels.sort_unstable();
+                pixels.dedup();
+                crate::gradient::fit_outline_field(&exterior_reference, &pixels, repair_error)
+                    .map(Some)
+            } else {
+                Some(None)
+            };
+            if let (Some(paint), Some(repair), Some(outside)) = (ink, repair, outside) {
+                if underpaint.is_none() {
+                    // Each side of the ink needs its own backdrop. Extending
+                    // the glass colour beneath the exterior clip leaves a
+                    // blue hairline where complementary antialias meets.
+                    underpaint = Some(outside.as_ref().unwrap_or(&repair).clone());
+                    inner_underpaint = inner_backdrop
+                        .as_ref()
+                        .map(|path| (path.clone(), repair.clone()));
+                }
                 let path = if depth == 0 {
                     format!("{} {}", shape.outer, shape.inner)
                 } else {
@@ -333,28 +535,45 @@ pub(crate) fn propose(
                     shape.repair_patch(&deeper, a, b)
                 };
                 patches.push((repair_path, repair));
+                if let (Some(exterior), Some(outside)) = (&exterior, outside) {
+                    let path = if depth == 0 {
+                        format!("{} {}", exterior.outer, exterior.inner)
+                    } else {
+                        exterior.patch(a, b)
+                    };
+                    patches.push((path, outside));
+                }
                 patches.push((path, paint));
-            } else if depth < 4 && patches.len() / 2 + intervals.len() + 2 <= 8 {
+            } else if depth < 5
+                && patches.len() / if exterior.is_some() { 3 } else { 2 } + intervals.len() + 2
+                    <= 16
+            {
                 // Split at observed color transitions instead of arbitrary
                 // loop fractions, under the same depth and path budgets.
                 let middle = colors
                     .windows(2)
                     .zip(repair_colors.windows(2))
-                    .filter_map(|(ink, repair)| {
+                    .zip(exterior_colors.windows(2))
+                    .filter_map(|((ink, repair), outside)| {
                         let t = (ink[0].0 + ink[1].0) as f32 / (2.0 * n as f32);
                         if t < a + (b - a) * 0.25 || t > b - (b - a) * 0.25 {
                             return None;
                         }
                         let difference = |image: &Raster, samples: &[(usize, usize)]| {
-                            crate::color::delta_e2000(
-                                crate::color::rgb_to_lab(image.pixels[samples[0].1]),
-                                crate::color::rgb_to_lab(image.pixels[samples[1].1]),
+                            crate::color::delta_e_ok(
+                                crate::color::rgb_to_oklab(image.pixels[samples[0].1]),
+                                crate::color::rgb_to_oklab(image.pixels[samples[1].1]),
                             )
                         };
                         Some((
                             t,
-                            (difference(&color_reference, ink) / 5.0)
-                                .max(difference(&repair_reference, repair) / 10.0),
+                            (difference(&color_reference, ink) / ink_error)
+                                .max(difference(&repair_reference, repair) / repair_error)
+                                .max(if exterior.is_some() {
+                                    difference(&exterior_reference, outside) / repair_error
+                                } else {
+                                    0.0
+                                }),
                         ))
                     })
                     .max_by(|(_, x), (_, y)| x.total_cmp(y))
@@ -369,9 +588,12 @@ pub(crate) fn propose(
         if patches.is_empty() {
             continue;
         }
-        let contour = shape.contour;
-        let outer = shape.outer;
+        let contour = exterior
+            .as_ref()
+            .map_or(shape.contour, |e| e.contour.clone());
+        let outer = exterior.as_ref().map_or(shape.outer, |e| e.outer.clone());
         let inner = deeper.inner;
+        let clearance = clearance + if exterior.is_some() { 1.25 } else { 0.0 };
         let width = clearance - offset.x.hypot(offset.y);
         let minx = contour
             .iter()
@@ -433,6 +655,14 @@ pub(crate) fn propose(
             })
             .map(|(&id, _)| id)
             .collect();
+        #[cfg(feature = "diagnostics")]
+        if std::env::var_os("PICVEC_OUTLINE_DIAGNOSTICS").is_some() {
+            eprintln!(
+                "outline ownership at {:?}: {} regions",
+                contour[0],
+                regions.len()
+            );
+        }
         if regions.len() < 3 || result.iter().any(|b| !b.regions.is_disjoint(&regions)) {
             continue;
         }
@@ -443,11 +673,13 @@ pub(crate) fn propose(
             .collect();
         let pixels = measured_pixels
             .into_iter()
-            .filter(|(i, _)| regions.contains(&segmentation.labels[*i]))
+            .filter(|(i, _)| exterior.is_some() || regions.contains(&segmentation.labels[*i]))
             .collect();
         result.push(OutlineBand {
             outer,
             inner,
+            underpaint: underpaint.unwrap(),
+            inner_underpaint,
             patches,
             regions,
             hidden,
@@ -464,7 +696,7 @@ pub(crate) fn propose(
 mod tests {
     use super::*;
     use crate::{
-        color::rgb_to_lab,
+        color::rgb_to_oklab,
         segment::{RegionStats, SegmentationSummary},
     };
 
@@ -538,7 +770,7 @@ mod tests {
                     max_x: 95,
                     max_y: 95,
                     mean_rgb: color,
-                    mean_lab: rgb_to_lab(color),
+                    mean_lab: rgb_to_oklab(color),
                 }
             })
             .collect();
@@ -563,6 +795,39 @@ mod tests {
             .collect();
         contour.push(contour[0]);
         (source, segmentation, contour)
+    }
+
+    #[test]
+    fn reconstructs_ink_outside_a_fill_contour_in_both_directions() {
+        let (source, segmentation, outer) = disc([1.0; 3]);
+        let inner: Vec<_> = outer
+            .iter()
+            .map(|p| Point {
+                x: 48.0 + (p.x - 48.0) * 28.0 / 30.0,
+                y: 48.0 + (p.y - 48.0) * 28.0 / 30.0,
+            })
+            .collect();
+        for reverse in [false, true] {
+            let mut points = inner.clone();
+            if reverse {
+                points.reverse();
+            }
+            let shift = source_outer_offset(&source, &points).unwrap();
+            assert!((1.5..=2.5).contains(&shift), "outer offset: {shift}");
+            let bands = propose(
+                &source,
+                None,
+                &segmentation,
+                &[crate::geometry::ClosedContour::from_points(&points)],
+            );
+            assert_eq!(bands.len(), 1, "reversed={reverse}");
+            assert!(bands[0].regions.contains(&1));
+            // The band owns the ink and both adjacent 1.25px fill collars.
+            assert!((3.5..=5.5).contains(&bands[0].width));
+        }
+        assert!(source_outer_offset(&source, &outer).is_none());
+        let (plain, _, _) = disc([0.0; 3]);
+        assert!(source_outer_offset(&plain, &inner).is_none());
     }
 
     #[test]

@@ -1,0 +1,128 @@
+{
+  "metric": "Euclidean distance in 100-scaled OKLab",
+  "renderer": "rsvg-convert at source resolution (5016x5016), common green backdrop",
+  "foreground_mask": "Exclude G>R+0.15 and G>B+0.15 and G>0.5, then erode remaining support by two pixels",
+  "previous_cielab_commit": "57c3a4ac7347504a6e4771fb1affd9071dbdf27e",
+  "sha256": {
+    "input": "2d350c5f071d853c543da8ae1f51e4c38bbe908c2f5580b17fdaad6985c0d571",
+    "previous_cielab": "01fb6e8257118765ac12f82d1cf15e1caa874d4da8a43203c87c1c1468455a73",
+    "before": "7c855b4556023a58c09ac28dc291bea87d0a96084a32827d3358c64992637a67",
+    "after": "8980316e714849c8c825218ee6e2e3a890a0f1fe01e33543000409701141edca"
+  },
+  "adaptive_regions": {
+    "previous_cielab": 36,
+    "before": 27,
+    "after": 36
+  },
+  "results": [
+    {
+      "name": "Disk",
+      "source_box": [
+        1700,
+        2530,
+        2460,
+        3290
+      ],
+      "interior_pixels": 377080,
+      "previous_cielab_keyed": {
+        "mean_delta_e_ok": 1.6259756088256836,
+        "p90_delta_e_ok": 3.8187670707702637
+      },
+      "before": {
+        "mean_delta_e_ok": 4.87891149520874,
+        "p90_delta_e_ok": 11.87136459350586
+      },
+      "after": {
+        "mean_delta_e_ok": 1.494546890258789,
+        "p90_delta_e_ok": 2.657850742340088
+      }
+    },
+    {
+      "name": "Server rack",
+      "source_box": [
+        2520,
+        2500,
+        3300,
+        3300
+      ],
+      "interior_pixels": 394901,
+      "previous_cielab_keyed": {
+        "mean_delta_e_ok": 1.921006441116333,
+        "p90_delta_e_ok": 4.556041240692139
+      },
+      "before": {
+        "mean_delta_e_ok": 5.639986515045166,
+        "p90_delta_e_ok": 15.979453086853027
+      },
+      "after": {
+        "mean_delta_e_ok": 1.8327716588974,
+        "p90_delta_e_ok": 3.470674514770508
+      }
+    },
+    {
+      "name": "Gear",
+      "source_box": [
+        1690,
+        3340,
+        2470,
+        4080
+      ],
+      "interior_pixels": 254658,
+      "previous_cielab_keyed": {
+        "mean_delta_e_ok": 1.3653990030288696,
+        "p90_delta_e_ok": 3.1812405586242676
+      },
+      "before": {
+        "mean_delta_e_ok": 3.519075632095337,
+        "p90_delta_e_ok": 8.376667022705078
+      },
+      "after": {
+        "mean_delta_e_ok": 1.3132954835891724,
+        "p90_delta_e_ok": 2.247831344604492
+      }
+    }
+  ],
+  "current_calibration": {
+    "svg_sha256": "8e5ea6b80b8665bed4654c170ee428441c23dbf55fead48dbfdca8697e0adccb",
+    "accepted_regions": 36,
+    "evaluated_regions": 36,
+    "results": [
+      {
+        "name": "Disk",
+        "source_box": [
+          1700,
+          2530,
+          2460,
+          3290
+        ],
+        "interior_pixels": 377080,
+        "mean_delta_e_ok": 1.601371169090271,
+        "p90_delta_e_ok": 3.1624364852905273
+      },
+      {
+        "name": "Server rack",
+        "source_box": [
+          2520,
+          2500,
+          3300,
+          3300
+        ],
+        "interior_pixels": 394901,
+        "mean_delta_e_ok": 1.9444588422775269,
+        "p90_delta_e_ok": 3.718939781188965
+      },
+      {
+        "name": "Gear",
+        "source_box": [
+          1690,
+          3340,
+          2470,
+          4080
+        ],
+        "interior_pixels": 254658,
+        "mean_delta_e_ok": 1.2847541570663452,
+        "p90_delta_e_ok": 2.456068754196167
+      }
+    ]
+  }
+}

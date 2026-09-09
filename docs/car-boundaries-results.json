@@ -1,0 +1,338 @@
+{
+  "baseline_commit": "57c3a4ac7347504a6e4771fb1affd9071dbdf27e",
+  "baseline_reproduced_svg_sha256": "c7ff5f3993b3fa5f724ed5b494cacc3cdad5f8f3eb4a57d23d1f5a019ea64e03",
+  "source_sha256": "7bac8b1676a62a6ddfc4519d3e17f92c4b76f78cd4b947efddc1eb45baa20cf7",
+  "renderer": "resvg 0.48.1; white background; 1254x1254 for metrics, 5016x5016 before cropping visual comparisons",
+  "boundary_definition": {
+    "fender": {
+      "x": [
+        360,
+        491
+      ],
+      "y_search": [
+        620,
+        694
+      ],
+      "channel": "G",
+      "direction": -1
+    },
+    "window": {
+      "x": [
+        760,
+        881
+      ],
+      "y_search": [
+        340,
+        375
+      ],
+      "channel": "B",
+      "direction": 1
+    },
+    "wheel": {
+      "x": [
+        375,
+        455
+      ],
+      "y_search": [
+        711,
+        753
+      ],
+      "channel": "G",
+      "direction": 1
+    }
+  },
+  "boundary_measure": "Find strongest directed source step for each column; positive-step centroid over y-4 through y+4; report [mean absolute displacement from source, mean absolute second difference of rendered positions], in native pixels.",
+  "shade_measure": "Red source mask R>190, G<160; 8-pixel horizontal/vertical pairs with every source step <=3 per RGB channel; |source OKLab L difference|>0.35; reversal requires opposite sign and |rendered difference|>0.15. Not a count of visible triangles.",
+  "shade_boxes": {
+    "hood": [
+      75,
+      510,
+      400,
+      575
+    ],
+    "fender": [
+      330,
+      565,
+      530,
+      645
+    ],
+    "bumper": [
+      220,
+      685,
+      335,
+      815
+    ]
+  },
+  "variants": {
+    "cielab": {
+      "bytes": 1982104,
+      "ok_mean": 0.6960575572695156,
+      "shading": {
+        "hood": {
+          "mae": 3.859187722708131,
+          "reverse": 1283,
+          "reliable": 16021
+        },
+        "fender": {
+          "mae": 3.7066497190259566,
+          "reverse": 1923,
+          "reliable": 18489
+        },
+        "bumper": {
+          "mae": 3.2861521747565283,
+          "reverse": 945,
+          "reliable": 10414
+        }
+      },
+      "edges": {
+        "fender": [
+          0.2887577759786694,
+          0.14885004146832434
+        ],
+        "window": [
+          0.28004566534086883,
+          0.15911115325046876
+        ],
+        "wheel": [
+          0.379986496723771,
+          0.28980441157902814
+        ]
+      },
+      "svg_sha256": "c7ff5f3993b3fa5f724ed5b494cacc3cdad5f8f3eb4a57d23d1f5a019ea64e03",
+      "reported_points": [
+        {
+          "xy": [
+            335,
+            655
+          ],
+          "source": [
+            253,
+            93,
+            86
+          ],
+          "rendered": [
+            252,
+            94,
+            88
+          ],
+          "max_channel_error": 2
+        },
+        {
+          "xy": [
+            528,
+            592
+          ],
+          "source": [
+            250,
+            94,
+            89
+          ],
+          "rendered": [
+            248,
+            90,
+            85
+          ],
+          "max_channel_error": 4
+        },
+        {
+          "xy": [
+            286,
+            752
+          ],
+          "source": [
+            223,
+            39,
+            38
+          ],
+          "rendered": [
+            219,
+            39,
+            38
+          ],
+          "max_channel_error": 4
+        }
+      ],
+      "fender_test_rgb_mae": 3.7368617137847906
+    },
+    "rejected": {
+      "bytes": 3107771,
+      "ok_mean": 0.6574425342898096,
+      "shading": {
+        "hood": {
+          "mae": 3.6044703595724004,
+          "reverse": 847,
+          "reliable": 16021
+        },
+        "fender": {
+          "mae": 1.7223262866827223,
+          "reverse": 151,
+          "reliable": 18489
+        },
+        "bumper": {
+          "mae": 1.6479261242385441,
+          "reverse": 137,
+          "reliable": 10414
+        }
+      },
+      "edges": {
+        "fender": [
+          0.3064365020303486,
+          0.14786450034076665
+        ],
+        "window": [
+          0.17025222291464726,
+          0.11518797867386031
+        ],
+        "wheel": [
+          0.3851812938078908,
+          0.3611253731612986
+        ]
+      },
+      "svg_sha256": "62bf835ed24825e2e99835bafff666804a8946d9bb83f3382451452c5426fc51",
+      "reported_points": [
+        {
+          "xy": [
+            335,
+            655
+          ],
+          "source": [
+            253,
+            93,
+            86
+          ],
+          "rendered": [
+            252,
+            95,
+            86
+          ],
+          "max_channel_error": 2
+        },
+        {
+          "xy": [
+            528,
+            592
+          ],
+          "source": [
+            250,
+            94,
+            89
+          ],
+          "rendered": [
+            250,
+            94,
+            89
+          ],
+          "max_channel_error": 0
+        },
+        {
+          "xy": [
+            286,
+            752
+          ],
+          "source": [
+            223,
+            39,
+            38
+          ],
+          "rendered": [
+            223,
+            38,
+            38
+          ],
+          "max_channel_error": 1
+        }
+      ],
+      "fender_test_rgb_mae": 1.7994521148367302
+    },
+    "calibrated": {
+      "bytes": 1866604,
+      "ok_mean": 0.683244751436432,
+      "shading": {
+        "hood": {
+          "mae": 3.422740524781341,
+          "reverse": 857,
+          "reliable": 16021
+        },
+        "fender": {
+          "mae": 3.5383551868700382,
+          "reverse": 1242,
+          "reliable": 18489
+        },
+        "bumper": {
+          "mae": 3.019477748030885,
+          "reverse": 663,
+          "reliable": 10414
+        }
+      },
+      "edges": {
+        "fender": [
+          0.32831185781202393,
+          0.1230413085403
+        ],
+        "window": [
+          0.5300224435180869,
+          0.09720336312255756
+        ],
+        "wheel": [
+          0.31886406538811796,
+          0.2716172069861879
+        ]
+      },
+      "svg_sha256": "9b64c33ef0cdba38c97bf9a7b33c3511514fc758ef5a066e4bd4fd5b3f734617",
+      "reported_points": [
+        {
+          "xy": [
+            335,
+            655
+          ],
+          "source": [
+            253,
+            93,
+            86
+          ],
+          "rendered": [
+            252,
+            100,
+            94
+          ],
+          "max_channel_error": 8
+        },
+        {
+          "xy": [
+            528,
+            592
+          ],
+          "source": [
+            250,
+            94,
+            89
+          ],
+          "rendered": [
+            249,
+            98,
+            93
+          ],
+          "max_channel_error": 4
+        },
+        {
+          "xy": [
+            286,
+            752
+          ],
+          "source": [
+            223,
+            39,
+            38
+          ],
+          "rendered": [
+            224,
+            49,
+            47
+          ],
+          "max_channel_error": 10
+        }
+      ],
+      "fender_test_rgb_mae": 3.5690992767915843
+    }
+  }
+}

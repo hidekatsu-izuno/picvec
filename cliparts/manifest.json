@@ -42,7 +42,6 @@
       "items": [
         "user",
         "group",
-        "team",
         "organization",
         "company",
         "department",
@@ -68,7 +67,6 @@
         "warehouse",
         "meeting",
         "presentation",
-        "training",
         "calendar",
         "clock",
         "target",
@@ -121,7 +119,6 @@
         "binary-file",
         "configuration-file",
         "log-file",
-        "source-code",
         "database-dump"
       ]
     },
@@ -152,7 +149,6 @@
         "server",
         "server-rack",
         "mainframe",
-        "workstation",
         "virtual-machine",
         "container",
         "container-cluster",
@@ -200,7 +196,6 @@
         "file-storage",
         "block-storage",
         "shared-storage",
-        "folder-storage",
         "backup",
         "archive",
         "snapshot",
@@ -215,7 +210,6 @@
         "mail",
         "mailbox",
         "chat",
-        "message",
         "notification",
         "phone",
         "video-call",
@@ -275,7 +269,6 @@
     {
       "id": "security",
       "items": [
-        "security",
         "lock",
         "unlock",
         "key",
@@ -305,7 +298,6 @@
         "prompt",
         "conversation",
         "reasoning",
-        "search",
         "embedding",
         "vector",
         "training",
@@ -322,7 +314,6 @@
         "line-chart",
         "pie-chart",
         "scatter-chart",
-        "dashboard-chart",
         "statistics",
         "trend-up",
         "trend-down",
@@ -346,17 +337,11 @@
         "airplane",
         "ship",
         "train",
-        "house",
-        "home",
         "keycard",
         "usb-memory",
         "hard-disk",
         "optical-disc",
         "battery",
-        "lightbulb",
-        "magnifier",
-        "camera-photo",
-        "envelope",
         "gift"
       ]
     },
@@ -365,7 +350,6 @@
       "items": [
         "check",
         "cross",
-        "warning-sign",
         "question",
         "information",
         "plus",
@@ -623,13 +607,6 @@
       "svg": "svg/camera.svg"
     },
     {
-      "id": "camera-photo",
-      "categories": [
-        "physical-objects"
-      ],
-      "svg": "svg/camera-photo.svg"
-    },
-    {
       "id": "car",
       "categories": [
         "physical-objects"
@@ -791,13 +768,6 @@
       "svg": "svg/dashboard.svg"
     },
     {
-      "id": "dashboard-chart",
-      "categories": [
-        "charts-data"
-      ],
-      "svg": "svg/dashboard-chart.svg"
-    },
-    {
       "id": "data-lake",
       "categories": [
         "storage-data"
@@ -924,13 +894,6 @@
       "svg": "svg/encryption.svg"
     },
     {
-      "id": "envelope",
-      "categories": [
-        "physical-objects"
-      ],
-      "svg": "svg/envelope.svg"
-    },
-    {
       "id": "factory",
       "categories": [
         "office-business"
@@ -971,13 +934,6 @@
         "documents"
       ],
       "svg": "svg/folder.svg"
-    },
-    {
-      "id": "folder-storage",
-      "categories": [
-        "storage-data"
-      ],
-      "svg": "svg/folder-storage.svg"
     },
     {
       "id": "form",
@@ -1052,17 +1008,9 @@
     {
       "id": "home",
       "categories": [
-        "physical-objects",
         "common-symbols"
       ],
       "svg": "svg/home.svg"
-    },
-    {
-      "id": "house",
-      "categories": [
-        "physical-objects"
-      ],
-      "svg": "svg/house.svg"
     },
     {
       "id": "html",
@@ -1191,13 +1139,6 @@
       "svg": "svg/library.svg"
     },
     {
-      "id": "lightbulb",
-      "categories": [
-        "physical-objects"
-      ],
-      "svg": "svg/lightbulb.svg"
-    },
-    {
       "id": "line-chart",
       "categories": [
         "charts-data"
@@ -1252,13 +1193,6 @@
         "file-formats"
       ],
       "svg": "svg/log-file.svg"
-    },
-    {
-      "id": "magnifier",
-      "categories": [
-        "physical-objects"
-      ],
-      "svg": "svg/magnifier.svg"
     },
     {
       "id": "mail",
@@ -1329,13 +1263,6 @@
         "development"
       ],
       "svg": "svg/merge.svg"
-    },
-    {
-      "id": "message",
-      "categories": [
-        "communication"
-      ],
-      "svg": "svg/message.svg"
     },
     {
       "id": "metrics",
@@ -1753,17 +1680,9 @@
     {
       "id": "search",
       "categories": [
-        "ai",
         "common-symbols"
       ],
       "svg": "svg/search.svg"
-    },
-    {
-      "id": "security",
-      "categories": [
-        "security"
-      ],
-      "svg": "svg/security.svg"
     },
     {
       "id": "sensor",
@@ -1859,7 +1778,6 @@
     {
       "id": "source-code",
       "categories": [
-        "file-formats",
         "programming"
       ],
       "svg": "svg/source-code.svg"
@@ -1991,13 +1909,6 @@
       "svg": "svg/teacher.svg"
     },
     {
-      "id": "team",
-      "categories": [
-        "people"
-      ],
-      "svg": "svg/team.svg"
-    },
-    {
       "id": "template",
       "categories": [
         "documents"
@@ -2070,7 +1981,6 @@
     {
       "id": "training",
       "categories": [
-        "office-business",
         "ai"
       ],
       "svg": "svg/training.svg"
@@ -2209,13 +2119,6 @@
       "svg": "svg/warning.svg"
     },
     {
-      "id": "warning-sign",
-      "categories": [
-        "common-symbols"
-      ],
-      "svg": "svg/warning-sign.svg"
-    },
-    {
       "id": "watch",
       "categories": [
         "devices"
@@ -2242,13 +2145,6 @@
         "computing"
       ],
       "svg": "svg/workflow.svg"
-    },
-    {
-      "id": "workstation",
-      "categories": [
-        "computing"
-      ],
-      "svg": "svg/workstation.svg"
     },
     {
       "id": "xml",

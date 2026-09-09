@@ -3,14 +3,14 @@
 
 use serde::Serialize;
 
-use crate::color::{delta_e2000, relative_luminance, rgb_to_lab};
+use crate::color::{delta_e_ok, relative_luminance, rgb_to_oklab};
 use crate::raster::{percentile, Raster};
 
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct QualityMetrics {
-    pub delta_e00_mean: f32,
-    pub delta_e00_p90: f32,
-    pub delta_e00_p99: f32,
+    pub delta_e_ok_mean: f32,
+    pub delta_e_ok_p90: f32,
+    pub delta_e_ok_p99: f32,
     /// Single-window SSIM over the complete luminance image.
     pub global_ssim: f32,
 }
@@ -24,7 +24,7 @@ pub fn compare(reference: &Raster, candidate: &Raster) -> QualityMetrics {
         .pixels
         .iter()
         .zip(&candidate.pixels)
-        .map(|(&a, &b)| delta_e2000(rgb_to_lab(a), rgb_to_lab(b)))
+        .map(|(&a, &b)| delta_e_ok(rgb_to_oklab(a), rgb_to_oklab(b)))
         .collect();
     let mean = delta.iter().sum::<f32>() / delta.len().max(1) as f32;
     let reference_luma: Vec<f32> = reference
@@ -58,9 +58,9 @@ pub fn compare(reference: &Raster, candidate: &Raster) -> QualityMetrics {
     let global_ssim = ((2.0 * mean_x * mean_y + c1) * (2.0 * covariance + c2))
         / ((mean_x * mean_x + mean_y * mean_y + c1) * (variance_x + variance_y + c2)).max(1e-12);
     QualityMetrics {
-        delta_e00_mean: mean,
-        delta_e00_p90: percentile(delta.clone(), 0.90),
-        delta_e00_p99: percentile(delta, 0.99),
+        delta_e_ok_mean: mean,
+        delta_e_ok_p90: percentile(delta.clone(), 0.90),
+        delta_e_ok_p99: percentile(delta, 0.99),
         global_ssim,
     }
 }

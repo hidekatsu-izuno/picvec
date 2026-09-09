@@ -2,12 +2,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 use serde::Serialize;
 
-use crate::color::{
-    delta_e2000, delta_e2000_nearest, lab_pixels_to_rgb, lab_to_rgb, rgb_to_lab,
-    DeltaE2000Workspace, Lab,
-};
+use crate::color::{delta_e_ok, oklab_to_rgb, oklab_values_to_rgb, rgb_to_oklab, Oklab};
 use crate::config::Config;
-use crate::edge::{lab_pixels, EdgeRoles};
+use crate::edge::{oklab_pixels, EdgeRoles};
 use crate::hierarchy::uniform_cells;
 use crate::raster::{percentile, Raster};
 use crate::union_find::UnionFind;
@@ -66,7 +63,7 @@ pub struct RegionStats {
     pub max_x: usize,
     pub max_y: usize,
     pub mean_rgb: [f32; 3],
-    pub mean_lab: Lab,
+    pub mean_lab: Oklab,
 }
 
 #[derive(Clone, Debug)]
@@ -175,8 +172,8 @@ fn pair_mixture(
             mixture_prediction(first_value, first_parent, second_parent, linear);
         let (second_alpha, second_prediction) =
             mixture_prediction(second_value, first_parent, second_parent, linear);
-        let error = delta_e2000(rgb_to_lab(first_value), rgb_to_lab(first_prediction)).max(
-            delta_e2000(rgb_to_lab(second_value), rgb_to_lab(second_prediction)),
+        let error = delta_e_ok(rgb_to_oklab(first_value), rgb_to_oklab(first_prediction)).max(
+            delta_e_ok(rgb_to_oklab(second_value), rgb_to_oklab(second_prediction)),
         );
         if error < best.2 {
             best = (first_alpha, second_alpha, error);
@@ -186,17 +183,18 @@ fn pair_mixture(
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-struct LabKey(i16, i16, i16);
+struct OklabKey(i16, i16, i16);
 
 #[derive(Clone, Debug)]
 struct PaletteEntry {
-    lab: Lab,
+    lab: Oklab,
     weight: usize,
 }
 
 fn adaptive_tolerance(lightness: f32, config: &Config) -> f32 {
-    let amount = ((lightness - config.dark_knee_lstar) / (100.0 - config.dark_knee_lstar).max(1.0))
-        .clamp(0.0, 1.0);
+    let amount = ((lightness - config.dark_knee_lightness)
+        / (100.0 - config.dark_knee_lightness).max(1.0))
+    .clamp(0.0, 1.0);
     let amount = amount * amount * (3.0 - 2.0 * amount);
     (config.quantization_dark_delta_e
         + (config.quantization_light_delta_e - config.quantization_dark_delta_e) * amount)
@@ -260,25 +258,36 @@ fn local_area_map(roles: &EdgeRoles, config: &Config, maximum: usize) -> Vec<usi
         .collect()
 }
 
-fn weighted_merge(first: Lab, first_weight: usize, second: Lab, second_weight: usize) -> Lab {
+fn weighted_merge(first: Oklab, first_weight: usize, second: Oklab, second_weight: usize) -> Oklab {
     let total = (first_weight + second_weight).max(1) as f32;
-    Lab {
+    Oklab {
         l: (first.l * first_weight as f32 + second.l * second_weight as f32) / total,
         a: (first.a * first_weight as f32 + second.a * second_weight as f32) / total,
         b: (first.b * first_weight as f32 + second.b * second_weight as f32) / total,
     }
 }
 
-fn build_palette(lab: &[Lab], protected: &[bool], config: &Config) -> (Vec<u32>, Vec<Lab>, usize) {
-    let mut histogram = HashMap::<LabKey, usize>::new();
+fn build_palette(
+    lab: &[Oklab],
+    protected: &[bool],
+    config: &Config,
+) -> (Vec<u32>, Vec<Oklab>, usize) {
+    // Half-unit OKLab cells retain chromatic detail. Representatives use
+    // actual sample means so bin rounding cannot tint a flat saturated fill.
+    const BIN_WIDTH: f32 = 0.5;
+    let mut histogram = HashMap::<OklabKey, usize>::new();
+    let mut sums = HashMap::<OklabKey, [f64; 3]>::new();
     for value in lab {
-        *histogram
-            .entry(LabKey(
-                value.l.round_ties_even() as i16,
-                value.a.round_ties_even() as i16,
-                value.b.round_ties_even() as i16,
-            ))
-            .or_default() += 1;
+        let key = OklabKey(
+            (value.l / BIN_WIDTH).round_ties_even() as i16,
+            (value.a / BIN_WIDTH).round_ties_even() as i16,
+            (value.b / BIN_WIDTH).round_ties_even() as i16,
+        );
+        *histogram.entry(key).or_default() += 1;
+        let sum = sums.entry(key).or_default();
+        sum[0] += f64::from(value.l);
+        sum[1] += f64::from(value.a);
+        sum[2] += f64::from(value.b);
     }
     // Global colour frequency cannot decide whether a thin highlight is
     // dispensable. Preserve source ridge colours before small-region and
@@ -288,55 +297,45 @@ fn build_palette(lab: &[Lab], protected: &[bool], config: &Config) -> (Vec<u32>,
         .zip(protected)
         .filter(|(_, keep)| **keep)
         .map(|(v, _)| {
-            LabKey(
-                v.l.round_ties_even() as i16,
-                v.a.round_ties_even() as i16,
-                v.b.round_ties_even() as i16,
+            OklabKey(
+                (v.l / BIN_WIDTH).round_ties_even() as i16,
+                (v.a / BIN_WIDTH).round_ties_even() as i16,
+                (v.b / BIN_WIDTH).round_ties_even() as i16,
             )
         })
         .collect();
     let histogram_cells = histogram.len();
-    let mut bins: Vec<(LabKey, usize)> = histogram.into_iter().collect();
+    let mut bins: Vec<(OklabKey, usize)> = histogram.into_iter().collect();
     bins.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     let mut palette = Vec::<PaletteEntry>::new();
-    let mut palette_labs = Vec::<Lab>::new();
     let mut palette_protected = Vec::<bool>::new();
-    let mut distance_workspace = DeltaE2000Workspace::default();
-    let maximum_palette_distance = config
-        .quantization_dark_delta_e
-        .max(config.quantization_light_delta_e);
-    let mut assignments = HashMap::<LabKey, u32>::new();
+    let mut assignments = HashMap::<OklabKey, u32>::new();
     for (key, count) in bins {
         let keep = protected_bins.contains(&key);
-        let colour = Lab {
-            l: key.0 as f32,
-            a: key.1 as f32,
-            b: key.2 as f32,
+        let colour = Oklab {
+            l: (sums[&key][0] / count as f64) as f32,
+            a: (sums[&key][1] / count as f64) as f32,
+            b: (sums[&key][2] / count as f64) as f32,
         };
-        // Match the reference nearest colour exactly inside the largest
-        // possible acceptance radius. The CIEDE2000 lightness lower bound
-        // only rejects representatives that cannot be selected; unlike the
-        // former bucket shortcut it remains valid after a representative
-        // moves and therefore preserves ownership and topology.
-        let best = delta_e2000_nearest(
-            &palette_labs,
-            colour,
-            maximum_palette_distance,
-            &mut distance_workspace,
-        );
+        let query = colour;
+        let best = palette
+            .iter()
+            .enumerate()
+            .map(|(index, value)| (index, value.lab.distance(query)))
+            .min_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
         let selected = if let Some((index, distance)) = best {
             let threshold = adaptive_tolerance((palette[index].lab.l + colour.l) * 0.5, config);
             let threshold = if keep || palette_protected[index] {
-                threshold.min(1.5)
+                threshold.min(1.8)
             } else {
                 threshold
             };
+            let threshold = threshold * config.oklab_palette_threshold_scale;
             if distance <= threshold {
                 let previous = palette[index].clone();
                 palette[index].lab = weighted_merge(previous.lab, previous.weight, colour, count);
                 palette[index].weight += count;
                 palette_protected[index] |= keep;
-                palette_labs[index] = palette[index].lab;
                 index
             } else {
                 let index = palette.len();
@@ -344,7 +343,6 @@ fn build_palette(lab: &[Lab], protected: &[bool], config: &Config) -> (Vec<u32>,
                     lab: colour,
                     weight: count,
                 });
-                palette_labs.push(colour);
                 palette_protected.push(keep);
                 index
             }
@@ -354,7 +352,6 @@ fn build_palette(lab: &[Lab], protected: &[bool], config: &Config) -> (Vec<u32>,
                 lab: colour,
                 weight: count,
             });
-            palette_labs.push(colour);
             palette_protected.push(keep);
             index
         };
@@ -363,10 +360,10 @@ fn build_palette(lab: &[Lab], protected: &[bool], config: &Config) -> (Vec<u32>,
     let map = lab
         .iter()
         .map(|value| {
-            assignments[&LabKey(
-                value.l.round_ties_even() as i16,
-                value.a.round_ties_even() as i16,
-                value.b.round_ties_even() as i16,
+            assignments[&OklabKey(
+                (value.l / BIN_WIDTH).round_ties_even() as i16,
+                (value.a / BIN_WIDTH).round_ties_even() as i16,
+                (value.b / BIN_WIDTH).round_ties_even() as i16,
             )]
         })
         .collect();
@@ -526,18 +523,18 @@ fn median_channel(values: &mut [f32]) -> f32 {
     }
 }
 
-fn median_lab(values: &[Lab], indices: &[usize]) -> Lab {
+fn median_lab(values: &[Oklab], indices: &[usize]) -> Oklab {
     let mut lightness: Vec<f32> = indices.iter().map(|&index| values[index].l).collect();
     let mut a: Vec<f32> = indices.iter().map(|&index| values[index].a).collect();
     let mut b: Vec<f32> = indices.iter().map(|&index| values[index].b).collect();
-    Lab {
+    Oklab {
         l: median_channel(&mut lightness),
         a: median_channel(&mut a),
         b: median_channel(&mut b),
     }
 }
 
-fn project_to_lab_segment(value: Lab, first: Lab, second: Lab) -> Lab {
+fn project_to_lab_segment(value: Oklab, first: Oklab, second: Oklab) -> Oklab {
     let dl = second.l - first.l;
     let da = second.a - first.a;
     let db = second.b - first.b;
@@ -549,38 +546,38 @@ fn project_to_lab_segment(value: Lab, first: Lab, second: Lab) -> Lab {
         (((value.l - first.l) * dl + (value.a - first.a) * da + (value.b - first.b) * db)
             / length_squared)
             .clamp(0.0, 1.0);
-    Lab {
+    Oklab {
         l: first.l + parameter * dl,
         a: first.a + parameter * da,
         b: first.b + parameter * db,
     }
 }
 
-fn mixture_error(source: Lab, neighbours: &[Lab]) -> f32 {
+fn mixture_error(source: Oklab, neighbours: &[Oklab]) -> f32 {
     if neighbours.is_empty() {
         return f32::INFINITY;
     }
     if neighbours.len() == 1 {
-        return delta_e2000(source, neighbours[0]);
+        return delta_e_ok(source, neighbours[0]);
     }
     let mut best = f32::INFINITY;
     for (first_index, &first) in neighbours[..neighbours.len() - 1].iter().enumerate() {
         for &second in neighbours.iter().skip(first_index + 1) {
             let mixture = project_to_lab_segment(source, first, second);
-            best = best.min(delta_e2000(source, mixture));
+            best = best.min(delta_e_ok(source, mixture));
         }
     }
     if best <= 1.5 {
         return best;
     }
     // Raster antialiasing is commonly closer to an sRGB interpolation path
-    // than a straight Lab segment.  Evaluate that nonlinear path only for
+    // than a straight Oklab segment.  Evaluate that nonlinear path only for
     // the ambiguous remainder, as the Python reference does.
-    let source_rgb = lab_to_rgb(source);
+    let source_rgb = oklab_to_rgb(source);
     for (first_index, &first) in neighbours[..neighbours.len() - 1].iter().enumerate() {
-        let start = lab_to_rgb(first);
+        let start = oklab_to_rgb(first);
         for &second in neighbours.iter().skip(first_index + 1) {
-            let end = lab_to_rgb(second);
+            let end = oklab_to_rgb(second);
             let direction = [end[0] - start[0], end[1] - start[1], end[2] - start[2]];
             let length_squared = direction.iter().map(|value| value * value).sum::<f32>();
             if length_squared <= 1e-8 {
@@ -591,12 +588,12 @@ fn mixture_error(source: Lab, neighbours: &[Lab]) -> f32 {
                 + (source_rgb[2] - start[2]) * direction[2])
                 / length_squared)
                 .clamp(0.0, 1.0);
-            let mixture = rgb_to_lab([
+            let mixture = rgb_to_oklab([
                 start[0] + parameter * direction[0],
                 start[1] + parameter * direction[1],
                 start[2] + parameter * direction[2],
             ]);
-            best = best.min(delta_e2000(source, mixture));
+            best = best.min(delta_e_ok(source, mixture));
         }
     }
     best
@@ -608,11 +605,11 @@ fn mixture_error(source: Lab, neighbours: &[Lab]) -> f32 {
 /// incident to the centre count (four-connectivity, as in the Paint graph).
 fn splits_tonal_connection(
     labels: &[u32],
-    palette: &[Lab],
+    palette: &[Oklab],
     index: usize,
     width: usize,
     height: usize,
-    replacement: Lab,
+    replacement: Oklab,
 ) -> bool {
     let current = palette[labels[index] as usize].l;
     let lower = current.min(replacement.l);
@@ -686,7 +683,12 @@ fn disconnected_centre_neighbours(mut occupied: [bool; 9]) -> bool {
 /// A line embedded in one paint has matching incident paints on its two
 /// sides. A material interface or a bevel between different paints does not
 /// supply that evidence and remains subject to ordinary AA simplification.
-fn source_supported_tonal_line(source: &[Lab], index: usize, width: usize, height: usize) -> bool {
+fn source_supported_tonal_line(
+    source: &[Oklab],
+    index: usize,
+    width: usize,
+    height: usize,
+) -> bool {
     let x = (index % width) as isize;
     let y = (index / width) as isize;
     let centre = source[index];
@@ -717,7 +719,7 @@ fn source_supported_tonal_line(source: &[Lab], index: usize, width: usize, heigh
             // Incident shading may vary across the line. Its contrast must
             // be dominated by the line, rather than requiring equal colours
             // or treating a different-material interface as a medial ridge.
-            if 4.0 * delta_e2000(a, b) <= delta_e2000(centre, a).min(delta_e2000(centre, b)) {
+            if 4.0 * delta_e_ok(a, b) <= delta_e_ok(centre, a).min(delta_e_ok(centre, b)) {
                 return true;
             }
         }
@@ -728,8 +730,8 @@ fn source_supported_tonal_line(source: &[Lab], index: usize, width: usize, heigh
 #[allow(clippy::too_many_arguments)]
 fn merge_small_components(
     palette_map: &mut [u32],
-    palette_lab: &[Lab],
-    source_lab: &[Lab],
+    palette_lab: &[Oklab],
+    source_lab: &[Oklab],
     width: usize,
     height: usize,
     local_area: &[usize],
@@ -823,7 +825,7 @@ fn merge_small_components(
             }
             let mut neighbours: Vec<u32> = neighbour_ids.into_iter().collect();
             neighbours.sort_unstable();
-            let neighbour_colours: Vec<Lab> = neighbours
+            let neighbour_colours: Vec<Oklab> = neighbours
                 .iter()
                 .map(|&owner| palette_lab[owner as usize])
                 .collect();
@@ -831,7 +833,7 @@ fn merge_small_components(
             let best = neighbour_colours
                 .iter()
                 .enumerate()
-                .map(|(offset, &colour)| (offset, delta_e2000(source, colour)))
+                .map(|(offset, &colour)| (offset, delta_e_ok(source, colour)))
                 .min_by(|left, right| {
                     left.1
                         .total_cmp(&right.1)
@@ -889,7 +891,7 @@ fn merge_small_components(
                 let value = source_lab[index];
                 let mut selected: Option<(usize, f32)> = None;
                 for (offset, &colour) in neighbour_colours.iter().enumerate() {
-                    let error = delta_e2000(value, colour);
+                    let error = delta_e_ok(value, colour);
                     let pixel_threshold = adaptive_tolerance((value.l + colour.l) * 0.5, config);
                     if error > (2.0 * pixel_threshold).max(35.0) {
                         continue;
@@ -970,17 +972,17 @@ fn region_stats(image: &Raster, labels: &[u32], count: usize) -> Vec<RegionStats
                 max_x: max_x[id],
                 max_y: max_y[id],
                 mean_rgb,
-                mean_lab: rgb_to_lab(mean_rgb),
+                mean_lab: rgb_to_oklab(mean_rgb),
             }
         })
         .collect()
 }
 
 fn region_mean_raster_for(image: &Raster, labels: &[u32], count: usize) -> Raster {
-    // Python's _region_mean_image averages in Lab, using float64 bincount
+    // Python's _region_mean_image averages in Oklab, using float64 bincount
     // accumulators, casts the region means to float32, expands them back to
     // image shape, and only then converts the complete array to sRGB.
-    let labs = lab_pixels(image);
+    let labs = oklab_pixels(image);
     let mut areas = vec![0_usize; count];
     let mut sums = vec![[0.0_f64; 3]; count];
     for (&label, lab) in labels.iter().zip(labs) {
@@ -990,18 +992,18 @@ fn region_mean_raster_for(image: &Raster, labels: &[u32], count: usize) -> Raste
         sums[region][1] += lab.a as f64;
         sums[region][2] += lab.b as f64;
     }
-    let means: Vec<Lab> = (0..count)
+    let means: Vec<Oklab> = (0..count)
         .map(|region| {
             let divisor = areas[region].max(1) as f64;
-            Lab {
+            Oklab {
                 l: (sums[region][0] / divisor) as f32,
                 a: (sums[region][1] / divisor) as f32,
                 b: (sums[region][2] / divisor) as f32,
             }
         })
         .collect();
-    let mean_pixels: Vec<Lab> = labels.iter().map(|&label| means[label as usize]).collect();
-    let pixels = lab_pixels_to_rgb(&mean_pixels);
+    let mean_pixels: Vec<Oklab> = labels.iter().map(|&label| means[label as usize]).collect();
+    let pixels = oklab_values_to_rgb(&mean_pixels);
     Raster::new(image.width, image.height, pixels)
 }
 
@@ -1414,7 +1416,7 @@ fn boundary_sleeve_assignment(
     labels: &[u32],
     label: u32,
     stable: &[bool],
-    parent_lab: &[Lab],
+    parent_lab: &[Oklab],
     roles: &EdgeRoles,
     width: usize,
     height: usize,
@@ -1529,7 +1531,7 @@ fn boundary_sleeve_assignment(
     for first_index in 0..candidates.len() - 1 {
         let (first, first_support) = candidates[first_index];
         for &(second, second_support) in candidates.iter().skip(first_index + 1) {
-            if delta_e2000(parent_lab[first as usize], parent_lab[second as usize]) < 4.6 {
+            if delta_e_ok(parent_lab[first as usize], parent_lab[second as usize]) < 4.6 {
                 continue;
             }
             let mut both = 0_usize;
@@ -1582,7 +1584,7 @@ fn boundary_sleeve_assignment(
         .max(parent_lab[second as usize].l);
     let mut lightness: Vec<_> = component
         .iter()
-        .map(|&index| rgb_to_lab(image.pixels[index]).l)
+        .map(|&index| rgb_to_oklab(image.pixels[index]).l)
         .collect();
     let middle_lightness = median_channel(&mut lightness);
     // A fragmented highlight can have no stable owner of its own. It must
@@ -1606,8 +1608,8 @@ fn boundary_sleeve_assignment(
                     let (amount, _, _) = pair_mixture(
                         image.pixels[index],
                         image.pixels[index],
-                        lab_to_rgb(parent_lab[first as usize]),
-                        lab_to_rgb(parent_lab[second as usize]),
+                        oklab_to_rgb(parent_lab[first as usize]),
+                        oklab_to_rgb(parent_lab[second as usize]),
                     );
                     amount >= 0.5
                 }
@@ -1653,7 +1655,7 @@ fn correct_antialias_partition(
     }
     let mut stable = vec![false; count];
     let mut parents = vec![[0.0_f32; 3]; count];
-    let mut parent_lab = vec![Lab::default(); count];
+    let mut parent_lab = vec![Oklab::default(); count];
     for label in 0..count {
         if core_values[label].len() < 3 {
             continue;
@@ -1666,10 +1668,10 @@ fn correct_antialias_partition(
                 .collect();
             parents[label][channel] = median_channel(&mut values);
         }
-        parent_lab[label] = rgb_to_lab(parents[label]);
+        parent_lab[label] = rgb_to_oklab(parents[label]);
     }
 
-    let source_lab = lab_pixels(image);
+    let source_lab = oklab_pixels(image);
     let mut antialias = vec![false; labels.len()];
     let mut inspect = |first: usize, second: usize| {
         let first_label = labels[first] as usize;
@@ -1677,7 +1679,7 @@ fn correct_antialias_partition(
         if first_label == second_label || !stable[first_label] || !stable[second_label] {
             return;
         }
-        if delta_e2000(parent_lab[first_label], parent_lab[second_label]) < 4.6 {
+        if delta_e_ok(parent_lab[first_label], parent_lab[second_label]) < 4.6 {
             return;
         }
         let (alpha_first, alpha_second, error) = pair_mixture(
@@ -1686,7 +1688,7 @@ fn correct_antialias_partition(
             parents[first_label],
             parents[second_label],
         );
-        let across = delta_e2000(source_lab[first], source_lab[second]);
+        let across = delta_e_ok(source_lab[first], source_lab[second]);
         let intermediate = (alpha_first > 0.05 && alpha_first < 0.95)
             || (alpha_second > 0.05 && alpha_second < 0.95);
         let explained = error <= 1.5
@@ -1696,10 +1698,10 @@ fn correct_antialias_partition(
         if !explained {
             return;
         }
-        if delta_e2000(source_lab[first], parent_lab[first_label]) > 1.0 && alpha_first < 0.98 {
+        if delta_e_ok(source_lab[first], parent_lab[first_label]) > 1.0 && alpha_first < 0.98 {
             antialias[first] = true;
         }
-        if delta_e2000(source_lab[second], parent_lab[second_label]) > 1.0 && alpha_second > 0.02 {
+        if delta_e_ok(source_lab[second], parent_lab[second_label]) > 1.0 && alpha_second > 0.02 {
             antialias[second] = true;
         }
     };
@@ -1948,13 +1950,13 @@ fn correct_antialias_partition(
             .iter()
             .flat_map(|&label| components[label].iter())
             .filter(|&&index| {
-                source_lab[index].l < 25.0 && source_lab[index].l + 6.0 < minimum_parent_lightness
+                source_lab[index].l < 35.3 && source_lab[index].l + 6.0 < minimum_parent_lightness
             })
             .count();
         let group_near_black = group
             .iter()
             .flat_map(|&label| components[label].iter())
-            .filter(|&&index| source_lab[index].l < 25.0)
+            .filter(|&&index| source_lab[index].l < 35.3)
             .count();
         let mut accepted_labels = Vec::new();
         if area > 4 {
@@ -1973,7 +1975,7 @@ fn correct_antialias_partition(
                     let component = &components[label];
                     let near_black = component
                         .iter()
-                        .filter(|&&index| source_lab[index].l < 25.0)
+                        .filter(|&&index| source_lab[index].l < 35.3)
                         .count();
                     near_black * 2 < component.len()
                 }));
@@ -1996,7 +1998,7 @@ fn correct_antialias_partition(
                     let dark_extremum = component
                         .iter()
                         .filter(|&&index| {
-                            source_lab[index].l < 25.0
+                            source_lab[index].l < 35.3
                                 && source_lab[index].l + 6.0 < minimum_parent_lightness
                         })
                         .count();
@@ -2046,7 +2048,7 @@ fn correct_antialias_partition(
         if dark_support * 4 < component.len() * 3 {
             continue;
         }
-        if median_lightness >= 50.0 {
+        if median_lightness >= 56.9 {
             continue;
         }
         dark_outline_candidate[label] = true;
@@ -2073,7 +2075,7 @@ fn correct_antialias_partition(
                 .count();
             near_black += component
                 .iter()
-                .filter(|&&index| source_lab[index].l < 25.0)
+                .filter(|&&index| source_lab[index].l < 35.3)
                 .count();
             for &neighbour in &component_adjacency[label] {
                 let neighbour = neighbour as usize;
@@ -2090,7 +2092,7 @@ fn correct_antialias_partition(
         for &label in &group {
             for (&candidate, &contact) in &contacts[label] {
                 let candidate = candidate as usize;
-                if parent_lab[candidate].l < 25.0 {
+                if parent_lab[candidate].l < 35.3 {
                     *stable_contacts.entry(candidate).or_default() += contact;
                 }
             }
@@ -2108,7 +2110,7 @@ fn correct_antialias_partition(
             stable_dark_faces
                 .iter()
                 .copied()
-                .filter(|&(label, _)| parent_lab[label].l < 25.0)
+                .filter(|&(label, _)| parent_lab[label].l < 35.3)
                 .max_by(|left, right| left.1.cmp(&right.1).then_with(|| right.0.cmp(&left.0)))
                 .map(|(label, _)| label)
         } else {
@@ -2119,7 +2121,7 @@ fn correct_antialias_partition(
             if stable_owner.is_some() {
                 break;
             }
-            if dark_outline_lightness[label] >= 25.0 {
+            if dark_outline_lightness[label] >= 35.3 {
                 continue;
             }
             let replace = owner
@@ -2148,7 +2150,7 @@ fn correct_antialias_partition(
     // colour is perceptually the same. Propagate only through already proven
     // microfaces so a short run of raster samples reaches the durable face;
     // a dark outline has no colour-compatible owner and remains independent.
-    let mut component_source_lab = vec![Lab::default(); count];
+    let mut component_source_lab = vec![Oklab::default(); count];
     let mut same_material_candidate = vec![false; count];
     for label in 0..count {
         let component = &components[label];
@@ -2187,7 +2189,7 @@ fn correct_antialias_partition(
         if box_width.min(box_height) > 6 {
             continue;
         }
-        component_source_lab[label] = Lab {
+        component_source_lab[label] = Oklab {
             l: median_channel(&mut lightness),
             a: median_channel(&mut green_red),
             b: median_channel(&mut blue_yellow),
@@ -2255,10 +2257,10 @@ fn correct_antialias_partition(
             }
             let face = parent_lab[owner as usize];
             let overshoot = component_source_lab[label].l - face.l;
-            if face.l < 25.0 || !(0.0..=12.0).contains(&overshoot) {
+            if face.l < 35.3 || !(0.0..=12.0).contains(&overshoot) {
                 continue;
             }
-            let error = delta_e2000(component_source_lab[label], face);
+            let error = delta_e_ok(component_source_lab[label], face);
             if error > 12.0 {
                 continue;
             }
@@ -2355,7 +2357,7 @@ fn correct_antialias_partition(
                 if contact * 2 < component.len() {
                     continue;
                 }
-                let error = delta_e2000(component_source_lab[label], parent_lab[owner as usize]);
+                let error = delta_e_ok(component_source_lab[label], parent_lab[owner as usize]);
                 let owner_lab = parent_lab[owner as usize];
                 // Saturated colour transitions can move farther in chroma
                 // than in lightness.  A substantial native-width shoulder
@@ -2363,13 +2365,13 @@ fn correct_antialias_partition(
                 // owner's raster coverage, but isolated coloured marks must
                 // retain the stricter same-material limit.
                 let strongly_attached_light_shoulder = component.len() >= 8
-                    && component_source_lab[label].l >= 50.0
+                    && component_source_lab[label].l >= 56.9
                     && (component_source_lab[label].l - owner_lab.l).abs() <= 6.0
                     && contact * 3 >= component.len() * 2;
                 let maximum_error = if strongly_attached_light_shoulder {
-                    8.5
+                    7.5
                 } else {
-                    7.2
+                    6.2
                 };
                 if error > maximum_error {
                     continue;
@@ -2466,7 +2468,7 @@ fn correct_antialias_partition(
         for first_index in 0..candidates.len() - 1 {
             let first = candidates[first_index].0;
             for &(second, _) in candidates.iter().skip(first_index + 1) {
-                if delta_e2000(parent_lab[first as usize], parent_lab[second as usize]) < 4.6 {
+                if delta_e_ok(parent_lab[first as usize], parent_lab[second as usize]) < 4.6 {
                     continue;
                 }
                 let mut alpha = Vec::<f32>::with_capacity(component.len());
@@ -2635,12 +2637,12 @@ fn correct_antialias_partition(
     }
 }
 
-/// Absolute Lab histogram quantization without transitive spatial chaining.
+/// Absolute Oklab histogram quantization without transitive spatial chaining.
 /// Only equal-palette four-connected samples become one geometry owner.
 pub fn segment(image: &Raster, roles: &EdgeRoles, config: &Config) -> Segmentation {
     let segment_started = std::time::Instant::now();
     let mut substage_started = segment_started;
-    let source_lab = lab_pixels(image);
+    let source_lab = oklab_pixels(image);
     let maximum_area = effective_minimum_area(config, image.width, image.height);
     let local_area = local_area_map(roles, config, maximum_area);
     if cfg!(feature = "diagnostics") && config.retain_diagnostics {
@@ -2729,7 +2731,7 @@ pub fn segment(image: &Raster, roles: &EdgeRoles, config: &Config) -> Segmentati
         image.height,
         palette_map
             .iter()
-            .map(|&palette| lab_to_rgb(palette_lab[palette as usize]))
+            .map(|&palette| oklab_to_rgb(palette_lab[palette as usize]))
             .collect(),
     );
     let correction = correct_antialias_partition(image, &labels, count, roles);
@@ -2946,13 +2948,13 @@ pub(crate) fn split_adaptive_paint_patches_with_protected(
     if count == 0 || image.width != segmentation.width || image.height != segmentation.height {
         return (0..count).collect();
     }
-    let image_lab = lab_pixels(image);
-    let boundary_lab = lab_pixels(boundary_image);
+    let image_lab = oklab_pixels(image);
+    let boundary_lab = oklab_pixels(boundary_image);
     let mut pixels = vec![Vec::<usize>::new(); count];
     for (index, &label) in segmentation.labels.iter().enumerate() {
         pixels[label as usize].push(index);
     }
-    let median_labs: Vec<Lab> = pixels
+    let median_labs: Vec<Oklab> = pixels
         .iter()
         .map(|indices| {
             let mut selected: Vec<usize> = indices
@@ -2992,7 +2994,7 @@ pub(crate) fn split_adaptive_paint_patches_with_protected(
                     values[middle]
                 }
             };
-            Lab {
+            Oklab {
                 l: channel_median(0),
                 a: channel_median(1),
                 b: channel_median(2),
@@ -3019,7 +3021,7 @@ pub(crate) fn split_adaptive_paint_patches_with_protected(
                 };
                 boundaries.entry(key).or_default().push((
                     index,
-                    delta_e2000(boundary_lab[index], boundary_lab[neighbour]),
+                    delta_e_ok(boundary_lab[index], boundary_lab[neighbour]),
                 ));
             }
         }
@@ -3038,7 +3040,7 @@ pub(crate) fn split_adaptive_paint_patches_with_protected(
                 };
                 boundaries.entry(key).or_default().push((
                     index,
-                    delta_e2000(boundary_lab[index], boundary_lab[neighbour]),
+                    delta_e_ok(boundary_lab[index], boundary_lab[neighbour]),
                 ));
             }
         }
@@ -3097,7 +3099,7 @@ pub(crate) fn split_adaptive_paint_patches_with_protected(
             };
             let p90 = percentile_f64(&deltas, 0.90);
             if median_delta <= 1.5 && p90 <= 3.0 {
-                let separation = delta_e2000(median_labs[first], median_labs[second]);
+                let separation = delta_e_ok(median_labs[first], median_labs[second]);
                 #[cfg(feature = "diagnostics")]
                 adaptive_run_diagnostics.push(serde_json::json!({
                     "left": first,
@@ -3330,7 +3332,7 @@ pub fn regularize_boundaries(
     assert_eq!(image.pixels.len(), segmentation.labels.len());
     let width = image.width;
     let height = image.height;
-    let reference_lab = lab_pixels(edge_reference);
+    let reference_lab = oklab_pixels(edge_reference);
     let reference_at = |x: isize, y: isize| {
         let px = x.clamp(0, width.saturating_sub(1) as isize) as usize;
         let py = y.clamp(0, height.saturating_sub(1) as isize) as usize;
@@ -3418,7 +3420,7 @@ pub fn regularize_boundaries(
         .map(|(&line, &barrier)| line || barrier)
         .collect();
 
-    let lab = lab_pixels(image);
+    let lab = oklab_pixels(image);
     let count = segmentation.regions.len();
     let mut areas = vec![0_usize; count];
     let mut sums = vec![[0.0_f64; 3]; count];
@@ -3429,10 +3431,10 @@ pub fn regularize_boundaries(
         sums[owner][1] += sample.a as f64;
         sums[owner][2] += sample.b as f64;
     }
-    let means: Vec<Lab> = (0..count)
+    let means: Vec<Oklab> = (0..count)
         .map(|owner| {
             let area = areas[owner].max(1) as f64;
-            Lab {
+            Oklab {
                 l: (sums[owner][0] / area) as f32,
                 a: (sums[owner][1] / area) as f32,
                 b: (sums[owner][2] / area) as f32,
@@ -3460,7 +3462,7 @@ pub fn regularize_boundaries(
         let current_data: Vec<f32> = current
             .iter()
             .enumerate()
-            .map(|(index, &owner)| delta_e2000(lab[index], means[owner as usize]))
+            .map(|(index, &owner)| delta_e_ok(lab[index], means[owner as usize]))
             .collect();
         let mut output = current.clone();
         for index in 0..current.len() {
@@ -3498,7 +3500,7 @@ pub fn regularize_boundaries(
                 if current_support < 2 || candidate_support < 2 {
                     continue;
                 }
-                let data = delta_e2000(lab[index], means[candidate as usize]);
+                let data = delta_e_ok(lab[index], means[candidate as usize]);
                 if data > current_data[index] + budget {
                     continue;
                 }
@@ -3559,7 +3561,7 @@ pub fn refine_thin_paint_ownership(
     let original = segmentation.labels.clone();
     let count = segmentation.regions.len();
     let pixels = component_pixels(&original, count);
-    let source_lab = lab_pixels(source);
+    let source_lab = oklab_pixels(source);
     let mut prototype_rgb = vec![[0.0_f32; 3]; count];
     let mut prototype_seen = vec![false; count];
     for (index, &label) in original.iter().enumerate() {
@@ -3569,7 +3571,7 @@ pub fn refine_thin_paint_ownership(
             prototype_seen[owner] = true;
         }
     }
-    let prototypes: Vec<Lab> = prototype_rgb.iter().copied().map(rgb_to_lab).collect();
+    let prototypes: Vec<Oklab> = prototype_rgb.iter().copied().map(rgb_to_oklab).collect();
     let has_interior: Vec<bool> = (0..count)
         .map(|label| {
             has_core(
@@ -3736,7 +3738,7 @@ pub fn refine_thin_paint_ownership(
         let mean_error = |owner: u32| {
             group_pixels
                 .iter()
-                .map(|&index| delta_e2000(source_lab[index], prototypes[owner as usize]))
+                .map(|&index| delta_e_ok(source_lab[index], prototypes[owner as usize]))
                 .sum::<f32>()
                 / group_pixels.len().max(1) as f32
         };
@@ -3800,7 +3802,7 @@ pub fn refine_thin_paint_ownership(
                     if owner == u32::MAX {
                         continue;
                     }
-                    let error = delta_e2000(source_lab[index], prototypes[owner as usize]);
+                    let error = delta_e_ok(source_lab[index], prototypes[owner as usize]);
                     if best
                         .map(|current| {
                             error < current.0 || (error == current.0 && owner < current.1)
@@ -3920,7 +3922,7 @@ pub fn refine_thin_paint_ownership(
                         original[py as usize * segmentation.width + px as usize] as usize;
                     if neighbour <= label
                         || !phase_candidate[neighbour]
-                        || delta_e2000(prototypes[label], prototypes[neighbour]) > 3.0
+                        || delta_e_ok(prototypes[label], prototypes[neighbour]) > 3.0
                         || !phase_contacts[label]
                             .keys()
                             .any(|owner| phase_contacts[neighbour].contains_key(owner))
@@ -4021,7 +4023,7 @@ pub fn refine_thin_paint_ownership(
             .collect::<Vec<_>>();
         let two_sided = durable_parents.iter().enumerate().any(|(index, &first)| {
             durable_parents.iter().skip(index + 1).any(|&second| {
-                delta_e2000(prototypes[first as usize], prototypes[second as usize]) >= 4.6
+                delta_e_ok(prototypes[first as usize], prototypes[second as usize]) >= 4.6
             })
         });
         if !two_sided {
@@ -4032,8 +4034,8 @@ pub fn refine_thin_paint_ownership(
             phase_owner[label] = phase_contacts[label]
                 .iter()
                 .min_by(|(first, first_contact), (second, second_contact)| {
-                    delta_e2000(prototypes[label], prototypes[**first as usize])
-                        .total_cmp(&delta_e2000(
+                    delta_e_ok(prototypes[label], prototypes[**first as usize])
+                        .total_cmp(&delta_e_ok(
                             prototypes[label],
                             prototypes[**second as usize],
                         ))
@@ -4049,9 +4051,9 @@ pub fn refine_thin_paint_ownership(
                     // the background just because it is the only directly
                     // touching durable face. Retain the phase when its
                     // better matching parent is not locally reachable.
-                    let error = delta_e2000(prototypes[label], prototypes[owner as usize]);
+                    let error = delta_e_ok(prototypes[label], prototypes[owner as usize]);
                     durable_parents.iter().all(|&parent| {
-                        error <= delta_e2000(prototypes[label], prototypes[parent as usize]) + 1e-4
+                        error <= delta_e_ok(prototypes[label], prototypes[parent as usize]) + 1e-4
                     })
                 });
         }
@@ -4172,7 +4174,7 @@ pub fn refine_thin_paint_ownership(
                         if owner == label as u32 || !has_interior[owner as usize] {
                             continue;
                         }
-                        let error = delta_e2000(source_lab[index], prototypes[owner as usize]);
+                        let error = delta_e_ok(source_lab[index], prototypes[owner as usize]);
                         // Python visits up, down, left, right and updates only
                         // on strict improvement; retaining the earlier owner
                         // is its deterministic tie rule.
@@ -4181,7 +4183,7 @@ pub fn refine_thin_paint_ownership(
                         }
                     }
                     if let Some((owner, error)) = best {
-                        let current = delta_e2000(source_lab[index], prototypes[label]);
+                        let current = delta_e_ok(source_lab[index], prototypes[label]);
                         if error + 1e-4 < current {
                             selected.push((position, owner));
                         }
@@ -4294,7 +4296,7 @@ mod tests {
     #[test]
     fn source_highlight_is_not_quantized_into_its_incident_paint() {
         let mut colours = vec![
-            Lab {
+            Oklab {
                 l: 88.0,
                 a: 0.0,
                 b: 0.0
@@ -4302,7 +4304,7 @@ mod tests {
             100
         ];
         colours.extend(vec![
-            Lab {
+            Oklab {
                 l: 94.0,
                 a: 0.0,
                 b: 0.0
@@ -4321,17 +4323,17 @@ mod tests {
         let config = Config::default();
         for reversed_palette in [false, true] {
             let mut palette = vec![
-                Lab {
+                Oklab {
                     l: 20.0,
                     a: 0.0,
                     b: 0.0,
                 },
-                Lab {
+                Oklab {
                     l: 70.0,
                     a: 0.0,
                     b: 0.0,
                 },
-                Lab {
+                Oklab {
                     l: 90.0,
                     a: 0.0,
                     b: 0.0,
@@ -4385,7 +4387,7 @@ mod tests {
                 let source = (0..81)
                     .map(|i| {
                         let x = i % 9;
-                        Lab {
+                        Oklab {
                             l: if x == 4 {
                                 if bright {
                                     80.0
@@ -4409,7 +4411,7 @@ mod tests {
             }
         }
         let shaded = (0..81)
-            .map(|i| Lab {
+            .map(|i| Oklab {
                 l: if i % 9 == 4 {
                     30.0
                 } else if i % 9 < 4 {
@@ -4427,7 +4429,7 @@ mod tests {
     #[test]
     fn tonal_connectivity_crosses_palette_shades_without_protecting_edges() {
         for bright in [false, true] {
-            let palette = [25.0, 45.0, 90.0].map(|l| Lab {
+            let palette = [25.0, 45.0, 90.0].map(|l| Oklab {
                 l: if bright { 100.0 - l } else { l },
                 a: 0.0,
                 b: 0.0,
@@ -4466,7 +4468,7 @@ mod tests {
     #[test]
     fn tonal_connectivity_keeps_the_weak_side_of_a_shaded_line() {
         for bright in [false, true] {
-            let palette = [20.0, 30.0, 70.0, 90.0].map(|l| Lab {
+            let palette = [20.0, 30.0, 70.0, 90.0].map(|l| Oklab {
                 l: if bright { 100.0 - l } else { l },
                 a: 0.0,
                 b: 0.0,
@@ -4486,8 +4488,8 @@ mod tests {
         let config = Config::default();
         for seed in 0..24_usize {
             let (width, height) = (17, 13);
-            let palette: Vec<Lab> = (0..5)
-                .map(|i| Lab {
+            let palette: Vec<Oklab> = (0..5)
+                .map(|i| Oklab {
                     l: 45.0 + i as f32 * 2.0,
                     a: 2.0,
                     b: 1.0,
@@ -4496,7 +4498,7 @@ mod tests {
             let original: Vec<u32> = (0..width * height)
                 .map(|i| ((i * 17 + i * i * (seed + 1) + seed * 31) % 5) as u32)
                 .collect();
-            let source: Vec<Lab> = original.iter().map(|&i| palette[i as usize]).collect();
+            let source: Vec<Oklab> = original.iter().map(|&i| palette[i as usize]).collect();
             let mut dense = original.clone();
             let mut indexed = original;
             let local_area = vec![8; width * height];
@@ -4687,7 +4689,7 @@ mod tests {
             );
             let mut roles = classify(&image);
             roles.visible_ridge_centres.fill(false);
-            let parent_lab = colours.map(rgb_to_lab);
+            let parent_lab = colours.map(rgb_to_oklab);
             boundary_sleeve_assignment(
                 &image,
                 &component,
@@ -5232,8 +5234,8 @@ mod tests {
         // same-material chroma tolerance.
         let durable = [0.778_05, 0.352_321, 0.363_366];
         let shoulder = [0.916_967, 0.347_291, 0.317_088];
-        let error = delta_e2000(rgb_to_lab(durable), rgb_to_lab(shoulder));
-        assert!((7.2..=8.5).contains(&error));
+        let error = delta_e_ok(rgb_to_oklab(durable), rgb_to_oklab(shoulder));
+        assert!((6.2..=7.5).contains(&error));
 
         let mut image = Raster::blank(width, height, durable);
         let mut labels = vec![0_u32; width * height];
@@ -5298,7 +5300,7 @@ mod tests {
         let face = [0.450_583, 0.340_051, 0.353_434];
         let shoulder = [0.510_028, 0.431_782, 0.453_044];
         let outline = [0.03; 3];
-        let error = delta_e2000(rgb_to_lab(face), rgb_to_lab(shoulder));
+        let error = delta_e_ok(rgb_to_oklab(face), rgb_to_oklab(shoulder));
         assert!(error > 7.2 && error <= 12.0);
 
         let mut image = Raster::blank(width, height, face);

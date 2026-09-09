@@ -106,7 +106,7 @@ The output directory contains:
 - `missing-edges.png` and `extra-edges.png`: primary-tolerance failures;
 - `overlay.png`: reference edges in magenta and SVG edges in cyan;
 - `boundary-distance.png`: reference-edge distance to the SVG edge;
-- `delta-e00.png`: colour-error heat map;
+- `delta-e-ok.png`: colour-error heat map;
 - `thin-lines-reference.png`, `thin-lines-svg.png`, and
   `thin-lines-missing.png`: local-contrast masks for narrow dark seams and
   contours, including strokes absent from the SVG.
@@ -114,9 +114,9 @@ The output directory contains:
 The primary edge tolerance is 2 x4 pixels, or 0.5 source pixels. The report
 also contains recall, precision, and F1 at 1, 2, 4, and 8 x4 pixels, symmetric
 and direction-separated boundary distance (mean/p95/p99/max) in source-pixel
-units, whole-image fidelity, and DeltaE00 measured inside an 8 x4 pixel
+units, whole-image fidelity, and 100-scaled OKLab distance measured inside an 8 x4 pixel
 reference-boundary band. Whole-image and boundary-band colour reports include
-the fraction of pixels over DeltaE00 5 and 10, which makes broad missing or
+the fraction of pixels over 100-scaled OKLab distance 5 and 10, which makes broad missing or
 invented highlights visible even when the mean error is small.
 
 The thin-line detector defaults to a 9 x4-pixel local window, 0.045 luminance
@@ -128,7 +128,7 @@ threshold 0.20, adjustable with `--dark-core-luma-threshold`), so a nearby
 fill edge cannot substitute for a deleted black/dark outline.
 
 Local colour failures are not reduced to the mean alone: the report retains
-the worst tile's boundary-band DeltaE00 p90 and the tail values (p90/p99) of
+the worst tile's boundary-band 100-scaled OKLab distance p90 and the tail values (p90/p99) of
 the whole-image DeltaE distribution. These values are explicit terms in the
 post-hoc selection report, so a narrow highlight or seam is not hidden by a
 better global mean.

@@ -38,10 +38,13 @@ struct Arguments {
     /// Additional passes can remove more internal contours at an extra time cost (1..=8).
     #[arg(long, default_value_t = 1)]
     paint_merge_passes: usize,
+    /// Palette tolerance multiplier in units of 100 * OKLab distance.
+    #[arg(long, default_value_t = Config::default().oklab_palette_threshold_scale)]
+    oklab_palette_threshold_scale: f32,
     /// Rayon workers; zero selects min(4, half the detected CPU count).
     #[arg(long, default_value_t = 0)]
     threads: usize,
-    /// Render the completed SVG and report DeltaE00/SSIM diagnostics.
+    /// Render the completed SVG and report 100-scaled OKLab distance/SSIM diagnostics.
     #[cfg(feature = "diagnostics")]
     #[arg(long)]
     quality_metrics: bool,
@@ -84,6 +87,7 @@ fn run() -> picvec::Result<()> {
         adaptive_refinement: !arguments.no_adaptive_refinement,
         adaptive_svg_budget_bytes,
         paint_merge_passes: arguments.paint_merge_passes,
+        oklab_palette_threshold_scale: arguments.oklab_palette_threshold_scale,
         rayon_threads: arguments.threads,
         compute_quality_metrics,
         retain_diagnostics,

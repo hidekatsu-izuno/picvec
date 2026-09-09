@@ -3,8 +3,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use rayon::prelude::*;
 use serde::Serialize;
 
-use crate::color::{delta_e2000, delta_e76, rgb_to_lab, Lab};
-use crate::edge::{dilate, dilate_square, erode, lab_pixels, EdgeRoles};
+use crate::color::{delta_e_ok, rgb_to_oklab, Oklab};
+use crate::edge::{dilate, dilate_square, erode, oklab_pixels, EdgeRoles};
 use crate::geometry::{fitted_structural_open_path_data_with_tangents, Point};
 use crate::raster::{percentile, Raster};
 
@@ -135,7 +135,7 @@ impl StructuralInk {
                 corrections.push(None);
                 return true;
             };
-            let colour = rgb_to_lab(stroke.color);
+            let colour = rgb_to_oklab(stroke.color);
             // Search only within the allowed geometric displacement; a remote
             // similarly coloured object cannot justify removing this stroke.
             let radius = corridor.ceil() as isize;
@@ -147,7 +147,7 @@ impl StructuralInk {
                             y: p.y + dy as f32,
                         };
                         p.distance(q) <= corridor + 0.5
-                            && delta_e2000(colour, rgb_to_lab(paint.pixels[index(q)])) <= 6.9
+                            && delta_e_ok(colour, rgb_to_oklab(paint.pixels[index(q)])) <= 6.9
                     })
                 })
             });
@@ -243,9 +243,9 @@ impl StructuralInk {
                 let direction = ((q.x - p.x) / distance, (q.y - p.y) / distance);
                 if t.0 * direction.0 + t.1 * direction.1 < 0.7
                     || -u.0 * direction.0 - u.1 * direction.1 < 0.7
-                    || delta_e2000(
-                        rgb_to_lab(dotted[owner].color),
-                        rgb_to_lab(dotted[other].color),
+                    || delta_e_ok(
+                        rgb_to_oklab(dotted[owner].color),
+                        rgb_to_oklab(dotted[other].color),
                     ) > 15.0
                 {
                     continue;
@@ -459,7 +459,7 @@ fn remove_small_components(mask: &mut [bool], width: usize, height: usize, minim
     }
 }
 
-fn local_lab_mean(lab: &[Lab], width: usize, height: usize, radius: usize) -> Vec<Lab> {
+fn local_lab_mean(lab: &[Oklab], width: usize, height: usize, radius: usize) -> Vec<Oklab> {
     let padded_width = width + 2 * radius;
     let padded_height = height + 2 * radius;
     let stride = padded_width + 1;
@@ -492,7 +492,7 @@ fn local_lab_mean(lab: &[Lab], width: usize, height: usize, radius: usize) -> Ve
             let bottom_left = integral[y1 * stride + x0];
             let bottom_right = integral[y1 * stride + x1];
             let area = ((x1 - x0) * (y1 - y0)).max(1) as f64;
-            Lab {
+            Oklab {
                 l: ((bottom_right[0] - top_right[0] - bottom_left[0] + top_left[0]) / area) as f32,
                 a: ((bottom_right[1] - top_right[1] - bottom_left[1] + top_left[1]) / area) as f32,
                 b: ((bottom_right[2] - top_right[2] - bottom_left[2] + top_left[2]) / area) as f32,
@@ -525,11 +525,11 @@ fn connected_components(mask: &[bool], width: usize, height: usize) -> Vec<Vec<u
     result
 }
 
-fn median_lab(lab: &[Lab], indices: &[usize]) -> Lab {
+fn median_lab(lab: &[Oklab], indices: &[usize]) -> Oklab {
     let mut lightness: Vec<f32> = indices.iter().map(|&index| lab[index].l).collect();
     let mut a: Vec<f32> = indices.iter().map(|&index| lab[index].a).collect();
     let mut b: Vec<f32> = indices.iter().map(|&index| lab[index].b).collect();
-    Lab {
+    Oklab {
         l: percentile(std::mem::take(&mut lightness), 0.5),
         a: percentile(std::mem::take(&mut a), 0.5),
         b: percentile(std::mem::take(&mut b), 0.5),
@@ -563,11 +563,11 @@ fn binary_propagation(seeds: &[bool], support: &[bool], width: usize, height: us
 }
 
 /// Match structural_ink._complete_same_colour_silhouette_holes. Enclosed
-/// raster gaps are filled only through pixels whose Lab colour belongs to
+/// raster gaps are filled only through pixels whose Oklab colour belongs to
 /// the adjacent inner rim; genuinely different counters stay open.
 fn complete_same_colour_silhouette_holes(
     silhouettes: &[bool],
-    lab: &[Lab],
+    lab: &[Oklab],
     width: usize,
     height: usize,
     maximum_delta_e: f32,
@@ -689,7 +689,7 @@ fn complete_same_colour_silhouette_holes(
             for &index in &hole {
                 let global =
                     (minimum_y + index / local_width) * width + minimum_x + index % local_width;
-                support[index] = delta_e76(lab[global], rim_colour) <= maximum_delta_e;
+                support[index] = delta_e_ok(lab[global], rim_colour) <= maximum_delta_e;
             }
             let mut selected = vec![false; component_mask.len()];
             let mut queue = VecDeque::new();
@@ -725,7 +725,12 @@ fn complete_same_colour_silhouette_holes(
 fn source_structural_lines(source: &Raster) -> (Vec<bool>, Vec<bool>) {
     let width = source.width;
     let height = source.height;
-    let lab: Vec<Lab> = source.pixels.par_iter().copied().map(rgb_to_lab).collect();
+    let lab: Vec<Oklab> = source
+        .pixels
+        .par_iter()
+        .copied()
+        .map(rgb_to_oklab)
+        .collect();
     let local = local_lab_mean(&lab, width, height, 4);
     let lightness: Vec<f32> = lab.iter().map(|sample| sample.l).collect();
     let local_darkness: Vec<f32> = lab
@@ -736,7 +741,7 @@ fn source_structural_lines(source: &Raster) -> (Vec<bool>, Vec<bool>) {
     let salience: Vec<f32> = lab
         .iter()
         .zip(&local)
-        .map(|(&sample, &mean)| delta_e76(sample, mean))
+        .map(|(&sample, &mean)| delta_e_ok(sample, mean))
         .collect();
     let bilateral: Vec<f32> = (0..lab.len())
         .into_par_iter()
@@ -754,9 +759,9 @@ fn source_structural_lines(source: &Raster) -> (Vec<bool>, Vec<bool>) {
                 .map(|(dx, dy)| {
                     let first = sample(dx * 2, dy * 2);
                     let second = sample(-dx * 2, -dy * 2);
-                    let first_distance = delta_e76(centre, first);
-                    let second_distance = delta_e76(centre, second);
-                    let side_distance = delta_e76(first, second);
+                    let first_distance = delta_e_ok(centre, first);
+                    let second_distance = delta_e_ok(centre, second);
+                    let side_distance = delta_e_ok(first, second);
                     let minimum = first_distance.min(second_distance);
                     if side_distance <= 0.75 * minimum + 2.5 {
                         (minimum - 0.45 * side_distance).max(0.0)
@@ -774,8 +779,8 @@ fn source_structural_lines(source: &Raster) -> (Vec<bool>, Vec<bool>) {
         .collect();
     let strong = percentile(positive, 0.82).clamp(7.0, 18.0);
     let weak = (0.45 * strong).max(3.5);
-    let dark_seed = percentile(lightness.clone(), 0.05).min(30.0);
-    let dark_region = percentile(lightness, 0.12).max(dark_seed + 8.0).min(42.0);
+    let dark_seed = percentile(lightness.clone(), 0.05).min(39.7);
+    let dark_region = percentile(lightness, 0.12).max(dark_seed + 7.0).min(50.0);
     let seeds: Vec<bool> = (0..lab.len())
         .map(|index| {
             bilateral[index] >= strong
@@ -829,7 +834,7 @@ fn source_structural_lines(source: &Raster) -> (Vec<bool>, Vec<bool>) {
         .collect();
     let mut silhouettes = vec![false; lab.len()];
     let mut material_exclusions = vec![false; lab.len()];
-    let mut accepted_components = Vec::<(Vec<usize>, Lab)>::new();
+    let mut accepted_components = Vec::<(Vec<usize>, Oklab)>::new();
     for component in connected_components(&silhouette_proposal, width, height) {
         if component.len() < 32 {
             continue;
@@ -865,7 +870,7 @@ fn source_structural_lines(source: &Raster) -> (Vec<bool>, Vec<bool>) {
         };
         let internal_delta: Vec<f32> = component
             .iter()
-            .map(|&index| delta_e76(lab[index], component_colour))
+            .map(|&index| delta_e_ok(lab[index], component_colour))
             .collect();
         let internal_p90 = percentile(internal_delta.clone(), 0.90);
         let mut outliers = HashSet::<usize>::new();
@@ -895,7 +900,7 @@ fn source_structural_lines(source: &Raster) -> (Vec<bool>, Vec<bool>) {
             .iter()
             .filter(|&&index| !retained_outliers.contains(&index))
             .count();
-        let ring_contrast = delta_e76(component_colour, ring_colour);
+        let ring_contrast = delta_e_ok(component_colour, ring_colour);
         if component_colour.l <= dark_region
             && ring_contrast >= 6.0
             && internal_p90 <= 10.0
@@ -933,7 +938,7 @@ fn source_structural_lines(source: &Raster) -> (Vec<bool>, Vec<bool>) {
             {
                 if !silhouettes[neighbour]
                     && dark_core[neighbour]
-                    && delta_e76(lab[neighbour], seed_colour) <= 15.0
+                    && delta_e_ok(lab[neighbour], seed_colour) <= 15.0
                 {
                     silhouettes[neighbour] = true;
                     queue.push_back(neighbour);
@@ -947,14 +952,14 @@ fn source_structural_lines(source: &Raster) -> (Vec<bool>, Vec<bool>) {
     let mut lines: Vec<bool> = (0..lab.len())
         .map(|index| {
             let chroma = (lab[index].a * lab[index].a + lab[index].b * lab[index].b).sqrt();
-            let chromatic_exclusion = material_exclusions[index] && chroma >= 12.0;
+            let chromatic_exclusion = material_exclusions[index] && chroma >= 4.0;
             candidates[index]
                 && !deep_candidate[index]
                 && !silhouettes[index]
                 && !silhouette_interior[index]
                 && !chromatic_exclusion
                 && (lab[index].l <= dark_region + 5.0
-                    || (chroma >= 12.0
+                    || (chroma >= 4.0
                         && lab[index].l <= dark_region + 25.0
                         && local_darkness[index] >= 2.0))
         })
@@ -1708,7 +1713,7 @@ pub fn analyse(source: &Raster, roles: &mut EdgeRoles) -> (Raster, StructuralInk
     )
 }
 
-fn bilinear_lab_precise(values: &[Lab], width: usize, height: usize, point: [f64; 2]) -> Lab {
+fn bilinear_lab_precise(values: &[Oklab], width: usize, height: usize, point: [f64; 2]) -> Oklab {
     let x = (point[0] - 0.5).clamp(0.0, width.saturating_sub(1) as f64);
     let y = (point[1] - 0.5).clamp(0.0, height.saturating_sub(1) as f64);
     let x0 = x.floor() as usize;
@@ -1717,14 +1722,14 @@ fn bilinear_lab_precise(values: &[Lab], width: usize, height: usize, point: [f64
     let y1 = (y0 + 1).min(height.saturating_sub(1));
     let tx = x - x0 as f64;
     let ty = y - y0 as f64;
-    let interpolate = |channel: fn(Lab) -> f32| {
+    let interpolate = |channel: fn(Oklab) -> f32| {
         let top = channel(values[y0 * width + x0]) as f64 * (1.0 - tx)
             + channel(values[y0 * width + x1]) as f64 * tx;
         let bottom = channel(values[y1 * width + x0]) as f64 * (1.0 - tx)
             + channel(values[y1 * width + x1]) as f64 * tx;
         (top * (1.0 - ty) + bottom * ty) as f32
     };
-    Lab {
+    Oklab {
         l: interpolate(|value| value.l),
         a: interpolate(|value| value.a),
         b: interpolate(|value| value.b),
@@ -1741,8 +1746,8 @@ fn precise_normal_at(points: &[[f64; 2]], index: usize) -> [f64; 2] {
 }
 
 fn residual_line_masks(
-    source_lab: &[Lab],
-    rendered_lab: &[Lab],
+    source_lab: &[Oklab],
+    rendered_lab: &[Oklab],
     source_lines: &[bool],
     width: usize,
     height: usize,
@@ -1761,12 +1766,12 @@ fn residual_line_masks(
                     let px = (x as isize + dx).clamp(0, width.saturating_sub(1) as isize) as usize;
                     let py = (y as isize + dy).clamp(0, height.saturating_sub(1) as isize) as usize;
                     let candidate = rendered_lab[py * width + px];
-                    minimum_delta = minimum_delta.min(delta_e76(reference, candidate));
+                    minimum_delta = minimum_delta.min(delta_e_ok(reference, candidate));
                     minimum_lightness = minimum_lightness.min(candidate.l);
                 }
             }
             minimum_delta <= 4.0
-                || (chroma < 12.0 && reference.l <= 50.0 && minimum_lightness <= reference.l + 4.0)
+                || (chroma < 4.0 && reference.l <= 56.9 && minimum_lightness <= reference.l + 4.0)
         })
         .collect();
     #[cfg(feature = "diagnostics")]
@@ -1847,7 +1852,7 @@ fn mask_fraction_along(
 
 fn classify_boundary_role(
     stroke: &StructuralStroke,
-    source_lab: &[Lab],
+    source_lab: &[Oklab],
     width: usize,
     height: usize,
 ) -> &'static str {
@@ -1877,7 +1882,7 @@ fn classify_boundary_role(
     } else {
         chroma[chroma.len() / 2]
     };
-    if median_chroma >= 12.0 {
+    if median_chroma >= 4.0 {
         "coloured-ridge-on-boundary"
     } else {
         stroke.role
@@ -1895,7 +1900,7 @@ fn classify_boundary_role(
 /// two dark faces is returned to Paint.
 fn paint_owned_dark_boundary_undershoot(
     stroke: &StructuralStroke,
-    source_lab: &[Lab],
+    source_lab: &[Oklab],
     width: usize,
     height: usize,
 ) -> bool {
@@ -1947,8 +1952,8 @@ fn paint_owned_dark_boundary_undershoot(
 
 fn boundary_profile_flags(
     stroke: &StructuralStroke,
-    source_lab: &[Lab],
-    rendered_lab: &[Lab],
+    source_lab: &[Oklab],
+    rendered_lab: &[Oklab],
     width: usize,
     height: usize,
     rendered_core_lightness_excess: f32,
@@ -1973,7 +1978,7 @@ fn boundary_profile_flags(
     let mut debug_values = Vec::<serde_json::Value>::new();
     for (index, &point) in precise_points.iter().enumerate() {
         let [nx, ny] = precise_normal_at(&precise_points, index);
-        let sample = |values: &[Lab], offset: f32| {
+        let sample = |values: &[Oklab], offset: f32| {
             bilinear_lab_precise(
                 values,
                 width,
@@ -2009,7 +2014,7 @@ fn boundary_profile_flags(
         let source_dark_contrast = source_sides[0].l.min(source_sides[1].l) - target.l;
         let source_bright_contrast = target.l - source_sides[0].l.max(source_sides[1].l);
         let source_side_colour_contrast =
-            delta_e2000(source_sides[0], target).min(delta_e2000(source_sides[1], target));
+            delta_e_ok(source_sides[0], target).min(delta_e_ok(source_sides[1], target));
         let source_line_contrast = if bright {
             source_bright_contrast.max(source_side_colour_contrast)
         } else if coloured {
@@ -2031,7 +2036,7 @@ fn boundary_profile_flags(
             rendered_maximum_lightness - rendered_sides[0].l.max(rendered_sides[1].l);
         let minimum_error = rendered_profile
             .iter()
-            .map(|&value| delta_e2000(value, target))
+            .map(|&value| delta_e_ok(value, target))
             .fold(f32::INFINITY, f32::min);
         let has_valley = source_line_contrast >= 4.0;
         let contrast_missing = if bright {
@@ -2199,8 +2204,8 @@ fn graph_endpoint(stroke: &StructuralStroke, at_start: bool) -> (Point, (f32, f3
 /// short, source-supported terminal run that actually reaches such a face.
 fn extend_graph_to_dark_paint(
     strokes: &mut [StructuralStroke],
-    source: &[Lab],
-    paint: &[Lab],
+    source: &[Oklab],
+    paint: &[Oklab],
     width: usize,
     height: usize,
 ) {
@@ -2225,7 +2230,7 @@ fn extend_graph_to_dark_paint(
         {
             continue;
         }
-        let ink = rgb_to_lab(stroke.color).l;
+        let ink = rgb_to_oklab(stroke.color).l;
         let radius = (stroke.width * 0.75 + 0.5).max(1.5);
         let limit = (stroke.width * 4.0).clamp(6.0, 12.0);
         for at_start in [true, false] {
@@ -2234,7 +2239,7 @@ fn extend_graph_to_dark_paint(
                 continue;
             }
             let normal = (-tangent.1, tangent.0);
-            let sample = |image: &[Lab], p: Point, offset: f32| {
+            let sample = |image: &[Oklab], p: Point, offset: f32| {
                 bilinear_lab_precise(
                     image,
                     width,
@@ -2721,7 +2726,7 @@ fn graph_continuation_tangents(strokes: &[StructuralStroke]) -> HashMap<(usize, 
 /// moving graph endpoints; high-turn samples themselves are never scored.
 fn refine_stroke_centerline(
     stroke: &StructuralStroke,
-    source_lab: &[Lab],
+    source_lab: &[Oklab],
     width: usize,
     height: usize,
 ) -> Vec<Point> {
@@ -2733,7 +2738,7 @@ fn refine_stroke_centerline(
     {
         return stroke.points.clone();
     }
-    let target = rgb_to_lab(stroke.color);
+    let target = rgb_to_oklab(stroke.color);
     let tangents = graph_point_tangents(&stroke.points);
     let offsets = [-0.5_f32, -0.25, 0.0, 0.25, 0.5];
     let mut selected = vec![0.0_f32; stroke.points.len()];
@@ -2771,7 +2776,7 @@ fn refine_stroke_centerline(
                     point.y as f64 + offset as f64 * normal.1 as f64,
                 ],
             );
-            delta_e2000(sample, target) + 0.75 * offset * offset
+            delta_e_ok(sample, target) + 0.75 * offset * offset
         };
         let centre_score = score(0.0);
         let (best_offset, best_score) = offsets
@@ -4051,8 +4056,8 @@ pub fn select_missing_with_junctions(
     }
     let width = source.width;
     let height = source.height;
-    let source_lab = lab_pixels(source);
-    let rendered_lab = lab_pixels(rendered);
+    let source_lab = oklab_pixels(source);
+    let rendered_lab = oklab_pixels(rendered);
     let (mut residual_lines, mut measured_lines) = residual_line_masks(
         &source_lab,
         &rendered_lab,
@@ -4531,8 +4536,19 @@ pub fn select_missing_with_junctions(
                 shared_start,
                 shared_end,
             );
+            let mut fitted_width = (stroke.width * width_scale).max(0.4);
+            let mut width_refined = false;
             let (points, path_data) = if let Some((start, end)) = straight {
-                (vec![start, end], None)
+                let refined = (!shared_start && !shared_end && !stroke.role.starts_with("bright"))
+                    .then(|| stroke_model::refine_isolated_ridge(source, start, end, fitted_width))
+                    .flatten();
+                if let Some((start, end, width)) = refined {
+                    fitted_width = width;
+                    width_refined = true;
+                    (vec![start, end], None)
+                } else {
+                    (vec![start, end], None)
+                }
             } else {
                 let fitting_points = refine_stroke_centerline(&stroke, &source_lab, width, height);
                 let path_data = fitted_structural_open_path_data_with_tangents(
@@ -4553,9 +4569,13 @@ pub fn select_missing_with_junctions(
                 path_data,
                 precise_points: None,
                 color,
-                width: (stroke.width * width_scale).max(0.4),
+                width: fitted_width,
                 role: stroke.role,
-                width_samples: stroke.width_samples.clone(),
+                width_samples: if width_refined {
+                    vec![(fitted_width, stroke.width_samples.iter().map(|s| s.1).sum())]
+                } else {
+                    stroke.width_samples.clone()
+                },
             })
         })
         .collect();
@@ -4709,8 +4729,8 @@ mod tests {
             }];
             extend_graph_to_dark_paint(
                 &mut strokes,
-                &lab_pixels(&source),
-                &lab_pixels(&paint),
+                &oklab_pixels(&source),
+                &oklab_pixels(&paint),
                 width,
                 height,
             );
@@ -4760,8 +4780,8 @@ mod tests {
                 }];
                 extend_graph_to_dark_paint(
                     &mut strokes,
-                    &lab_pixels(&source),
-                    &lab_pixels(&paint),
+                    &oklab_pixels(&source),
+                    &oklab_pixels(&paint),
                     width,
                     height,
                 );
@@ -4809,8 +4829,8 @@ mod tests {
             }];
             extend_graph_to_dark_paint(
                 &mut strokes,
-                &lab_pixels(&source),
-                &lab_pixels(&paint),
+                &oklab_pixels(&source),
+                &oklab_pixels(&paint),
                 width,
                 height,
             );
@@ -4939,10 +4959,10 @@ mod tests {
         }
     }
 
-    fn dark_boundary_profile(light_side: f32) -> Vec<Lab> {
+    fn dark_boundary_profile(light_side: f32) -> Vec<Oklab> {
         let width = 18;
         let height = 9;
-        let mut values = vec![Lab::default(); width * height];
+        let mut values = vec![Oklab::default(); width * height];
         for y in 0..height {
             let lightness = if y < 4 {
                 light_side
@@ -4952,7 +4972,7 @@ mod tests {
                 22.0
             };
             for x in 0..width {
-                values[y * width + x] = Lab {
+                values[y * width + x] = Oklab {
                     l: lightness,
                     a: 0.0,
                     b: 0.0,
@@ -5069,7 +5089,7 @@ mod tests {
             source.pixels[4 * 9 + x] = [0.45; 3];
         }
         let stroke = graph_stroke(&(1..8).map(|x| (x as f32 + 0.5, 4.5)).collect::<Vec<_>>());
-        let refined = refine_stroke_centerline(&stroke, &lab_pixels(&source), 9, 9);
+        let refined = refine_stroke_centerline(&stroke, &oklab_pixels(&source), 9, 9);
         assert_eq!(refined[0], stroke.points[0]);
         assert_eq!(
             refined[refined.len() - 1],
@@ -5156,8 +5176,8 @@ mod tests {
         };
         let (missing, supported) = boundary_profile_flags(
             &stroke,
-            &lab_pixels(&source),
-            &lab_pixels(&rendered),
+            &oklab_pixels(&source),
+            &oklab_pixels(&rendered),
             width,
             height,
             5.0,

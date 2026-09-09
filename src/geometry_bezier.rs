@@ -693,13 +693,28 @@ pub(super) fn fit_closed_with_limit(
             local.abs() > 65.0_f32.to_radians()
                 && coarse.abs() > 45.0_f32.to_radians()
                 && local * coarse > 0.0
-                && (1..=2).all(|j| {
-                    turn((i + j) % count, 2).abs() <= local.abs()
-                        && turn((i + count - j) % count, 2).abs() <= local.abs()
+                && [-2_isize, -1, 1, 2].into_iter().all(|offset| {
+                    let j = (i as isize + offset).rem_euclid(count as isize) as usize;
+                    let other = turn(j, 2);
+                    if other.abs() != local.abs() || other * local <= 0.0 {
+                        return other.abs() <= local.abs();
+                    }
+                    // A raster corner can have two equal turn maxima. Keeping
+                    // both creates a one-edge cubic interval, which `one`
+                    // cannot fit, and rejects the entire otherwise smooth loop.
+                    // Prefer the stronger coarse turn, then a spatial tie-break
+                    // independent of traversal direction and starting vertex.
+                    coarse
+                        .abs()
+                        .total_cmp(&turn(j, 9).abs())
+                        .then_with(|| points[j].x.total_cmp(&points[i].x))
+                        .then_with(|| points[j].y.total_cmp(&points[i].y))
+                        .is_gt()
                 })
         })
         .collect();
     if corners.len() > 4 {
+        trace(source, "closed", None, "too_many_corners");
         return None;
     }
     let smooth: Vec<_> = (0..count)
@@ -756,6 +771,7 @@ pub(super) fn fit_closed_with_limit(
             };
             if score > 1.0 && worst.is_none_or(|w| score > w.0) {
                 if b - a < 8 {
+                    trace(source, "closed", None, "short_knot_interval");
                     return None;
                 }
                 worst = Some((score, split.clamp(a + 4, b - 4)));
@@ -763,6 +779,7 @@ pub(super) fn fit_closed_with_limit(
         }
         if let Some((_, split)) = worst {
             if knots.len() > maximum_segments {
+                trace(source, "closed", None, "curve_budget");
                 return None;
             }
             knots.push(split);
@@ -774,6 +791,7 @@ pub(super) fn fit_closed_with_limit(
             || super::signed_area(source) * super::signed_area(&rendered) <= 0.0
             || !simple_loop(&rendered)
         {
+            trace(source, "closed", None, "loop_validation");
             return None;
         }
         return Some(curves);
@@ -783,6 +801,41 @@ pub(super) fn fit_closed_with_limit(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn equal_adjacent_corner_turns_do_not_reject_the_window_loop() {
+        // The same lower window corner occupies (683,513) and (683,514).
+        // Treating its two 90-degree maxima as separate knots previously
+        // rejected the whole contour, irrespective of the curve budget.
+        let points: Vec<_> = include_str!("test-data/car-window-contour.txt")
+            .lines()
+            .map(|line| {
+                let mut values = line.split_whitespace().map(|v| v.parse::<f32>().unwrap());
+                Point {
+                    x: values.next().unwrap(),
+                    y: values.next().unwrap(),
+                }
+            })
+            .collect();
+        for reversed in [false, true] {
+            let mut source = points.clone();
+            if reversed {
+                source.reverse();
+            }
+            let curves = fit_closed_with_limit(&source, CLOSED_CORRIDOR, 16)
+                .unwrap_or_else(|| panic!("one smooth window contour, reversed={reversed}"));
+            let mapping =
+                super::super::geometry_mapping::map(&source, &curves, CLOSED_CORRIDOR, &mut 0)
+                    .expect("every raster junction must retain an ordered correspondence");
+            assert_eq!(mapping.edges.len() + 1, source.len());
+            assert!(source
+                .iter()
+                .zip(mapping.positions)
+                .all(|(a, b)| a.distance(b) <= CLOSED_CORRIDOR));
+            assert!(simple_loop(&sample_curve_sequence(&curves, 0.25)));
+        }
+    }
+
     #[test]
     #[cfg(feature = "diagnostics")]
     fn complete_bands_use_few_curves_and_map_every_shading_junction() {

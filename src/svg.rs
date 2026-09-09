@@ -721,7 +721,13 @@ pub(crate) fn serialize_filtered_with_alpha(
     summary.outline_bands = structural.outlines.len();
     for (i, band) in structural.outlines.iter().enumerate() {
         summary.outline_color_patches += band.patches.len();
-        for (_, paint) in &band.patches {
+        for paint in band
+            .patches
+            .iter()
+            .map(|(_, paint)| paint)
+            .chain(std::iter::once(&band.underpaint))
+            .chain(band.inner_underpaint.iter().map(|(_, paint)| paint))
+        {
             if let Some(key) = paint_key(paint) {
                 register_gradient(
                     paint,
@@ -866,9 +872,14 @@ pub(crate) fn serialize_filtered_with_alpha(
     for (i, (band, mut elements)) in structural.outlines.iter().zip(band_elements).enumerate() {
         // A complete underpaint prevents complementary antialias coverage
         // at the inner clip from exposing the page through a hairline seam.
-        let fill = fill_value(&band.patches[0].1, &gradient_ids);
+        let fill = fill_value(&band.underpaint, &gradient_ids);
         let _ = write!(body, "<path d=\"{}\" fill=\"{fill}\"/>", band.outer);
         summary.path_elements += 1;
+        if let Some((path, paint)) = &band.inner_underpaint {
+            let fill = fill_value(paint, &gradient_ids);
+            let _ = write!(body, "<path d=\"{path}\" fill=\"{fill}\"/>");
+            summary.path_elements += 1;
+        }
         for (path, paint) in &band.patches {
             let fill = fill_value(paint, &gradient_ids);
             let _ = write!(body, "<path data-outline-band=\"true\" d=\"{path}\" fill=\"{fill}\" stroke=\"{fill}\" stroke-width=\"0.25\" clip-path=\"url(#outline-outer-{i})\" fill-rule=\"evenodd\"/>");

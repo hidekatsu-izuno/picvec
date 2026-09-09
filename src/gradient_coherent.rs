@@ -13,7 +13,7 @@ pub(crate) fn reconstruct(
     for (i, &label) in segmentation.labels.iter().enumerate() {
         faces[label as usize].push(i);
     }
-    let labs = lab_pixels(source);
+    let labs = oklab_pixels(source);
     hints.par_iter_mut().enumerate().for_each(|(label, hint)| {
         let pixels = &faces[label];
         let region = &segmentation.regions[label];
@@ -148,7 +148,7 @@ fn reconstruct_domains(
     // A quiet path around an edge endpoint does not make the two materials
     // interchangeable. Preserve measured interfaces anywhere in the union,
     // including interfaces far from the path that connected its interiors.
-    let boundary_labs = lab_pixels(boundary_source);
+    let boundary_labs = oklab_pixels(boundary_source);
     let barriers = smooth_paint_boundaries(&boundary_labs, segmentation, 8, true)
         .into_iter()
         .map(|mut boundary| {
@@ -182,7 +182,7 @@ fn reconstruct_domains(
     for (i, &label) in segmentation.labels.iter().enumerate() {
         region_pixels[label as usize].push(i);
     }
-    let labs = lab_pixels(source);
+    let labs = oklab_pixels(source);
     let fits = components
         .par_iter()
         .map(|pixels| {
@@ -359,10 +359,10 @@ fn reconstruct_domains(
                             {
                                 return false;
                             }
-                            let centre = delta_e2000(labs[indices[1]], labs[indices[2]]);
+                            let centre = delta_e_ok(labs[indices[1]], labs[indices[2]]);
                             let outside = 0.5
-                                * (delta_e2000(labs[indices[0]], labs[indices[1]])
-                                    + delta_e2000(labs[indices[2]], labs[indices[3]]));
+                                * (delta_e_ok(labs[indices[0]], labs[indices[1]])
+                                    + delta_e_ok(labs[indices[2]], labs[indices[3]]));
                             centre >= 2.0 && centre > 3.0 * outside.max(0.25)
                         })
                     })

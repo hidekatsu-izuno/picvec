@@ -1,0 +1,69 @@
+{
+  "units": "100-scaled OKLab Euclidean distance",
+  "comparison": "palette-only adoption versus complete OKLab pipeline",
+  "rendering": "native resvg, source resolution, white background",
+  "timings": "omitted: measurements overlapped compilation/tests",
+  "results": [
+    {
+      "input": "boy_and_turtle.png",
+      "variant": "palette-only",
+      "bytes": 130343,
+      "delta_e_ok_mean": 0.6716413497924805,
+      "delta_e_ok_p90": 0.0,
+      "delta_e_ok_p99": 20.390796661376953,
+      "input_sha256": "91ec0385e31175a0192896bf84804541366da769773a3a0fa8b95fe9a74bd3b8",
+      "svg_sha256": "1e99887cee43bd8f3829c4b771eaa53fbd5510e8a5f2d7b32818be66d7c630ec"
+    },
+    {
+      "input": "boy_and_turtle.png",
+      "variant": "full-oklab",
+      "bytes": 135914,
+      "delta_e_ok_mean": 0.7949352264404297,
+      "delta_e_ok_p90": 0.0,
+      "delta_e_ok_p99": 25.7102108001709,
+      "input_sha256": "91ec0385e31175a0192896bf84804541366da769773a3a0fa8b95fe9a74bd3b8",
+      "svg_sha256": "93af0ffcf81dc5de258dcaab0b614912cc98cac77384344a167c5202f7cf17ab"
+    },
+    {
+      "input": "car.png",
+      "variant": "palette-only",
+      "bytes": 1841977,
+      "delta_e_ok_mean": 0.6922973990440369,
+      "delta_e_ok_p90": 1.2181098461151123,
+      "delta_e_ok_p99": 10.94596004486084,
+      "input_sha256": "7bac8b1676a62a6ddfc4519d3e17f92c4b76f78cd4b947efddc1eb45baa20cf7",
+      "svg_sha256": "c070573c3e0bda79f9ca699b5b105ad69326426377c4cd4012687a76c5fa9910"
+    },
+    {
+      "input": "car.png",
+      "variant": "full-oklab",
+      "bytes": 2229139,
+      "delta_e_ok_mean": 0.6827307343482971,
+      "delta_e_ok_p90": 1.1671054363250732,
+      "delta_e_ok_p99": 10.909917831420898,
+      "input_sha256": "7bac8b1676a62a6ddfc4519d3e17f92c4b76f78cd4b947efddc1eb45baa20cf7",
+      "svg_sha256": "6bab762d74fb2459549d7a207b7a1e0ca29291a056f7f70cc2fabcfbb8caf1fd"
+    },
+    {
+      "input": "viewport1.jpg",
+      "variant": "palette-only",
+      "bytes": 7943273,
+      "delta_e_ok_mean": 4.772349834442139,
+      "delta_e_ok_p90": 11.256918907165527,
+      "delta_e_ok_p99": 25.128332138061523,
+      "input_sha256": "f1a817bbedf41a5ece55d4bac54a5d87497d94f5504a0fc391f182640edb6cd9",
+      "svg_sha256": "31957933e707b2613652e8e5621bee0fc3c8bf736e225aa5fbdfbc7ba58f7038"
+    },
+    {
+      "input": "viewport1.jpg",
+      "variant": "full-oklab",
+      "bytes": 7135273,
+      "delta_e_ok_mean": 4.68416166305542,
+      "delta_e_ok_p90": 10.875723838806152,
+      "delta_e_ok_p99": 25.526281356811523,
+      "input_sha256": "f1a817bbedf41a5ece55d4bac54a5d87497d94f5504a0fc391f182640edb6cd9",
+      "svg_sha256": "c765ed756ab817e09952466c1205bbb003adda141549036013e12dce76f045e1"
+    }
+  ],
+  "full_oklab_binary_sha256": "702452b1eb36d3e6b6854ea81e708c7fcdf7086fb44c0d9ba104ee3ad0378007"
+}

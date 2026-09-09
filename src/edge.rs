@@ -2,9 +2,7 @@ use rayon::prelude::*;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet, VecDeque};
 
-#[cfg(feature = "diagnostics")]
-use crate::color::delta_e2000;
-use crate::color::{delta_e94_local, lab_pixels_to_rgb, Lab};
+use crate::color::{delta_e_ok, oklab_values_to_rgb, Oklab};
 use crate::config::Config;
 use crate::raster::{percentile, Raster};
 
@@ -73,170 +71,16 @@ pub struct EdgeRoles {
     pub summary: EdgeSummary,
 }
 
-pub fn lab_pixels(image: &Raster) -> Vec<Lab> {
-    let mut linear = image.pixels.clone();
-    let mut nonlinear_indices = Vec::with_capacity(linear.len() * 3);
-    let mut nonlinear_values = Vec::with_capacity(linear.len() * 3);
-    for (pixel, rgb) in linear.iter_mut().enumerate() {
-        for (channel, value) in rgb.iter_mut().enumerate() {
-            *value = value.clamp(0.0, 1.0);
-            if *value > 0.04045 {
-                nonlinear_indices.push((pixel, channel));
-                nonlinear_values.push((*value + 0.055) / 1.055);
-            } else {
-                *value /= 12.92;
-            }
-        }
-    }
-    crate::elementary::pow_f32_in_place(&mut nonlinear_values, 2.4);
-    for ((pixel, channel), value) in nonlinear_indices.into_iter().zip(nonlinear_values) {
-        linear[pixel][channel] = value;
-    }
-    let mut normalized = Vec::<[f32; 3]>::with_capacity(image.pixels.len());
-    for linear in linear {
-        let x = linear[2].mul_add(
-            0.180_423,
-            linear[1].mul_add(0.357_58, linear[0] * 0.412_453),
-        );
-        let y = linear[2].mul_add(
-            0.072_169,
-            linear[1].mul_add(0.715_16, linear[0] * 0.212_671),
-        );
-        let z = linear[2].mul_add(
-            0.950_227,
-            linear[1].mul_add(0.119_193, linear[0] * 0.019_334),
-        );
-        normalized.push([x / 0.95047, y, z / 1.08883]);
-    }
-    let mut nonlinear_indices = Vec::with_capacity(normalized.len() * 3);
-    let mut nonlinear_values = Vec::with_capacity(normalized.len() * 3);
-    for (pixel, xyz) in normalized.iter().enumerate() {
-        for (channel, &value) in xyz.iter().enumerate() {
-            if value > 0.008_856 {
-                nonlinear_indices.push((pixel, channel));
-                nonlinear_values.push(value);
-            }
-        }
-    }
-    crate::elementary::cbrt_f32_in_place(&mut nonlinear_values);
-    for ((pixel, channel), value) in nonlinear_indices.into_iter().zip(nonlinear_values) {
-        normalized[pixel][channel] = value;
-    }
-    for xyz in &mut normalized {
-        for value in xyz {
-            if *value <= 0.008_856 {
-                *value = 7.787 * *value + 16.0 / 116.0;
-            }
-        }
-    }
-    normalized
-        .into_par_iter()
-        .map(|value| Lab {
-            l: 116.0 * value[1] - 16.0,
-            a: 500.0 * (value[0] - value[1]),
-            b: 200.0 * (value[1] - value[2]),
-        })
+pub fn oklab_pixels(image: &Raster) -> Vec<Oklab> {
+    oklab_values(&image.pixels)
+}
+
+pub fn oklab_values(pixels: &[[f32; 3]]) -> Vec<Oklab> {
+    pixels
+        .par_iter()
+        .copied()
+        .map(crate::color::rgb_to_oklab)
         .collect()
-}
-
-/// Match preprocess.srgb_to_lab, whose explicit matrix and low branch are
-/// used for source-boundary evidence (distinct from skimage.rgb2lab above).
-pub fn preprocess_lab_pixels(image: &Raster) -> Vec<Lab> {
-    preprocess_lab_values(&image.pixels)
-}
-
-pub fn preprocess_lab_values(pixels: &[[f32; 3]]) -> Vec<Lab> {
-    let trace =
-        cfg!(feature = "diagnostics") && std::env::var_os("PICVEC_TRACE_PREPROCESS_LAB").is_some();
-    let mut linear = pixels.to_vec();
-    let mut nonlinear_indices = Vec::with_capacity(linear.len() * 3);
-    let mut nonlinear_values = Vec::with_capacity(linear.len() * 3);
-    for (pixel, rgb) in linear.iter_mut().enumerate() {
-        for (channel, value) in rgb.iter_mut().enumerate() {
-            *value = value.clamp(0.0, 1.0);
-            if *value > 0.04045 {
-                nonlinear_indices.push((pixel, channel));
-                nonlinear_values.push((*value + 0.055) / 1.055);
-            } else {
-                *value /= 12.92;
-            }
-        }
-    }
-    crate::elementary::pow_f32_in_place(&mut nonlinear_values, 2.4);
-    for ((pixel, channel), value) in nonlinear_indices.into_iter().zip(nonlinear_values) {
-        linear[pixel][channel] = value;
-    }
-    if trace {
-        eprintln!("trace preprocess input={pixels:?} linear={linear:?}");
-    }
-    let mut normalized = Vec::<[f32; 3]>::with_capacity(pixels.len());
-    let scalar_matmul = pixels.len() == 1;
-    for linear in linear {
-        // NumPy's matmul dispatches a (1, 3) @ (3, 3) product through its
-        // scalar dot loop, while two or more rows use the FMA-vectorized
-        // matrix loop. Child-region Paint checks frequently contain exactly
-        // one sample, so retain that shape-dependent rounding here.
-        let dot = |first: f32, second: f32, third: f32| {
-            if scalar_matmul {
-                let left = linear[0] * first;
-                let middle = linear[1] * second;
-                let right = linear[2] * third;
-                (left + middle) + right
-            } else {
-                linear[2].mul_add(third, linear[1].mul_add(second, linear[0] * first))
-            }
-        };
-        let x = dot(0.412_456_4, 0.357_576_1, 0.180_437_5);
-        let y = dot(0.212_672_9, 0.715_152_2, 0.072_175);
-        let z = dot(0.019_333_9, 0.119_192, 0.950_304_1);
-        normalized.push([x / 0.95047, y, z / 1.08883]);
-    }
-    if trace {
-        eprintln!("trace preprocess normalized-before={normalized:?}");
-    }
-    const DELTA: f32 = 6.0_f32 / 29.0_f32;
-    const THRESHOLD: f32 = DELTA * DELTA * DELTA;
-    let mut nonlinear_indices = Vec::with_capacity(normalized.len() * 3);
-    let mut nonlinear_values = Vec::with_capacity(normalized.len() * 3);
-    for (pixel, xyz) in normalized.iter().enumerate() {
-        for (channel, &value) in xyz.iter().enumerate() {
-            if value > THRESHOLD {
-                nonlinear_indices.push((pixel, channel));
-                nonlinear_values.push(value.max(0.0));
-            }
-        }
-    }
-    crate::elementary::cbrt_f32_in_place(&mut nonlinear_values);
-    for ((pixel, channel), value) in nonlinear_indices.into_iter().zip(nonlinear_values) {
-        normalized[pixel][channel] = value;
-    }
-    // Python evaluates ``3 * (6 / 29) ** 2`` as a scalar float64 and NumPy
-    // casts it once to float32 before dividing the float32 array. Recomputing
-    // from the already-rounded float32 DELTA is one ULP larger.
-    const DENOMINATOR: f32 = f32::from_bits(1_040_416_807);
-    const OFFSET: f32 = 4.0_f32 / 29.0_f32;
-    for xyz in &mut normalized {
-        for value in xyz {
-            if *value <= THRESHOLD {
-                *value = *value / DENOMINATOR + OFFSET;
-            }
-        }
-    }
-    if trace {
-        eprintln!("trace preprocess normalized-after={normalized:?}");
-    }
-    let result: Vec<Lab> = normalized
-        .into_iter()
-        .map(|value| Lab {
-            l: 116.0 * value[1] - 16.0,
-            a: 500.0 * (value[0] - value[1]),
-            b: 200.0 * (value[1] - value[2]),
-        })
-        .collect();
-    if trace {
-        eprintln!("trace preprocess lab={result:?}");
-    }
-    result
 }
 
 pub fn dilate(mask: &[bool], width: usize, height: usize, radius: usize) -> Vec<bool> {
@@ -501,14 +345,14 @@ fn profile_scales(width: usize, height: usize) -> Vec<f64> {
     result
 }
 
-fn estimate_profile_edge_field(image: &Raster, lab: &[Lab]) -> EdgeField {
+fn estimate_profile_edge_field(image: &Raster, lab: &[Oklab]) -> EdgeField {
     let width = image.width;
     let height = image.height;
     let count = image.pixels.len();
     let channels = [
         lab.iter().map(|value| value.l / 100.0).collect::<Vec<_>>(),
-        lab.iter().map(|value| value.a / 128.0).collect::<Vec<_>>(),
-        lab.iter().map(|value| value.b / 128.0).collect::<Vec<_>>(),
+        lab.iter().map(|value| value.a / 40.0).collect::<Vec<_>>(),
+        lab.iter().map(|value| value.b / 40.0).collect::<Vec<_>>(),
     ];
     let mut selected_score = vec![f32::NEG_INFINITY; count];
     let mut selected_edge = vec![0.0_f32; count];
@@ -1103,7 +947,7 @@ fn classify_profile(samples: &[[f32; 3]], offsets: &[f32], radius: f32) -> Profi
     }
 
     // Full-colour bounded residual.  This is the part that preserves a
-    // chromatic one-pixel line whose L* alone is not an extremum.
+    // chromatic one-pixel line whose OKLab lightness alone is not an extremum.
     let residual: Vec<f64> = samples
         .iter()
         .enumerate()
@@ -1186,9 +1030,9 @@ fn classify_profile(samples: &[[f32; 3]], offsets: &[f32], radius: f32) -> Profi
         };
     }
     let tail_lightness = (left[0] - right[0]).abs();
-    // The two-exit chromatic residual above uses full Lab gradients, but the
+    // The two-exit chromatic residual above uses full Oklab gradients, but the
     // secondary step/shading decision in the Python source is intentionally
-    // based only on dL*/dn.  Reusing the colour gradient here promoted weak
+    // based only on the OKLab lightness derivative.  Reusing the colour gradient here promoted weak
     // hue changes to hard Paint barriers.
     let derivative = lightness
         .windows(2)
@@ -1222,7 +1066,7 @@ fn classify_profile(samples: &[[f32; 3]], offsets: &[f32], radius: f32) -> Profi
     }
 }
 
-fn normalized_lab_sample(lab: &[Lab], width: usize, height: usize, x: f32, y: f32) -> [f32; 3] {
+fn normalized_lab_sample(lab: &[Oklab], width: usize, height: usize, x: f32, y: f32) -> [f32; 3] {
     let sample_channel = |channel: usize| {
         let x = x.clamp(0.0, width.saturating_sub(1) as f32);
         let y = y.clamp(0.0, height.saturating_sub(1) as f32);
@@ -1234,8 +1078,8 @@ fn normalized_lab_sample(lab: &[Lab], width: usize, height: usize, x: f32, y: f3
         let ty = y as f64 - y0 as f64;
         let value = |index: usize| match channel {
             0 => (lab[index].l / 100.0) as f64,
-            1 => (lab[index].a / 128.0) as f64,
-            _ => (lab[index].b / 128.0) as f64,
+            1 => (lab[index].a / 40.0) as f64,
+            _ => (lab[index].b / 40.0) as f64,
         };
         let top = value(y0 * width + x0) * (1.0 - tx) + value(y0 * width + x1) * tx;
         let bottom = value(y1 * width + x0) * (1.0 - tx) + value(y1 * width + x1) * tx;
@@ -1247,7 +1091,7 @@ fn normalized_lab_sample(lab: &[Lab], width: usize, height: usize, x: f32, y: f3
 fn classify_skeleton_chains(
     skeleton: &[bool],
     field: &EdgeField,
-    lab: &[Lab],
+    lab: &[Oklab],
     width: usize,
     height: usize,
     radius: f32,
@@ -1852,7 +1696,7 @@ fn local_maximum(values: &[f32], width: usize, height: usize, radius: usize) -> 
 }
 
 fn dark_ridge_support(
-    lab: &[Lab],
+    lab: &[Oklab],
     width: usize,
     height: usize,
     scale: f32,
@@ -1860,11 +1704,11 @@ fn dark_ridge_support(
     let lightness: Vec<f32> = lab.iter().map(|value| value.l / 100.0).collect();
     let local_radius = (7.0 * scale).round().max(2.0) as usize;
     let local_light = local_maximum(&lightness, width, height, local_radius);
-    let absolute_dark = lightness.iter().map(|&value| value <= 0.35).collect();
+    let absolute_dark = lightness.iter().map(|&value| value <= 0.440).collect();
     let locally_dark = lightness
         .iter()
         .zip(&local_light)
-        .map(|(&value, &maximum)| value <= 0.78 && maximum - value >= 0.10)
+        .map(|(&value, &maximum)| value <= 0.810 && maximum - value >= 0.086)
         .collect();
     (absolute_dark, locally_dark)
 }
@@ -2097,7 +1941,7 @@ fn connect_source_edges(
 fn profiles_for_points(
     points: &[[f64; 2]],
     field: &EdgeField,
-    lab: &[Lab],
+    lab: &[Oklab],
     width: usize,
     height: usize,
     radius: f32,
@@ -2214,7 +2058,7 @@ fn width_profile_requires_paint(
 #[allow(clippy::too_many_arguments)]
 fn add_supported_medial_ridges(
     image: &Raster,
-    lab: &[Lab],
+    lab: &[Oklab],
     field: &EdgeField,
     absolute_dark: &[bool],
     locally_dark: &[bool],
@@ -2675,7 +2519,7 @@ fn nonoverlapping_extensions(
 #[allow(clippy::too_many_arguments)]
 fn add_profile_supported_ridges(
     classified_chains: &[ClassifiedChain],
-    lab: &[Lab],
+    lab: &[Oklab],
     absolute_dark: &[bool],
     locally_dark: &[bool],
     strong_bright: &[bool],
@@ -2892,7 +2736,7 @@ fn add_profile_supported_ridges(
             } else {
                 (plus, minus, 1.0_f64)
             };
-            if dark[0] > 0.35 || lab_vector_distance(light, dark) < 0.06 {
+            if dark[0] > 0.440 || lab_vector_distance(light, dark) < 0.06 {
                 continue;
             }
             valid[index] = true;
@@ -2942,7 +2786,7 @@ fn add_profile_supported_ridges(
 fn classify_normal_profile_edges(image: &Raster) -> EdgeRoles {
     let width = image.width;
     let height = image.height;
-    let lab = lab_pixels(image);
+    let lab = oklab_pixels(image);
     let field = estimate_profile_edge_field(image, &lab);
     #[cfg(feature = "diagnostics")]
     if let Some(prefix) = std::env::var_os("PICVEC_EDGE_DIAGNOSTICS") {
@@ -2960,7 +2804,7 @@ fn classify_normal_profile_edges(image: &Raster) -> EdgeRoles {
         write_f32("field-edge", &field.edge);
         let mut normalized_lab = Vec::with_capacity(lab.len() * 3);
         for value in &lab {
-            normalized_lab.extend([value.l / 100.0, value.a / 128.0, value.b / 128.0]);
+            normalized_lab.extend([value.l / 100.0, value.a / 40.0, value.b / 40.0]);
         }
         write_f32("lab", &normalized_lab);
     }
@@ -3205,12 +3049,18 @@ pub fn classify(image: &Raster) -> EdgeRoles {
 }
 
 fn adaptive_tolerance(lightness: f32, config: &Config) -> f32 {
-    let amount = ((lightness - config.dark_knee_lstar) / (100.0 - config.dark_knee_lstar).max(1.0))
-        .clamp(0.0, 1.0);
+    let amount = ((lightness - config.dark_knee_lightness)
+        / (100.0 - config.dark_knee_lightness).max(1.0))
+    .clamp(0.0, 1.0);
     let smooth = amount * amount * (3.0 - 2.0 * amount);
-    (config.smoothing_dark_delta_e
+    let tolerance = (config.smoothing_dark_delta_e
         + (config.smoothing_light_delta_e - config.smoothing_dark_delta_e) * smooth)
-        * config.tonal_detail_scale(lightness)
+        * config.tonal_detail_scale(lightness);
+    // Near black, one 8-bit sRGB step spans several OKLab units. Without a
+    // dark-noise allowance the bilateral filter freezes those steps into
+    // separate palette fragments. This calibrated floor fades below the
+    // ordinary tolerance in the midtones; large dark edges still stay sharp.
+    tolerance.max(config.smoothing_dark_delta_e * 240.0 / (lightness * lightness + 10.0))
 }
 
 /// Calculate one shifted bilateral range plane immediately before it is
@@ -3219,7 +3069,7 @@ fn adaptive_tolerance(lightness: f32, config: &Config) -> f32 {
 /// is symmetric, so evaluating the requested orientation directly retains
 /// the same weights while allowing the plane to be released after one pass.
 fn bilateral_range_weights(
-    lab: &[Lab],
+    lab: &[Oklab],
     width: usize,
     height: usize,
     dx: isize,
@@ -3235,7 +3085,7 @@ fn bilateral_range_weights(
             let py = (y + dy).clamp(0, height as isize - 1) as usize;
             let centre = lab[index];
             let sample = lab[py * width + px];
-            let distance = delta_e94_local(centre, sample);
+            let distance = delta_e_ok(centre, sample);
             let threshold = adaptive_tolerance(0.5 * (centre.l + sample.l), config).max(1e-3);
             let ratio = distance / threshold;
             -0.5_f32 * (ratio * ratio)
@@ -3252,7 +3102,7 @@ pub fn perceptual_smooth(image: &Raster, config: &Config) -> Raster {
     if radius == 0 {
         return image.clone();
     }
-    let lab = lab_pixels(image);
+    let lab = oklab_pixels(image);
     #[cfg(feature = "diagnostics")]
     if let Ok(path) = std::env::var("PICVEC_SMOOTH_INPUT_LAB_DIAGNOSTIC") {
         let mut bytes = Vec::with_capacity(lab.len() * 12);
@@ -3296,7 +3146,7 @@ pub fn perceptual_smooth(image: &Raster, config: &Config) -> Raster {
                 });
         }
     }
-    let smoothed_lab: Vec<Lab> = numerator
+    let smoothed_lab: Vec<Oklab> = numerator
         .into_par_iter()
         .zip(denominator.into_par_iter())
         .zip(lab.par_iter())
@@ -3304,7 +3154,7 @@ pub fn perceptual_smooth(image: &Raster, config: &Config) -> Raster {
             if weight_sum <= 1e-8 {
                 original
             } else {
-                Lab {
+                Oklab {
                     l: sum[0] / weight_sum,
                     a: sum[1] / weight_sum,
                     b: sum[2] / weight_sum,
@@ -3341,7 +3191,7 @@ pub fn perceptual_smooth(image: &Raster, config: &Config) -> Raster {
                 let px = (x + dx).clamp(0, image.width as isize - 1) as usize;
                 let py = (y + dy).clamp(0, image.height as isize - 1) as usize;
                 let sample = lab[py * image.width + px];
-                let distance = delta_e2000(centre, sample);
+                let distance = delta_e_ok(centre, sample);
                 let threshold = adaptive_tolerance(0.5 * (centre.l + sample.l), config).max(1e-3);
                 let spatial = crate::elementary::exp_f64(
                     -0.5_f64 * (dx * dx + dy * dy) as f64 / (sigma * sigma),
@@ -3375,12 +3225,35 @@ pub fn perceptual_smooth(image: &Raster, config: &Config) -> Raster {
         });
         let _ = std::fs::write(path, serde_json::to_vec_pretty(&value).unwrap_or_default());
     }
-    let pixels = lab_pixels_to_rgb(&smoothed_lab);
+    let pixels = oklab_values_to_rgb(&smoothed_lab);
     Raster::new(image.width, image.height, pixels)
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn dark_quantization_noise_smooths_without_erasing_a_black_line() {
+        let config = crate::config::Config::default();
+        let source = Raster::new(
+            32,
+            32,
+            (0..1024)
+                .map(|i| [((i % 32 + i / 32) % 2) as f32 / 255.0; 3])
+                .collect(),
+        );
+        let filtered = super::perceptual_smooth(&source, &config);
+        assert!((filtered.get(15, 15)[0] - filtered.get(16, 15)[0]).abs() < 0.1 / 255.0);
+
+        let mut source = Raster::blank(32, 32, [20.0 / 255.0; 3]);
+        for y in 0..32 {
+            source.pixels[y * 32 + 15] = [0.0; 3];
+            source.pixels[y * 32 + 16] = [0.0; 3];
+        }
+        let filtered = super::perceptual_smooth(&source, &config);
+        assert!(filtered.get(15, 15)[0] < 1.0 / 255.0);
+        assert!(filtered.get(14, 15)[0] > 18.0 / 255.0);
+    }
+
     use super::{
         classify, classify_profile, nonoverlapping_extensions, point_tangents,
         width_profile_requires_paint, NumpyPcg64, ProfileRole, SourceEdge,

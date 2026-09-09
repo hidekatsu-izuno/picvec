@@ -1,0 +1,248 @@
+{
+  "input": "sample/input/car.png",
+  "input_sha256": "7bac8b1676a62a6ddfc4519d3e17f92c4b76f78cd4b947efddc1eb45baa20cf7",
+  "output": "sample/output/car.svg",
+  "cielab_commit": "57c3a4ac7347504a6e4771fb1affd9071dbdf27e",
+  "source_tree_sha256": "469f1d5b50efdb8c6f582f5109c511d10b5d38cccd641bf1d66c71fe798ad3f1",
+  "source_tree_hash_definition": "sorted src/**/*.rs, then Cargo.toml and Cargo.lock; relative path, NUL, content, NUL for each file",
+  "configuration": "CLI defaults; palette threshold scale 1.0; 4 workers",
+  "renderer": "resvg 0.48.1; white background; native 1254x1254 for colour, direct 4x SVG rendering for edges",
+  "comparison_images": {
+    "rows": [
+      "raster source",
+      "CIELAB 57c3a4a",
+      "OKLab before repair",
+      "OKLab after repair"
+    ],
+    "source_enlargement": "4x bicubic",
+    "whole_window_roi_xyxy": [
+      580,
+      320,
+      1150,
+      540
+    ],
+    "upper_window_roi_xyxy": [
+      700,
+      325,
+      975,
+      425
+    ]
+  },
+  "metrics_definition": {
+    "rgb_mae": "mean absolute per-channel error in 8-bit RGB at native resolution",
+    "oklab_mean": "Euclidean distance in 100-scaled OKLab, recomputed for all versions",
+    "window_roi_xyxy": [
+      700,
+      325,
+      975,
+      425
+    ],
+    "fender_rectangular_roi_xyxy": [
+      320,
+      565,
+      530,
+      645
+    ],
+    "lower_trim_roi_xyxy": [
+      735,
+      495,
+      831,
+      521
+    ],
+    "edge_x_range_half_open": [
+      775,
+      885
+    ],
+    "edge_metric": "absolute second difference of source-referenced subpixel boundary y positions, sampled once per native x; values in native pixels",
+    "inner_rim": "two max(R,G,B)=30 crossings bounding dark core; missing_columns counts columns where either crossing is absent",
+    "outer_gray_edge": "upward encoded-RGB weighted-luma crossings at 40,50,60; weights 0.2126,0.7152,0.0722",
+    "fender_regression": "separate source-masked ROI and wheel-arch sampling in pipeline::tests::car_front_fender_highlight_keeps_local_shading"
+  },
+  "results": {
+    "before": {
+      "sha256": "9b64c33ef0cdba38c97bf9a7b33c3511514fc758ef5a066e4bd4fd5b3f734617",
+      "bytes": 1866604,
+      "window": {
+        "rgb_mae": 4.399794101715088,
+        "oklab_mean": 1.6872856616973877
+      },
+      "fender": {
+        "rgb_mae": 4.426071643829346,
+        "oklab_mean": 1.306417465209961
+      },
+      "inner_rim": {
+        "missing_columns": 0,
+        "mean_turn": [
+          0.05471391885687269,
+          0.11914305694338202
+        ],
+        "maximum_turn": [
+          0.24303300865807387,
+          0.8144938753533211
+        ]
+      },
+      "outer_gray_edge": {
+        "missing_columns": [
+          0,
+          0,
+          0
+        ],
+        "mean_turn": [
+          0.09691432075173675,
+          0.10691955562564959,
+          0.11536505018091615
+        ],
+        "maximum_turn": [
+          1.0442056932618584,
+          1.0705160449866185,
+          1.0903651841764486
+        ]
+      },
+      "lower_trim_rgb_mae": 12.13915598
+    },
+    "cielab": {
+      "sha256": "c7ff5f3993b3fa5f724ed5b494cacc3cdad5f8f3eb4a57d23d1f5a019ea64e03",
+      "bytes": 1982104,
+      "window": {
+        "rgb_mae": 4.053793907165527,
+        "oklab_mean": 1.5790568590164185
+      },
+      "fender": {
+        "rgb_mae": 4.587381362915039,
+        "oklab_mean": 1.3659944534301758
+      },
+      "inner_rim": {
+        "missing_columns": 5,
+        "mean_turn": [
+          0.09672919343785949,
+          0.08472583667794847
+        ],
+        "maximum_turn": [
+          1.0349181469871382,
+          0.7797619047619264
+        ]
+      },
+      "outer_gray_edge": {
+        "missing_columns": [
+          0,
+          0,
+          0
+        ],
+        "mean_turn": [
+          0.057613497473702244,
+          0.04608410250846749,
+          0.04495132881441401
+        ],
+        "maximum_turn": [
+          0.5049505931896192,
+          0.3484668723103823,
+          0.32432611650642684
+        ]
+      },
+      "lower_trim_rgb_mae": 7.78739316
+    },
+    "after": {
+      "sha256": "55ba19378953620d0de4caff014fbf6429ebd4c039b383d0ffdb9e1907517bf9",
+      "bytes": 1877109,
+      "window": {
+        "rgb_mae": 4.051248550415039,
+        "oklab_mean": 1.565475583076477
+      },
+      "fender": {
+        "rgb_mae": 4.409563064575195,
+        "oklab_mean": 1.3032114505767822
+      },
+      "inner_rim": {
+        "missing_columns": 0,
+        "mean_turn": [
+          0.0550125455401166,
+          0.06111014636490011
+        ],
+        "maximum_turn": [
+          0.15386002886009464,
+          0.2089839984577111
+        ]
+      },
+      "outer_gray_edge": {
+        "missing_columns": [
+          0,
+          0,
+          0
+        ],
+        "mean_turn": [
+          0.07176918752604422,
+          0.07275210552327376,
+          0.08105879595440565
+        ],
+        "maximum_turn": [
+          0.4454897962904738,
+          0.45632229125857293,
+          0.46715478622655837
+        ]
+      },
+      "lower_trim_rgb_mae": 7.64543269,
+      "global_quality": {
+        "delta_e_ok_mean": 0.6777276,
+        "delta_e_ok_p90": 1.258266,
+        "delta_e_ok_p99": 10.356104,
+        "global_ssim": 0.9967082
+      },
+      "fender_regression": {
+        "masked_rgb_mae": 3.55577471,
+        "wheel_arch_roughness_px": 0.11739457,
+        "wheel_arch_mean_displacement_px": 0.32958682
+      }
+    }
+  },
+  "continuity_example": {
+    "source_coordinates": [
+      [
+        842,
+        336
+      ],
+      [
+        842,
+        337
+      ]
+    ],
+    "rgb": [
+      [
+        18,
+        0,
+        0
+      ],
+      [
+        26,
+        23,
+        24
+      ]
+    ],
+    "delta_e00": 6.1526623,
+    "delta_e_ok_100": 10.3394337,
+    "old_threshold": 6.9,
+    "new_threshold": 10.5
+  },
+  "lower_isolated_ridge_width_px": {
+    "before": 4.886,
+    "after": 1.8
+  },
+  "regions": {
+    "before": 2015,
+    "cielab": 1887,
+    "after": 2015
+  },
+  "validation": {
+    "ordinary_rust_tests_passed": 297,
+    "ordinary_ignored": 4,
+    "explicit_ignored_passed": [
+      "car_front_fender_highlight_keeps_local_shading",
+      "clipart_sheet_refines_whole_figures_with_and_without_keying",
+      "cliparts_highlights_preserve_colour_and_authored_transparency"
+    ],
+    "not_rerun": [
+      "cliparts_penguin_inner_foot_outlines_remain_continuous"
+    ],
+    "default_cargo_check": "passed",
+    "clippy_all_targets_warnings_as_errors": "passed"
+  }
+}

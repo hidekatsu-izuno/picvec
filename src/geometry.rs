@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use rayon::prelude::*;
 use serde::Serialize;
 
-use crate::color::{delta_e2000, Lab};
+use crate::color::{delta_e_ok, Oklab};
 use crate::hierarchy::HierarchicalTopology;
 use crate::raster::Raster;
 use crate::segment::Segmentation;
@@ -1130,10 +1130,10 @@ fn excursion_changes_supported_paint(
             } else {
                 continue;
             };
-            let source = crate::color::rgb_to_lab(reference.pixels[index]);
+            let source = crate::color::rgb_to_oklab(reference.pixels[index]);
             let old = segmentation.regions[owner as usize].mean_lab;
             let new = segmentation.regions[other as usize].mean_lab;
-            if delta_e2000(source, new) > delta_e2000(source, old) + 2.0 {
+            if delta_e_ok(source, new) > delta_e_ok(source, old) + 2.0 {
                 return true;
             }
         }
@@ -4674,7 +4674,7 @@ fn bounded_vertex_position(origin: Point, position: Point) -> Point {
 }
 
 fn contextual_continuity_classes(
-    labs: &[Lab],
+    labs: &[Oklab],
     adjacency: &[HashMap<usize, usize>],
     has_interior: &[bool],
 ) -> Vec<i32> {
@@ -4689,22 +4689,22 @@ fn contextual_continuity_classes(
     // desaturated glass, dark trim, tyres, and polished metal; their real
     // interfaces then disappeared before the master-curve fit.  Seed one
     // component per durable face and join only directly adjacent durable
-    // faces whose CIEDE2000 distance is within three just-noticeable
-    // differences.
-    const THREE_JND_DELTA_E: f32 = 6.9;
+    // faces whose 100-scaled OKLab distance is within the continuity
+    // tolerance.
+    const CONTINUITY_COLOR_TOLERANCE: f32 = 10.5;
     // Hue variations within a shaded rim can exceed the absolute color
     // threshold while remaining much weaker than its shared material edge.
     // Preserve their Paint labels, but let that dominant edge use one master.
     // Require a common contrasting neighbour and similar lightness so this
     // cannot bridge a highlight and a shadow through a third face.
     let continuous = |a: usize, b: usize| {
-        let difference = delta_e2000(labs[a], labs[b]);
-        difference <= THREE_JND_DELTA_E
-            || ((labs[a].l - labs[b].l).abs() <= THREE_JND_DELTA_E
+        let difference = delta_e_ok(labs[a], labs[b]);
+        difference <= CONTINUITY_COLOR_TOLERANCE
+            || ((labs[a].l - labs[b].l).abs() <= CONTINUITY_COLOR_TOLERANCE
                 && adjacency[a].keys().any(|&c| {
                     c != b
                         && adjacency[b].contains_key(&c)
-                        && delta_e2000(labs[a], labs[c]).min(delta_e2000(labs[b], labs[c]))
+                        && delta_e_ok(labs[a], labs[c]).min(delta_e_ok(labs[b], labs[c]))
                             >= 4.0 * difference
                 }))
     };
@@ -4778,7 +4778,7 @@ fn contextual_continuity_classes(
             if has_interior[neighbour] {
                 continue;
             }
-            let candidate = cost + delta_e2000(labs[label], labs[neighbour]);
+            let candidate = cost + delta_e_ok(labs[label], labs[neighbour]);
             if candidate < costs[neighbour]
                 || (candidate == costs[neighbour] && class < classes[neighbour])
             {
@@ -5214,7 +5214,7 @@ fn fit_adaptive_boundary_geometry(
     // separately freezes those changes as staircase anchors. Trace the
     // boundary between coarse perceptual classes, fit it once, then slice the
     // same master back onto every original half-edge.
-    let geometry_lab = crate::edge::lab_pixels(&segmentation.canonical);
+    let geometry_lab = crate::edge::oklab_pixels(&segmentation.canonical);
     let mut all_by_label = vec![Vec::<usize>::new(); segmentation.regions.len()];
     let mut samples_by_label = vec![Vec::<usize>::new(); segmentation.regions.len()];
     for (index, &label) in segmentation.labels.iter().enumerate() {
@@ -5240,7 +5240,7 @@ fn fit_adaptive_boundary_geometry(
             values[middle]
         }
     };
-    let continuity_lab_by_label: Vec<Lab> = (0..segmentation.regions.len())
+    let continuity_lab_by_label: Vec<Oklab> = (0..segmentation.regions.len())
         .map(|label| {
             let indices = if samples_by_label[label].is_empty() {
                 &all_by_label[label]
@@ -5250,7 +5250,7 @@ fn fit_adaptive_boundary_geometry(
             let l = channel_median(indices, 0);
             let a = channel_median(indices, 1);
             let b = channel_median(indices, 2);
-            Lab { l, a, b }
+            Oklab { l, a, b }
         })
         .collect();
     let mut continuity_adjacency = vec![HashMap::<usize, usize>::new(); segmentation.regions.len()];
@@ -7595,6 +7595,157 @@ impl OutlineGeometry {
 }
 
 /// Fit the two edges of an outline from one common normal-offset model.
+pub(crate) fn outline_between(
+    outer: &ClosedContour,
+    inner: &ClosedContour,
+) -> Option<OutlineGeometry> {
+    outline_between_on(outer, outer, inner)
+}
+
+pub(crate) fn outline_between_on(
+    reference: &ClosedContour,
+    outer: &ClosedContour,
+    inner: &ClosedContour,
+) -> Option<OutlineGeometry> {
+    let guide = sample_curve_sequence(&reference.curves, 0.5);
+    // Parallel curves separate by more than the stroke width at a sharp
+    // corner. This is correspondence between already constructed curves,
+    // not permission to move the raster fit outside its source corridor.
+    let map = |curves: &[CurveSegment]| {
+        let inner_guide = sample_curve_sequence(curves, 0.5);
+        let correspondence = guide
+            .iter()
+            .map(|&p| {
+                inner_guide
+                    .iter()
+                    .map(|&q| p.distance(q))
+                    .fold(f32::INFINITY, f32::min)
+            })
+            .fold(guide[0].distance(curves[0].start()), f32::max)
+            .max(5.0)
+            + 0.5;
+        geometry_mapping::map(&guide, curves, correspondence, &mut 0)
+    };
+    let outside = map(&outer.curves)?;
+    let inside = map(&inner.curves)?;
+    Some(OutlineGeometry {
+        contour: sample_curve_sequence(&outer.curves, 0.5),
+        outer: structural_curve_path_data(&outer.curves, true),
+        inner: structural_curve_path_data(&inner.curves, true),
+        outer_edges: outside.edges,
+        inner_edges: inside.edges,
+    })
+}
+
+pub(crate) fn offset_outline(contour: &ClosedContour, distance: f32) -> Option<ClosedContour> {
+    use resvg::tiny_skia::{LineJoin, PathBuilder, PathSegment, Stroke};
+    // Expand the actual curve. Independently offsetting sampled normals and
+    // refitting them can fold at a concave corner and discard an entire rim.
+    let first = contour.curves.first()?.start();
+    let mut builder = PathBuilder::new();
+    builder.move_to(first.x, first.y);
+    for curve in &contour.curves {
+        match *curve {
+            CurveSegment::Line { end, .. } => builder.line_to(end.x, end.y),
+            CurveSegment::Cubic {
+                first, second, end, ..
+            } => builder.cubic_to(first.x, first.y, second.x, second.y, end.x, end.y),
+        }
+    }
+    builder.close();
+    let expanded = builder.finish()?.stroke(
+        &Stroke {
+            width: distance.abs() * 2.0,
+            line_join: LineJoin::Round,
+            ..Default::default()
+        },
+        1.0,
+    )?;
+    let point = |p: resvg::tiny_skia::Point| Point { x: p.x, y: p.y };
+    let mut loops = Vec::new();
+    let mut curves = Vec::new();
+    let mut current = Point::default();
+    let mut start = current;
+    for segment in expanded.segments() {
+        let curve = match segment {
+            PathSegment::MoveTo(p) => {
+                current = point(p);
+                start = current;
+                continue;
+            }
+            PathSegment::LineTo(p) => CurveSegment::Line {
+                start: current,
+                end: point(p),
+            },
+            PathSegment::QuadTo(control, end) => {
+                let control = point(control);
+                let end = point(end);
+                CurveSegment::Cubic {
+                    start: current,
+                    first: interpolate_point(current, control, 2.0 / 3.0),
+                    second: interpolate_point(end, control, 2.0 / 3.0),
+                    end,
+                }
+            }
+            PathSegment::CubicTo(first, second, end) => CurveSegment::Cubic {
+                start: current,
+                first: point(first),
+                second: point(second),
+                end: point(end),
+            },
+            PathSegment::Close => {
+                if current != start {
+                    curves.push(CurveSegment::Line {
+                        start: current,
+                        end: start,
+                    });
+                }
+                if !curves.is_empty() {
+                    loops.push(std::mem::take(&mut curves));
+                }
+                current = start;
+                continue;
+            }
+        };
+        current = curve.end();
+        curves.push(curve);
+    }
+    // Select the appropriate side of the parallel band. The original paint
+    // contour remains the shared boundary between ink and the fill collar.
+    let area = |curves: &[CurveSegment]| signed_area(&sample_curve_sequence(curves, 0.5));
+    let original_area = signed_area(&contour.points).abs();
+    let mut curves = loops
+        .into_iter()
+        .filter(|curves| {
+            if distance > 0.0 {
+                area(curves).abs() > original_area
+            } else {
+                area(curves).abs() < original_area
+            }
+        })
+        .max_by(|a, b| area(a).abs().total_cmp(&area(b).abs()))?;
+    if area(&curves).signum() != signed_area(&contour.points).signum() {
+        curves = curves
+            .into_iter()
+            .rev()
+            .map(CurveSegment::reversed)
+            .collect();
+    }
+    let anchor = (0..curves.len()).min_by(|&a, &b| {
+        curves[a]
+            .start()
+            .distance(first)
+            .total_cmp(&curves[b].start().distance(first))
+    })?;
+    curves.rotate_left(anchor);
+    Some(ClosedContour {
+        points: sample_curve_sequence(&curves, 0.75),
+        curves,
+        is_ellipse: false,
+        fallback: None,
+    })
+}
+
 pub(crate) fn inset_outline(
     contour: &ClosedContour,
     width: f32,
@@ -7635,8 +7786,38 @@ pub(crate) fn inset_outline(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::color::rgb_to_lab;
+    use crate::color::rgb_to_oklab;
     use crate::segment::{RegionStats, Segmentation, SegmentationSummary};
+
+    #[test]
+    fn offset_band_maps_the_displacement_at_the_window_corner() {
+        let points: Vec<_> = include_str!("test-data/car-window-inset-contour.txt")
+            .lines()
+            .map(|line| {
+                let mut values = line.split_whitespace().map(|v| v.parse::<f32>().unwrap());
+                Point {
+                    x: values.next().unwrap(),
+                    y: values.next().unwrap(),
+                }
+            })
+            .collect();
+        let curves =
+            geometry_bezier::fit_closed(&points, geometry_bezier::CLOSED_CORRIDOR).unwrap();
+        let model = ClosedContour {
+            points: sample_curve_sequence(&curves, 0.75),
+            curves,
+            is_ellipse: false,
+            fallback: None,
+        };
+        let outer = offset_outline(&model, 2.405_499_5).unwrap();
+        let inner = offset_outline(&outer, -3.25).unwrap();
+        let band = outline_between(&outer, &inner)
+            .expect("the measured window collar must retain its corner correspondence");
+        assert_eq!(band.outer_edges.len(), band.inner_edges.len());
+        for (a, b) in [(0.0, 0.25), (0.25, 0.5), (0.5, 1.0)] {
+            assert!(!band.patch(a, b).is_empty());
+        }
+    }
 
     #[test]
     fn cube_alpha_contour_does_not_restore_corner_spurs() {
@@ -7785,7 +7966,7 @@ mod tests {
                             max_x: width,
                             max_y: height,
                             mean_rgb: colours[i],
-                            mean_lab: rgb_to_lab(colours[i]),
+                            mean_lab: rgb_to_oklab(colours[i]),
                         })
                         .collect();
                     let segmentation = Segmentation {
@@ -8227,23 +8408,23 @@ mod tests {
     #[test]
     fn dominant_shared_edge_connects_shades_without_merging_distinct_materials() {
         let shades = [
-            Lab {
+            Oklab {
                 l: 4.0,
                 a: 13.5,
                 b: -17.2,
             },
-            Lab {
+            Oklab {
                 l: 6.6,
                 a: 22.0,
                 b: -31.8,
             },
-            Lab {
+            Oklab {
                 l: 80.5,
                 a: -12.8,
                 b: -27.0,
             },
         ];
-        assert!(delta_e2000(shades[0], shades[1]) > 6.9);
+        assert!(delta_e_ok(shades[0], shades[1]) > 6.9);
         for order in [[0, 1, 2], [2, 1, 0]] {
             let labs: Vec<_> = order.iter().map(|&i| shades[i]).collect();
             let adjacency: Vec<_> = (0..3)
@@ -8276,24 +8457,46 @@ mod tests {
     }
 
     #[test]
+    fn window_ink_antialias_shades_keep_one_continuity_class() {
+        // Adjacent source samples at (842,336) and (842,337). The old
+        // CIEDE2000 distance was 6.15; their scaled OKLab distance is 10.34.
+        // Reusing 6.9 therefore splits the same dark rim after migration.
+        let labs: Vec<_> = [[18.0, 0.0, 0.0], [26.0, 23.0, 24.0], [79.0, 85.0, 89.0]]
+            .map(|rgb| crate::color::rgb_to_oklab(rgb.map(|v| v / 255.0)))
+            .into_iter()
+            .collect();
+        let adjacency = vec![
+            HashMap::from([(1, 8)]),
+            HashMap::from([(0, 8), (2, 8)]),
+            HashMap::from([(1, 8)]),
+        ];
+        let classes = contextual_continuity_classes(&labs, &adjacency, &[true; 3]);
+        assert_eq!(classes[0], classes[1]);
+        assert_ne!(
+            classes[1], classes[2],
+            "the adjacent grey trim is a separate face"
+        );
+    }
+
+    #[test]
     fn perceptually_close_adjacent_patch_shares_continuity_class() {
         let labs = vec![
-            Lab {
+            Oklab {
                 l: 20.0,
                 a: 0.0,
                 b: 0.0,
             },
-            Lab {
+            Oklab {
                 l: 74.8,
                 a: -10.8,
                 b: -15.4,
             },
-            Lab {
+            Oklab {
                 l: 76.0,
                 a: -10.0,
                 b: -14.5,
             },
-            Lab {
+            Oklab {
                 l: 100.0,
                 a: 0.0,
                 b: 0.0,
@@ -8316,22 +8519,22 @@ mod tests {
     #[test]
     fn disconnected_or_visibly_distinct_neutral_faces_keep_separate_classes() {
         let labs = vec![
-            Lab {
+            Oklab {
                 l: 20.0,
                 a: 0.0,
                 b: 0.0,
             },
-            Lab {
+            Oklab {
                 l: 35.0,
                 a: 1.0,
                 b: -1.0,
             },
-            Lab {
+            Oklab {
                 l: 72.0,
                 a: -18.0,
                 b: -22.0,
             },
-            Lab {
+            Oklab {
                 l: 36.0,
                 a: 0.0,
                 b: 0.0,
@@ -8354,22 +8557,22 @@ mod tests {
     #[test]
     fn coreless_line_cap_does_not_split_supported_surface_contour() {
         let labs = vec![
-            Lab {
+            Oklab {
                 l: 92.0,
                 a: 0.0,
                 b: 0.0,
             },
-            Lab {
+            Oklab {
                 l: 54.0,
                 a: 62.0,
                 b: 38.0,
             },
-            Lab {
+            Oklab {
                 l: 59.0,
                 a: 58.0,
                 b: 34.0,
             },
-            Lab {
+            Oklab {
                 l: 18.0,
                 a: 20.0,
                 b: 12.0,
@@ -8404,11 +8607,11 @@ mod tests {
             [0.05, 0.05, 0.05], // independent durable ink
         ];
         for order in [[0, 1, 2, 3, 4], [4, 3, 2, 1, 0]] {
-            let mut labs = vec![Lab::default(); colours.len()];
+            let mut labs = vec![Oklab::default(); colours.len()];
             let mut interior = vec![false; colours.len()];
             let mut adjacency = vec![HashMap::new(); colours.len()];
             for (original, &label) in order.iter().enumerate() {
-                labs[label] = rgb_to_lab(colours[original]);
+                labs[label] = rgb_to_oklab(colours[original]);
                 interior[label] = matches!(original, 0 | 1 | 4);
             }
             for (a, b, contact) in [(0, 2, 40), (2, 3, 4), (3, 1, 3), (3, 4, 8)] {
@@ -8481,7 +8684,7 @@ mod tests {
                 max_x: width,
                 max_y: width,
                 mean_rgb: rgb,
-                mean_lab: rgb_to_lab(rgb),
+                mean_lab: rgb_to_oklab(rgb),
             })
             .collect();
         let segmentation = Segmentation {
@@ -8576,7 +8779,7 @@ mod tests {
                         max_x: pixels.iter().map(|i| i % width + 1).max().unwrap(),
                         max_y: pixels.iter().map(|i| i / width + 1).max().unwrap(),
                         mean_rgb: rgb,
-                        mean_lab: rgb_to_lab(rgb),
+                        mean_lab: rgb_to_oklab(rgb),
                     }
                 })
                 .collect();
@@ -8691,7 +8894,7 @@ mod tests {
                         max_x: pixels.iter().map(|index| index % width + 1).max().unwrap(),
                         max_y: pixels.iter().map(|index| index / width + 1).max().unwrap(),
                         mean_rgb: colour,
-                        mean_lab: rgb_to_lab(colour),
+                        mean_lab: rgb_to_oklab(colour),
                     }
                 })
                 .collect();
@@ -8830,7 +9033,7 @@ mod tests {
                     max_x: pixels.iter().map(|index| index % width + 1).max().unwrap(),
                     max_y: pixels.iter().map(|index| index / width + 1).max().unwrap(),
                     mean_rgb: colours[label],
-                    mean_lab: rgb_to_lab(colours[label]),
+                    mean_lab: rgb_to_oklab(colours[label]),
                 }
             })
             .collect();
@@ -8879,7 +9082,7 @@ mod tests {
                         max_x: pixels.iter().map(|i| i % width + 1).max().unwrap(),
                         max_y: pixels.iter().map(|i| i / width + 1).max().unwrap(),
                         mean_rgb: colours[label],
-                        mean_lab: rgb_to_lab(colours[label]),
+                        mean_lab: rgb_to_oklab(colours[label]),
                     }
                 })
                 .collect();
@@ -8937,7 +9140,7 @@ mod tests {
                 max_x: 8,
                 max_y: 6,
                 mean_rgb: [0.0; 3],
-                mean_lab: rgb_to_lab([0.0; 3]),
+                mean_lab: rgb_to_oklab([0.0; 3]),
             }],
             summary: SegmentationSummary {
                 initial_regions: 1,
@@ -8984,7 +9187,7 @@ mod tests {
                     max_x: 5,
                     max_y: 5,
                     mean_rgb: [0.0; 3],
-                    mean_lab: rgb_to_lab([0.0; 3]),
+                    mean_lab: rgb_to_oklab([0.0; 3]),
                 },
                 RegionStats {
                     id: 1,
@@ -8994,7 +9197,7 @@ mod tests {
                     max_x: 4,
                     max_y: 4,
                     mean_rgb: [1.0; 3],
-                    mean_lab: rgb_to_lab([1.0; 3]),
+                    mean_lab: rgb_to_oklab([1.0; 3]),
                 },
             ],
             summary: SegmentationSummary::default(),
@@ -9187,7 +9390,7 @@ mod tests {
                     max_x: 3,
                     max_y: 4,
                     mean_rgb: [0.5; 3],
-                    mean_lab: rgb_to_lab([0.5; 3]),
+                    mean_lab: rgb_to_oklab([0.5; 3]),
                 },
                 RegionStats {
                     id: 1,
@@ -9197,7 +9400,7 @@ mod tests {
                     max_x: 6,
                     max_y: 4,
                     mean_rgb: [0.5; 3],
-                    mean_lab: rgb_to_lab([0.5; 3]),
+                    mean_lab: rgb_to_oklab([0.5; 3]),
                 },
             ],
             summary: SegmentationSummary::default(),
@@ -9265,7 +9468,7 @@ mod tests {
                     max_x: if id == 0 { 3 } else { width },
                     max_y: if id == 1 { 3 } else { height },
                     mean_rgb: [id as f32 * 0.3; 3],
-                    mean_lab: rgb_to_lab([id as f32 * 0.3; 3]),
+                    mean_lab: rgb_to_oklab([id as f32 * 0.3; 3]),
                 })
                 .collect(),
             summary: SegmentationSummary::default(),
@@ -9363,7 +9566,7 @@ mod tests {
                     max_x: width,
                     max_y: height,
                     mean_rgb: [1.0; 3],
-                    mean_lab: rgb_to_lab([1.0; 3]),
+                    mean_lab: rgb_to_oklab([1.0; 3]),
                 },
                 RegionStats {
                     id: 1,
@@ -9373,7 +9576,7 @@ mod tests {
                     max_x: 25,
                     max_y: 25,
                     mean_rgb: [0.0; 3],
-                    mean_lab: rgb_to_lab([0.0; 3]),
+                    mean_lab: rgb_to_oklab([0.0; 3]),
                 },
             ],
             summary: SegmentationSummary::default(),
@@ -9411,7 +9614,7 @@ mod tests {
                         max_x: width,
                         max_y: height,
                         mean_rgb: [id as f32; 3],
-                        mean_lab: rgb_to_lab([id as f32; 3]),
+                        mean_lab: rgb_to_oklab([id as f32; 3]),
                     })
                     .collect(),
                 summary: SegmentationSummary::default(),
@@ -9487,7 +9690,7 @@ mod tests {
                         max_x: width,
                         max_y: height,
                         mean_rgb: [id as f32 * 0.3; 3],
-                        mean_lab: rgb_to_lab([id as f32 * 0.3; 3]),
+                        mean_lab: rgb_to_oklab([id as f32 * 0.3; 3]),
                     }
                 })
                 .collect();

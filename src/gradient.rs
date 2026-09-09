@@ -5,13 +5,10 @@ use rayon::prelude::*;
 use serde::Serialize;
 
 use crate::color::{
-    delta_e2000, delta_e2000_pairs, delta_e2000_to_many, delta_e76, rgb_to_lab,
-    skimage_lab_values_to_rgb, Lab,
+    delta_e_ok, delta_e_ok_pairs, delta_e_ok_to_many, oklab_values_to_rgb, rgb_to_oklab, Oklab,
 };
 use crate::config::Config;
-use crate::edge::{
-    dilate_square, lab_pixels, preprocess_lab_pixels, preprocess_lab_values, EdgeRoles,
-};
+use crate::edge::{dilate_square, oklab_pixels, oklab_values, EdgeRoles};
 use crate::geometry::Point;
 use crate::hierarchy::HierarchicalTopology;
 use crate::raster::{percentile, Raster};
@@ -493,6 +490,16 @@ fn interpolation_weights(parameter: f32, offsets: &[f64]) -> (usize, usize, f32)
     (left, right, alpha)
 }
 
+fn slope_curvature_weights(offsets: [f64; 3]) -> [f64; 3] {
+    let left = (offsets[1] - offsets[0]).max(1e-8);
+    let right = (offsets[2] - offsets[1]).max(1e-8);
+    [
+        2.0 * right / (left + right),
+        -2.0,
+        2.0 * left / (left + right),
+    ]
+}
+
 #[allow(clippy::needless_range_loop)]
 fn fitted_stops(
     source: &Raster,
@@ -500,6 +507,34 @@ fn fitted_stops(
     parameters: &[f32],
     offsets: &[f64],
 ) -> Vec<ColorStop> {
+    let low = parameters
+        .iter()
+        .map(|t| t.clamp(0.0, 1.0))
+        .fold(f32::INFINITY, f32::min);
+    let high = parameters
+        .iter()
+        .map(|t| t.clamp(0.0, 1.0))
+        .fold(f32::NEG_INFINITY, f32::max);
+    if high - low < 0.25 {
+        if high - low < 1e-7 {
+            let color = mean_color_f64(source, samples).map(f64::from);
+            return vec![
+                ColorStop { offset: 0.0, color },
+                ColorStop { offset: 1.0, color },
+            ];
+        }
+        // Fit the observed interval, without fabricated empty bins or clipped
+        // extrapolated endpoint colours changing the slope inside the face.
+        let mut knots = vec![f64::from(low)];
+        knots.extend(
+            offsets
+                .iter()
+                .copied()
+                .filter(|&t| t > f64::from(low) && t < f64::from(high)),
+        );
+        knots.push(f64::from(high));
+        return fitted_stops_direct(source, samples, parameters, &knots);
+    }
     let bin_count = 64_usize.min(samples.len().max(8)).max(8);
     let mut bins = vec![Vec::<[f32; 3]>::new(); bin_count];
     for (&index, &parameter) in samples.iter().zip(parameters) {
@@ -672,7 +707,13 @@ fn fitted_stops(
     if count >= 3 {
         let lambda = 0.35_f64;
         for row in 0..count - 2 {
-            let difference = [(row, 1.0_f64), (row + 1, -2.0), (row + 2, 1.0)];
+            let weights =
+                slope_curvature_weights([offsets[row], offsets[row + 1], offsets[row + 2]]);
+            let difference = [
+                (row, weights[0]),
+                (row + 1, weights[1]),
+                (row + 2, weights[2]),
+            ];
             for &(first, first_value) in &difference {
                 for &(second, second_value) in &difference {
                     normal[first][second] += lambda * first_value * second_value;
@@ -728,20 +769,18 @@ fn paint_error(
     let rendered: Vec<[f32; 3]> = samples.iter().map(|&index| predicted(index)).collect();
     let reference_lab = preprocess_color_values(references);
     let rendered_lab = preprocess_color_values(rendered);
-    let errors = delta_e2000_pairs(&reference_lab, &rendered_lab);
+    let errors = delta_e_ok_pairs(&reference_lab, &rendered_lab);
     ErrorStats {
         mean: numpy_sum_f32(&errors) / errors.len() as f32,
         percentile: percentile(errors, 0.90),
     }
 }
 
-/// Measure an emitted sRGB Paint against the skimage-compatible Lab values
-/// already computed for the native source.  Paint selection in the Python
-/// implementation deliberately uses `skimage.color.rgb2lab`; the
-/// preprocess-Lab transform above belongs to boundary evidence and is not an
-/// interchangeable approximation at the acceptance thresholds.
+/// Measure an emitted sRGB Paint against the cached, 100-scaled OKLab
+/// coordinates of the native source. Fitting and boundary evidence use the
+/// same colour transform.
 fn paint_error_against_labs(
-    source_labs: &[Lab],
+    source_labs: &[Oklab],
     samples: &[usize],
     predicted: impl Fn(usize) -> [f32; 3],
 ) -> ErrorStats {
@@ -762,7 +801,10 @@ fn paint_error_against_labs(
     paint_error_against_sample_labs(&references, rendered)
 }
 
-fn paint_error_against_sample_labs(reference_labs: &[Lab], rendered: Vec<[f32; 3]>) -> ErrorStats {
+fn paint_error_against_sample_labs(
+    reference_labs: &[Oklab],
+    rendered: Vec<[f32; 3]>,
+) -> ErrorStats {
     if reference_labs.is_empty() {
         return ErrorStats {
             mean: 0.0,
@@ -771,22 +813,22 @@ fn paint_error_against_sample_labs(reference_labs: &[Lab], rendered: Vec<[f32; 3
     }
     assert_eq!(reference_labs.len(), rendered.len());
     let rendered = Raster::new(rendered.len(), 1, rendered);
-    let rendered_labs = lab_pixels(&rendered);
-    let errors = delta_e2000_pairs(reference_labs, &rendered_labs);
+    let rendered_labs = oklab_pixels(&rendered);
+    let errors = delta_e_ok_pairs(reference_labs, &rendered_labs);
     ErrorStats {
         mean: numpy_sum_f32(&errors) / errors.len() as f32,
         percentile: percentile(errors, 0.90),
     }
 }
 
-fn constant_paint_error_for_labs(reference_labs: &[Lab], rendered_lab: Lab) -> ErrorStats {
+fn constant_paint_error_for_labs(reference_labs: &[Oklab], rendered_lab: Oklab) -> ErrorStats {
     if reference_labs.is_empty() {
         return ErrorStats {
             mean: 0.0,
             percentile: 0.0,
         };
     }
-    let errors = delta_e2000_to_many(reference_labs, rendered_lab);
+    let errors = delta_e_ok_to_many(reference_labs, rendered_lab);
     ErrorStats {
         mean: numpy_sum_f32(&errors) / errors.len() as f32,
         percentile: percentile(errors, 0.90),
@@ -794,7 +836,7 @@ fn constant_paint_error_for_labs(reference_labs: &[Lab], rendered_lab: Lab) -> E
 }
 
 fn gradient_error_against_sample_labs(
-    reference_labs: &[Lab],
+    reference_labs: &[Oklab],
     parameters: &[f32],
     stops: &[ColorStop],
 ) -> ErrorStats {
@@ -806,7 +848,7 @@ fn gradient_error_against_sample_labs(
 }
 
 fn paint_stats_against_labs(
-    source_labs: &[Lab],
+    source_labs: &[Oklab],
     samples: &[usize],
     width: usize,
     paint: &Paint,
@@ -815,7 +857,7 @@ fn paint_stats_against_labs(
 }
 
 fn paint_stats_against_sample_labs(
-    reference_labs: &[Lab],
+    reference_labs: &[Oklab],
     samples: &[usize],
     width: usize,
     paint: &Paint,
@@ -827,11 +869,11 @@ fn paint_stats_against_sample_labs(
     paint_error_against_sample_labs(reference_labs, rendered)
 }
 
-fn preprocess_color_values(colors: Vec<[f32; 3]>) -> Vec<Lab> {
+fn preprocess_color_values(colors: Vec<[f32; 3]>) -> Vec<Oklab> {
     if colors.is_empty() {
         return Vec::new();
     }
-    preprocess_lab_values(&colors)
+    oklab_values(&colors)
 }
 
 fn objective(stats: ErrorStats) -> f32 {
@@ -1178,7 +1220,7 @@ fn gradient_error(
         .collect::<Vec<_>>();
     let reference_lab = preprocess_color_values(references);
     let rendered_lab = preprocess_color_values(rendered);
-    let errors = delta_e2000_pairs(&reference_lab, &rendered_lab);
+    let errors = delta_e_ok_pairs(&reference_lab, &rendered_lab);
     ErrorStats {
         mean: numpy_sum_f32(&errors) / errors.len() as f32,
         percentile: percentile(errors, 0.90),
@@ -1200,10 +1242,10 @@ fn weighted_median_lab(values: &[(f32, f32)]) -> f32 {
     0.0
 }
 
-/// Python `_fit_stops`: three robust stops in Lab, converted back to the
+/// Python `_fit_stops`: three robust stops in Oklab, converted back to the
 /// exact sRGB field that is serialized to SVG.
-fn legacy_stops(source_labs: &[Lab], samples: &[usize], parameters: &[f32]) -> Vec<ColorStop> {
-    let mut stop_labs = Vec::<Lab>::with_capacity(3);
+fn legacy_stops(source_labs: &[Oklab], samples: &[usize], parameters: &[f32]) -> Vec<ColorStop> {
+    let mut stop_labs = Vec::<Oklab>::with_capacity(3);
     for stop in 0..3 {
         let mut selected = Vec::<(usize, f32)>::new();
         for (position, &parameter) in parameters.iter().enumerate() {
@@ -1237,7 +1279,7 @@ fn legacy_stops(source_labs: &[Lab], samples: &[usize], parameters: &[f32]) -> V
         if selected.is_empty() {
             selected.extend((0..samples.len()).map(|position| (position, 1.0)));
         }
-        let channel = |value: Lab, channel: usize| match channel {
+        let channel = |value: Oklab, channel: usize| match channel {
             0 => value.l,
             1 => value.a,
             _ => value.b,
@@ -1255,7 +1297,7 @@ fn legacy_stops(source_labs: &[Lab], samples: &[usize], parameters: &[f32]) -> V
                     .collect::<Vec<_>>(),
             )
         });
-        stop_labs.push(Lab {
+        stop_labs.push(Oklab {
             l: fitted[0],
             a: fitted[1],
             b: fitted[2],
@@ -1287,12 +1329,17 @@ fn legacy_stops(source_labs: &[Lab], samples: &[usize], parameters: &[f32]) -> V
             0.98,
         )
     });
+    // Weighted f32 percentile interpolation can reverse nearly identical
+    // bounds by one ULP (notably the chroma of neutral pixels). Preserve the
+    // computed endpoints, but order them before calling clamp. Already ordered
+    // bounds, and therefore every previously successful fit, are unchanged.
+    let bounds = [0, 1, 2].map(|c| (lows[c].min(highs[c]), lows[c].max(highs[c])));
     for value in &mut stop_labs {
-        value.l = value.l.clamp(lows[0], highs[0]);
-        value.a = value.a.clamp(lows[1], highs[1]);
-        value.b = value.b.clamp(lows[2], highs[2]);
+        value.l = value.l.clamp(bounds[0].0, bounds[0].1);
+        value.a = value.a.clamp(bounds[1].0, bounds[1].1);
+        value.b = value.b.clamp(bounds[2].0, bounds[2].1);
     }
-    skimage_lab_values_to_rgb(&stop_labs)
+    oklab_values_to_rgb(&stop_labs)
         .into_iter()
         .zip([0.0_f64, 0.5, 1.0])
         .map(|(color, offset)| ColorStop {
@@ -1303,7 +1350,7 @@ fn legacy_stops(source_labs: &[Lab], samples: &[usize], parameters: &[f32]) -> V
 }
 
 fn legacy_gradient_error_against_sample_labs(
-    reference_labs: &[Lab],
+    reference_labs: &[Oklab],
     parameters: &[f32],
     stops: &[ColorStop],
 ) -> ErrorStats {
@@ -1330,7 +1377,7 @@ fn legacy_gradient_error_against_sample_labs(
 
 fn add_office_stops(
     source: &Raster,
-    reference_labs: &[Lab],
+    reference_labs: &[Oklab],
     samples: &[usize],
     parameters: &[f32],
     template: &Paint,
@@ -1405,8 +1452,8 @@ fn add_office_stops(
 
 fn legacy_gradient_candidate(
     source: &Raster,
-    source_labs: &[Lab],
-    reference_labs: &[Lab],
+    source_labs: &[Oklab],
+    reference_labs: &[Oklab],
     samples: &[usize],
     region_bounds: Bounds,
     directional_only: bool,
@@ -1677,7 +1724,7 @@ pub(crate) fn fit_alpha_field(source: &Raster, pixels: &[usize]) -> Option<Paint
     }
     let labs = samples
         .iter()
-        .map(|&i| rgb_to_lab(source.pixels[i]))
+        .map(|&i| rgb_to_oklab(source.pixels[i]))
         .collect::<Vec<_>>();
     if let Some((paint, _)) = office_gradient_candidate_with_labs(
         source,
@@ -1700,7 +1747,7 @@ pub(crate) fn fit_alpha_field(source: &Raster, pixels: &[usize]) -> Option<Paint
 
 fn office_gradient_candidate(
     source: &Raster,
-    source_labs: &[Lab],
+    source_labs: &[Oklab],
     samples: &[usize],
     region_bounds: Bounds,
     maximum_stops: usize,
@@ -1720,7 +1767,7 @@ fn office_gradient_candidate(
 
 fn office_gradient_candidate_with_labs(
     source: &Raster,
-    reference_labs: &[Lab],
+    reference_labs: &[Oklab],
     samples: &[usize],
     region_bounds: Bounds,
     maximum_stops: usize,
@@ -1887,11 +1934,11 @@ fn office_gradient_candidate_with_labs(
 fn fit_region(
     label: usize,
     source: &Raster,
-    source_labs: &[Lab],
+    source_labs: &[Oklab],
     indices: &[usize],
     paint_indices: &[usize],
     canonical_solid: [f32; 3],
-    canonical_solid_lab: Lab,
+    canonical_solid_lab: Oklab,
     directional_only: bool,
     sample_budget: usize,
     use_primary_gate: bool,
@@ -1977,7 +2024,7 @@ fn required_gradient_gain(
         // normalisation, many tiny faces can each buy an SVG definition with
         // a small per-pixel improvement and make the vector representation
         // substantially more complex for little image-wide benefit.
-        // One full DeltaE00 just-noticeable-difference over the minimum face
+        // One full perceptual-error budget over the minimum face
         // area is the fixed perceptual budget for adding an SVG definition.
         small_region_office_required_gain(minimum_improvement, region_area, minimum_gradient_area)
     } else {
@@ -2038,12 +2085,12 @@ fn smooth_fit_support(source: &Raster, samples: &[usize]) -> Vec<usize> {
 fn fit_region_samples(
     label: usize,
     source: &Raster,
-    source_labs: &[Lab],
+    source_labs: &[Oklab],
     samples: &[usize],
     area: usize,
     _region_bounds: Bounds,
     canonical_solid: [f32; 3],
-    canonical_solid_lab: Lab,
+    canonical_solid_lab: Oklab,
     directional_only: bool,
     run_full_fit: bool,
     config: &Config,
@@ -2053,7 +2100,7 @@ fn fit_region_samples(
     // mean here makes every nominally solid face a different colour before
     // gradient selection even starts.
     let solid_color = canonical_solid;
-    let sample_labs: Vec<Lab> = samples.iter().map(|&index| source_labs[index]).collect();
+    let sample_labs: Vec<Oklab> = samples.iter().map(|&index| source_labs[index]).collect();
     let solid_error = constant_paint_error_for_labs(&sample_labs, canonical_solid_lab);
     if !run_full_fit {
         return (
@@ -2071,7 +2118,7 @@ fn fit_region_samples(
         eprintln!("paint gates label={label} area={area} samples={} solid={solid_error:?} directional={directional_only}",samples.len());
     }
     let small_region = area < config.minimum_gradient_area as usize;
-    let tone_scale = config.tonal_detail_scale(rgb_to_lab(solid_color).l);
+    let tone_scale = config.tonal_detail_scale(rgb_to_oklab(solid_color).l);
     let minimum_improvement = 0.25 * 2.3 * tone_scale;
     // Every candidate error is non-negative. If even a hypothetical perfect
     // gradient cannot clear the existing promotion charge, no emitted
@@ -2091,12 +2138,12 @@ fn fit_region_samples(
             RegionFitWork::GainBoundSolid,
         );
     }
-    let median_lab = Lab {
+    let median_lab = Oklab {
         l: median(&mut sample_labs.iter().map(|value| value.l).collect::<Vec<_>>()),
         a: median(&mut sample_labs.iter().map(|value| value.a).collect::<Vec<_>>()),
         b: median(&mut sample_labs.iter().map(|value| value.b).collect::<Vec<_>>()),
     };
-    let perceptual_range = percentile(delta_e2000_to_many(&sample_labs, median_lab), 0.90);
+    let perceptual_range = percentile(delta_e_ok_to_many(&sample_labs, median_lab), 0.90);
     // A complete just-noticeable-difference is too coarse for smooth,
     // low-chroma shading: on light monochrome artwork it can make a visibly
     // modelled ramp look flat after vectorization. The improvement and
@@ -2312,7 +2359,13 @@ fn fitted_stops_direct(
     if count >= 3 {
         let lambda = 0.35_f64;
         for row in 0..count - 2 {
-            let difference = [(row, 1.0_f64), (row + 1, -2.0), (row + 2, 1.0)];
+            let weights =
+                slope_curvature_weights([offsets[row], offsets[row + 1], offsets[row + 2]]);
+            let difference = [
+                (row, weights[0]),
+                (row + 1, weights[1]),
+                (row + 2, weights[2]),
+            ];
             for &(first, first_value) in &difference {
                 for &(second, second_value) in &difference {
                     normal[first][second] += lambda * first_value * second_value;
@@ -2399,12 +2452,11 @@ fn paint_stats(source: &Raster, samples: &[usize], paint: &Paint) -> ErrorStats 
     })
 }
 
-// Merge candidates share the same source observations. This deliberately
-// caches preprocess-Lab, not the different Lab transform used by Paint fitting.
+// Merge candidates share the same source observations and cached OKLab values.
 struct MergePaintSamples<'a> {
     source: &'a Raster,
     indices: &'a [usize],
-    labs: Vec<Lab>,
+    labs: Vec<Oklab>,
 }
 
 impl<'a> MergePaintSamples<'a> {
@@ -2426,7 +2478,7 @@ impl<'a> MergePaintSamples<'a> {
             };
         }
         let rendered_labs = preprocess_color_values(rendered);
-        let errors = delta_e2000_pairs(&self.labs, &rendered_labs);
+        let errors = delta_e_ok_pairs(&self.labs, &rendered_labs);
         ErrorStats {
             mean: numpy_sum_f32(&errors) / errors.len() as f32,
             percentile: percentile(errors, 0.90),
@@ -2618,9 +2670,9 @@ fn merge_profile_is_smooth(source: &Raster, samples: &[usize], parameters: &[f32
                 / kernel_sum) as f32;
         }
     }
-    let labs = preprocess_lab_values(&profile);
+    let labs = oklab_values(&profile);
     labs.windows(2)
-        .map(|pair| delta_e2000(pair[0], pair[1]))
+        .map(|pair| delta_e_ok(pair[0], pair[1]))
         .fold(0.0_f32, f32::max)
         <= 5.0
 }
@@ -2719,7 +2771,7 @@ fn fit_merge_paint(
                 mse,
                 stats.mean,
                 stats.percentile,
-                delta_e2000_pairs(&reference_lab, &rendered_lab),
+                delta_e_ok_pairs(&reference_lab, &rendered_lab),
                 reference_lab,
                 rendered_lab,
                 paint,
@@ -2816,7 +2868,7 @@ fn paint_rgb_mse(source: &Raster, samples: &[usize], paint: &Paint) -> f32 {
 ///
 /// A small set of elliptical, transparent radial layers is deliberately used
 /// instead of a raster patch.  The candidate search is RGB-only and therefore
-/// cheap; the caller still applies the ordinary CIEDE2000 acceptance gate to
+/// cheap; the caller still applies the ordinary OKLab acceptance gate to
 /// the winning Paint.
 fn fit_layered_residual_paint(
     source: &Raster,
@@ -3304,7 +3356,7 @@ fn merge_proposal(
     let first_mean = mean_color_f64(source, &first_samples);
     let second_mean = mean_color_f64(source, &second_samples);
     let mean_labs = preprocess_color_values(vec![first_mean, second_mean]);
-    let mean_delta = delta_e2000_pairs(&mean_labs[..1], &mean_labs[1..])[0];
+    let mean_delta = delta_e_ok_pairs(&mean_labs[..1], &mean_labs[1..])[0];
     let hard_edge = mean_delta > 22.0;
     let limit = if hard_edge {
         config
@@ -3316,8 +3368,8 @@ fn merge_proposal(
     // Check the darker and lighter child separately: an average midtone must
     // not loosen the budget for an incident shadow or highlight face.
     let tone_scale = config
-        .tonal_detail_scale(rgb_to_lab(first_mean).l)
-        .min(config.tonal_detail_scale(rgb_to_lab(second_mean).l));
+        .tonal_detail_scale(rgb_to_oklab(first_mean).l)
+        .min(config.tonal_detail_scale(rgb_to_oklab(second_mean).l));
     let limit = limit * tone_scale;
     let solid = Paint::Solid {
         color: mean_color(source, &quick_samples),
@@ -3557,7 +3609,7 @@ fn merge_candidate_proposal(
                 .collect();
             let first_lab = preprocess_color_values(first_colors);
             let second_lab = preprocess_color_values(second_colors);
-            let mut predicted = delta_e2000_pairs(&first_lab, &second_lab);
+            let mut predicted = delta_e_ok_pairs(&first_lab, &second_lab);
             if median(&mut predicted) < 0.45 * boundary.median_delta_e {
                 proposal.score = f32::INFINITY;
                 break;
@@ -3659,7 +3711,7 @@ pub fn merge_partition(
         region.as_mut().unwrap().labels.insert(label);
     }
     let barrier = dilate_square(&roles.face_barrier, source.width, source.height, 1);
-    let edge_lab = preprocess_lab_pixels(edge_reference);
+    let edge_lab = oklab_pixels(edge_reference);
     let mut adjacency = vec![HashSet::<usize>::new(); count];
     let mut evidence = HashMap::<(usize, usize), (Vec<(usize, usize)>, Vec<f32>, bool)>::new();
     let mut inspect = |first: usize, second: usize| {
@@ -3678,7 +3730,7 @@ pub fn merge_partition(
         } else {
             (second, first)
         });
-        entry.1.push(delta_e2000(edge_lab[first], edge_lab[second]));
+        entry.1.push(delta_e_ok(edge_lab[first], edge_lab[second]));
         entry.2 |= barrier[first] || barrier[second];
     };
     for y in 0..source.height {
@@ -3948,7 +4000,7 @@ struct SmoothPaintBoundary {
 
 // Resolve blurred steps over several pixels. A one-pixel slope can look
 // continuous even when it connects two distinct, nearly flat colour fields.
-fn boundary_material_step(labs: &[Lab], segmentation: &Segmentation, point: Point) -> bool {
+fn boundary_material_step(labs: &[Oklab], segmentation: &Segmentation, point: Point) -> bool {
     let horizontal = point.x.fract() != 0.0;
     let x = point.x.floor() as isize;
     let y = point.y.floor() as isize;
@@ -3970,8 +4022,8 @@ fn boundary_material_step(labs: &[Lab], segmentation: &Segmentation, point: Poin
             indices[slot] = py as usize * segmentation.width + px as usize;
         }
         let values = indices.map(|i| labs[i]);
-        let centre = delta_e2000(values[1], values[2]);
-        let outside = 0.5 * (delta_e2000(values[0], values[1]) + delta_e2000(values[2], values[3]));
+        let centre = delta_e_ok(values[1], values[2]);
+        let outside = 0.5 * (delta_e_ok(values[0], values[1]) + delta_e_ok(values[2], values[3]));
         centre >= 3.0 && centre > 3.0 * outside.max(0.25)
     })
 }
@@ -3981,7 +4033,7 @@ fn boundary_has_material_step(boundary: &SmoothPaintBoundary) -> bool {
 }
 
 fn measure_boundary_material_step(
-    labs: &[Lab],
+    labs: &[Oklab],
     segmentation: &Segmentation,
     boundary: &mut SmoothPaintBoundary,
 ) {
@@ -3998,11 +4050,16 @@ fn measure_boundary_material_step(
 /// Relative change of the colour slope across four consecutive samples.
 ///
 /// A quantizer boundary in smooth shading can have a sizeable one-pixel
-/// DeltaE while the Lab slope on both sides still predicts that change.  A
+/// DeltaE while the Oklab slope on both sides still predicts that change.  A
 /// material edge has the opposite signature: most of the colour change is
 /// concentrated in the middle step, so the neighbouring slopes disagree.
-fn lab_gradient_discontinuity(previous: Lab, first: Lab, second: Lab, following: Lab) -> f32 {
-    let vector = |left: Lab, right: Lab| [right.l - left.l, right.a - left.a, right.b - left.b];
+fn lab_gradient_discontinuity(
+    previous: Oklab,
+    first: Oklab,
+    second: Oklab,
+    following: Oklab,
+) -> f32 {
+    let vector = |left: Oklab, right: Oklab| [right.l - left.l, right.a - left.a, right.b - left.b];
     let norm =
         |value: [f32; 3]| (value[0] * value[0] + value[1] * value[1] + value[2] * value[2]).sqrt();
     let difference = |left: [f32; 3], right: [f32; 3]| {
@@ -4016,7 +4073,7 @@ fn lab_gradient_discontinuity(previous: Lab, first: Lab, second: Lab, following:
 }
 
 fn boundary_gradient_discontinuity(
-    labs: &[Lab],
+    labs: &[Oklab],
     segmentation: &Segmentation,
     first: usize,
     second: usize,
@@ -4140,12 +4197,12 @@ fn paint_at_point(paint: &Paint, point: Point) -> [f32; 3] {
 }
 
 fn errors_for_indices(
-    source_labs: &[Lab],
+    source_labs: &[Oklab],
     samples: &[usize],
     width: usize,
     paint: &Paint,
 ) -> Vec<f32> {
-    let references: Vec<Lab> = samples.iter().map(|&index| source_labs[index]).collect();
+    let references: Vec<Oklab> = samples.iter().map(|&index| source_labs[index]).collect();
     let rendered = Raster::new(
         samples.len(),
         1,
@@ -4154,7 +4211,7 @@ fn errors_for_indices(
             .map(|&index| paint_at(paint, index, width))
             .collect(),
     );
-    delta_e2000_pairs(&references, &lab_pixels(&rendered))
+    delta_e_ok_pairs(&references, &oklab_pixels(&rendered))
 }
 
 fn seam_errors_at_points(first: &Paint, second: &Paint, points: &[Point]) -> Vec<f32> {
@@ -4166,13 +4223,13 @@ fn seam_errors_at_points(first: &Paint, second: &Paint, points: &[Point]) -> Vec
         .iter()
         .map(|&point| paint_at_point(second, point))
         .collect();
-    let first_lab = lab_pixels(&Raster::new(points.len(), 1, first_rgb));
-    let second_lab = lab_pixels(&Raster::new(points.len(), 1, second_rgb));
-    delta_e2000_pairs(&first_lab, &second_lab)
+    let first_lab = oklab_pixels(&Raster::new(points.len(), 1, first_rgb));
+    let second_lab = oklab_pixels(&Raster::new(points.len(), 1, second_rgb));
+    delta_e_ok_pairs(&first_lab, &second_lab)
 }
 
 fn smooth_paint_boundaries(
-    labs: &[Lab],
+    labs: &[Oklab],
     segmentation: &Segmentation,
     minimum_length: usize,
     include_non_smooth: bool,
@@ -4194,7 +4251,7 @@ fn smooth_paint_boundaries(
                     x: x as f32 + 0.5,
                     y: y as f32,
                 },
-                delta_e2000(labs[first_index], labs[second_index]),
+                delta_e_ok(labs[first_index], labs[second_index]),
                 boundary_gradient_discontinuity(labs, segmentation, first_index, second_index),
             ));
         }
@@ -4214,7 +4271,7 @@ fn smooth_paint_boundaries(
                     x: x as f32,
                     y: y as f32 + 0.5,
                 },
-                delta_e2000(labs[first_index], labs[second_index]),
+                delta_e_ok(labs[first_index], labs[second_index]),
                 boundary_gradient_discontinuity(labs, segmentation, first_index, second_index),
             ));
         }
@@ -4369,7 +4426,7 @@ fn preserves_local_shading(
 #[allow(clippy::too_many_arguments)]
 fn harmonize_adjacent_paints(
     source: &Raster,
-    source_labs: &[Lab],
+    source_labs: &[Oklab],
     segmentation: &Segmentation,
     region_paint_indices: &[Vec<usize>],
     paint_boundaries: &[SmoothPaintBoundary],
@@ -4639,13 +4696,13 @@ fn couple_linear(
                 continue;
             }
         }
-        let endpoint_distance = delta_e76(
-            rgb_to_lab(sa.last().unwrap().color.map(|value| value as f32)),
-            rgb_to_lab(sb.first().unwrap().color.map(|value| value as f32)),
+        let endpoint_distance = delta_e_ok(
+            rgb_to_oklab(sa.last().unwrap().color.map(|value| value as f32)),
+            rgb_to_oklab(sb.first().unwrap().color.map(|value| value as f32)),
         )
-        .min(delta_e76(
-            rgb_to_lab(sa.first().unwrap().color.map(|value| value as f32)),
-            rgb_to_lab(sb.last().unwrap().color.map(|value| value as f32)),
+        .min(delta_e_ok(
+            rgb_to_oklab(sa.first().unwrap().color.map(|value| value as f32)),
+            rgb_to_oklab(sb.last().unwrap().color.map(|value| value as f32)),
         ));
         if endpoint_distance <= config.gradient_merge_error * 3.0 {
             union.union(a as usize, b as usize);
@@ -4979,7 +5036,7 @@ fn extended_linear_geometry(
 
 fn coupled_candidate_directions(
     source: &Raster,
-    source_labs: &[Lab],
+    source_labs: &[Oklab],
     samples: &[usize],
 ) -> Vec<(f32, f32)> {
     let divisor = samples.len().max(1) as f32;
@@ -5058,7 +5115,7 @@ fn coupled_candidate_directions(
 
 fn fit_coupled_geometry(
     source: &Raster,
-    source_labs: &[Lab],
+    source_labs: &[Oklab],
     samples: &[usize],
     geometry: &Paint,
 ) -> (Paint, ErrorStats) {
@@ -5106,7 +5163,7 @@ fn fit_coupled_geometry(
 
 fn choose_coupled_geometry(
     source: &Raster,
-    source_labs: &[Lab],
+    source_labs: &[Oklab],
     samples: &[usize],
     current: &Paint,
 ) -> Paint {
@@ -5254,7 +5311,7 @@ fn weighted_percentile(mut values: Vec<(f32, f32)>, quantile: f32) -> f32 {
 #[allow(clippy::too_many_arguments)]
 fn couple_adjacent_paints(
     source: &Raster,
-    source_labs: &[Lab],
+    source_labs: &[Oklab],
     segmentation: &Segmentation,
     region_indices: &[Vec<usize>],
     region_paint_indices: &[Vec<usize>],
@@ -5666,7 +5723,7 @@ pub(crate) struct SupportedPaintMergeReport {
 type PaintMergePairIdentity = ((usize, usize), (usize, usize));
 
 fn supported_merge_error_gate(
-    labs: &[Lab],
+    labs: &[Oklab],
     width: usize,
     faces: [(&[usize], &Paint); 2],
     candidate: &Paint,
@@ -5760,8 +5817,8 @@ pub(crate) fn merge_source_supported_paints(
     if segmentation.regions.len() < 2 {
         return report;
     }
-    let source_labs = lab_pixels(source);
-    let boundary_labs = lab_pixels(boundary_source);
+    let source_labs = oklab_pixels(source);
+    let boundary_labs = oklab_pixels(boundary_source);
     let mut rejected = HashSet::new();
     // Rebuild native boundary evidence after each disjoint matching. A merged
     // face may then join another neighbour, while all contacts are rechecked.
@@ -5791,8 +5848,8 @@ pub(crate) fn merge_source_supported_paints(
 fn merge_source_supported_paints_round(
     source: &Raster,
     boundary_source: &Raster,
-    source_labs: &[Lab],
-    boundary_labs: &[Lab],
+    source_labs: &[Oklab],
+    boundary_labs: &[Oklab],
     segmentation: &mut Segmentation,
     paints: &mut Vec<Paint>,
     config: &Config,
@@ -5951,7 +6008,7 @@ fn merge_source_supported_paints_round(
             );
             // A union fit is not always the best underpaint for a smooth residual:
             // either incident face may already model the common ramp accurately.
-            // Try each non-layered base and let the same per-face CIEDE2000 gates
+            // Try each non-layered base and let the same per-face OKLab gates
             // below decide whether removing the interface is lossless enough.
             let mut layered_bases = vec![
                 proposal.paint.clone(),
@@ -6135,7 +6192,7 @@ fn fit_all_internal(
     config: &Config,
 ) -> (Vec<Paint>, GradientSummary) {
     let fit_started = std::time::Instant::now();
-    let source_labs = lab_pixels(source);
+    let source_labs = oklab_pixels(source);
     let mut region_indices = vec![Vec::<usize>::new(); segmentation.regions.len()];
     let mut region_paint_indices = vec![Vec::<usize>::new(); segmentation.regions.len()];
     for (index, &label) in segmentation.labels.iter().enumerate() {
@@ -6158,19 +6215,45 @@ fn fit_all_internal(
     let region_density = segmentation.regions.len() as f32
         / (segmentation.width * segmentation.height).max(1) as f32;
     let use_primary_gate = region_density >= config.paint_primary_min_region_density;
+    let mut key_counts = HashMap::<u32, usize>::new();
+    for &key in &segmentation.paint_keys {
+        *key_counts.entry(key).or_default() += 1;
+    }
     let canonical_solids = region_indices
         .iter()
-        .map(|indices| {
-            indices
-                .first()
-                .map(|&index| segmentation.canonical.pixels[index])
-                .unwrap_or([0.0; 3])
+        .enumerate()
+        .map(|(label, indices)| {
+            let spatial_child = segmentation
+                .paint_keys
+                .get(label)
+                .is_some_and(|key| key_counts.get(key).copied().unwrap_or(0) > 1);
+            if spatial_child && !indices.is_empty() {
+                // A spatial child does not have its parent's representative
+                // colour. Reusing it can paint a tiny sliver with a distant
+                // part of a gradient, and the area-based gain gate then
+                // prevents any gradient from correcting that colour.
+                let observations = if region_paint_indices[label].is_empty() {
+                    indices
+                } else {
+                    &region_paint_indices[label]
+                };
+                mean_color_f64(source, observations)
+            } else if !region_paint_indices[label].is_empty() {
+                // Fit the constant to the same local observations as a gradient.
+                // Accumulate in f64: sequential f32 sums drift on large faces.
+                mean_color_f64(source, &region_paint_indices[label])
+            } else {
+                indices
+                    .first()
+                    .map(|&i| segmentation.canonical.pixels[i])
+                    .unwrap_or([0.0; 3])
+            }
         })
         .collect::<Vec<_>>();
     // Solid candidates repeat one canonical colour across every Paint
     // sample. Convert each region colour once rather than materialising and
     // converting thousands of identical RGB pixels inside every fit.
-    let canonical_solid_labs = lab_pixels(&Raster::new(
+    let canonical_solid_labs = oklab_pixels(&Raster::new(
         canonical_solids.len(),
         1,
         canonical_solids.clone(),
@@ -6282,7 +6365,7 @@ fn fit_all_internal(
         save_paint_kinds(&format!("{prefix}-initial.json"), &paints);
         save_paint_details(&format!("{prefix}-initial-details.json"), &paints);
     }
-    let boundary_labs = lab_pixels(boundary_source);
+    let boundary_labs = oklab_pixels(boundary_source);
     let paint_boundaries = smooth_paint_boundaries(&boundary_labs, segmentation, 2, true)
         .into_iter()
         .filter_map(|mut boundary| {
@@ -6506,11 +6589,11 @@ pub(crate) fn simplify_layered_paints(
         let mut increase = 0.0;
         let mut supported = true;
         for &i in &pixels {
-            let original = rgb_to_lab(reference.pixels[i]);
-            let replacement = rgb_to_lab(paint_at(&candidate, i, source.width));
-            let target = rgb_to_lab(source.pixels[i]);
-            let delta = delta_e2000(original, replacement);
-            let loss = delta_e2000(target, replacement) - delta_e2000(target, original);
+            let original = rgb_to_oklab(reference.pixels[i]);
+            let replacement = rgb_to_oklab(paint_at(&candidate, i, source.width));
+            let target = rgb_to_oklab(source.pixels[i]);
+            let delta = delta_e_ok(original, replacement);
+            let loss = delta_e_ok(target, replacement) - delta_e_ok(target, original);
             if delta > 3.0 || loss > 1.5 {
                 supported = false;
                 break;
@@ -6535,7 +6618,7 @@ pub(crate) fn fit_outline_field(
     }
     let labs: Vec<_> = pixels
         .iter()
-        .map(|&i| rgb_to_lab(source.pixels[i]))
+        .map(|&i| rgb_to_oklab(source.pixels[i]))
         .collect();
     // Sparse intervals cannot identify a gradient, but can support a constant
     // field. Keep the same color-error limits for this simpler candidate.
@@ -6547,7 +6630,7 @@ pub(crate) fn fit_outline_field(
                 .sum::<f32>()
                 / pixels.len() as f32
         });
-        let error = constant_paint_error_for_labs(&labs, rgb_to_lab(color));
+        let error = constant_paint_error_for_labs(&labs, rgb_to_oklab(color));
         return (error.mean <= maximum_mean_error && error.percentile <= maximum_mean_error * 2.0)
             .then_some(Paint::Solid { color });
     }
@@ -6568,6 +6651,162 @@ pub(crate) fn fit_outline_field(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn flat_chroma_quantile_roundoff_does_not_invert_stop_bounds() {
+        let neutral = Oklab {
+            l: 60.0,
+            a: 2.980_232_2e-6,
+            b: 1.490_116_1e-6,
+        };
+        for count in 2..128 {
+            let labs = vec![neutral; count];
+            let samples = (0..count).collect::<Vec<_>>();
+            let parameters = (0..count)
+                .map(|i| i as f32 / (count - 1) as f32)
+                .collect::<Vec<_>>();
+            let stops = legacy_stops(&labs, &samples, &parameters);
+            let expected = oklab_values_to_rgb(&[neutral])[0];
+            for stop in stops {
+                for (actual, expected) in stop.color.into_iter().zip(expected) {
+                    assert!((actual - f64::from(expected)).abs() < 1e-6);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_narrow_observed_profile_keeps_its_slope_without_fabricated_samples() {
+        let parameters = (0..64)
+            .map(|i| 0.8 + 0.005 * i as f32 / 63.0)
+            .collect::<Vec<_>>();
+        let source = Raster::new(
+            64,
+            1,
+            parameters
+                .iter()
+                .map(|&t| [0.2 + 0.6 * (t - 0.8) / 0.005; 3])
+                .collect(),
+        );
+        let stops = fitted_stops(
+            &source,
+            &(0..64).collect::<Vec<_>>(),
+            &parameters,
+            &[0.0, 1.0],
+        );
+        for (i, &t) in parameters.iter().enumerate() {
+            let predicted = interpolate(&stops, t);
+            assert!(
+                (predicted[0] - source.pixels[i][0]).abs() < 1e-4,
+                "an unobserved interval flattened the local gradient at {i}: {predicted:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn local_mean_preserves_a_large_flat_faces_colour() {
+        let color = [233.0 / 255.0; 3];
+        let source = Raster::blank(1024, 1024, color);
+        let indices = (0..source.pixels.len()).collect::<Vec<_>>();
+        let fitted = mean_color_f64(&source, &indices);
+        for (actual, expected) in fitted.into_iter().zip(color) {
+            assert!((actual - expected).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn irregular_stop_spacing_does_not_bend_a_linear_ramp() {
+        let parameters = [0.0, 0.1, 0.2, 0.7, 1.0];
+        let source = Raster::new(
+            5,
+            1,
+            parameters.iter().map(|&t| [0.2 + 0.6 * t; 3]).collect(),
+        );
+        let stops = fitted_stops_direct(
+            &source,
+            &[0, 1, 2, 3, 4],
+            &parameters,
+            &[0.0, 0.1, 0.2, 1.0],
+        );
+        for stop in stops {
+            let expected = 0.2 + 0.6 * stop.offset;
+            assert!(
+                (stop.color[0] - expected).abs() < 1e-5,
+                "a linear ramp acquired a bend at {}: {} instead of {expected}",
+                stop.offset,
+                stop.color[0]
+            );
+        }
+    }
+
+    #[test]
+    fn spatial_slivers_use_their_own_colour_instead_of_the_parent_palette() {
+        check_local_sliver_colours(true);
+    }
+
+    #[test]
+    fn unsplit_slivers_use_valid_native_samples_instead_of_a_global_palette_colour() {
+        check_local_sliver_colours(false);
+    }
+
+    fn check_local_sliver_colours(spatial_siblings: bool) {
+        let w = 32;
+        let source = Raster::new(
+            w,
+            w,
+            (0..w * w)
+                .map(|i| {
+                    [
+                        0.98,
+                        0.30 + (i % w) as f32 * 0.002,
+                        0.28 + (i / w) as f32 * 0.002,
+                    ]
+                })
+                .collect(),
+        );
+        let mut segmentation = two_face_segmentation(&source);
+        let mut labels = vec![0; w * w];
+        let slivers = [
+            vec![20 * w + 20],
+            vec![24 * w + 24, 24 * w + 25, 25 * w + 25],
+        ];
+        for (k, pixels) in slivers.iter().enumerate() {
+            for &i in pixels {
+                labels[i] = k as u32 + 1;
+            }
+        }
+        replace_source_supported_paint_labels(&source, &mut segmentation, labels, 0);
+        segmentation.paint_keys = if spatial_siblings {
+            vec![0, 1, 1]
+        } else {
+            vec![0, 1, 2]
+        };
+        segmentation.canonical.pixels.fill([0.95, 0.25, 0.23]);
+        let branches = crate::ridge::StrongRidgeBranches {
+            dark: vec![false; w * w],
+            bright: vec![false; w * w],
+        };
+        let (paints, _) = fit_all_without_topology(
+            &[None, None, None],
+            &source,
+            &source,
+            &segmentation,
+            &branches,
+            &Config::default(),
+        );
+        for (k, pixels) in slivers.iter().enumerate() {
+            for &i in pixels {
+                let fitted = paint_at(&paints[k + 1], i, w);
+                for (a, b) in fitted.iter().zip(source.pixels[i]) {
+                    assert!(
+                        (a - b).abs() < 2.0 / 255.0,
+                        "sliver {k}: {fitted:?} != {:?}",
+                        source.pixels[i]
+                    );
+                }
+            }
+        }
+    }
+
     use super::*;
 
     #[test]
@@ -6636,7 +6875,7 @@ mod tests {
         let samples = (0..128 * 128)
             .filter(|i| (100..108).contains(&(i % 128 + i / 128)))
             .collect::<Vec<_>>();
-        let labs = lab_pixels(&source);
+        let labs = oklab_pixels(&source);
         let mean = mean_color(&source, &samples);
         let (paint, _, _) = fit_region_samples(
             0,
@@ -6646,7 +6885,7 @@ mod tests {
             samples.len(),
             bounds(&samples, 128),
             mean,
-            rgb_to_lab(mean),
+            rgb_to_oklab(mean),
             false,
             true,
             &Config::default(),
@@ -6738,10 +6977,10 @@ mod tests {
                 })
                 .collect(),
         );
-        let source_labs = lab_pixels(&source);
+        let source_labs = oklab_pixels(&source);
         let samples = (0..17).collect::<Vec<_>>();
         let solid = [0.31, 0.57, 0.83];
-        let rendered_lab = lab_pixels(&Raster::new(1, 1, vec![solid]))[0];
+        let rendered_lab = oklab_pixels(&Raster::new(1, 1, vec![solid]))[0];
         let previous = paint_error_against_labs(&source_labs, &samples, |_| solid);
         let cached = constant_paint_error_for_labs(&source_labs, rendered_lab);
         assert_eq!(cached.mean.to_bits(), previous.mean.to_bits());
@@ -6770,7 +7009,7 @@ mod tests {
                     max_x: half,
                     max_y: source.height,
                     mean_rgb: source.pixels[0],
-                    mean_lab: rgb_to_lab(source.pixels[0]),
+                    mean_lab: rgb_to_oklab(source.pixels[0]),
                 },
                 crate::segment::RegionStats {
                     id: 1,
@@ -6780,7 +7019,7 @@ mod tests {
                     max_x: source.width,
                     max_y: source.height,
                     mean_rgb: source.pixels[half],
-                    mean_lab: rgb_to_lab(source.pixels[half]),
+                    mean_lab: rgb_to_oklab(source.pixels[half]),
                 },
             ],
             summary: crate::segment::SegmentationSummary::default(),
@@ -6859,7 +7098,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert!(tip.len() > 100);
-        let error = paint_stats_against_labs(&lab_pixels(&source), &tip, w, &paints[1]);
+        let error = paint_stats_against_labs(&oklab_pixels(&source), &tip, w, &paints[1]);
         assert!(
             error.mean < 5.0,
             "highlight tip lost its source colour: {error:?}, {:?}",
@@ -7066,7 +7305,7 @@ mod tests {
                 .collect(),
         );
         let samples = (0..width * height).collect::<Vec<_>>();
-        let source_labs = lab_pixels(&source);
+        let source_labs = oklab_pixels(&source);
         let (paint, _) =
             office_gradient_candidate(&source, &source_labs, &samples, bounds(&samples, width), 5)
                 .expect("a coherent ramp must produce a gradient candidate");
@@ -7089,7 +7328,7 @@ mod tests {
 
     #[test]
     fn gradient_discontinuity_separates_a_ramp_from_a_step() {
-        let lab = |lightness| Lab {
+        let lab = |lightness| Oklab {
             l: lightness,
             a: 12.0,
             b: -7.0,
@@ -7110,7 +7349,7 @@ mod tests {
             .collect();
         let source = Raster::new(12, 8, pixels);
         let segmentation = two_face_segmentation(&source);
-        let boundaries = smooth_paint_boundaries(&lab_pixels(&source), &segmentation, 8, false);
+        let boundaries = smooth_paint_boundaries(&oklab_pixels(&source), &segmentation, 8, false);
         assert_eq!(boundaries.len(), 1);
         assert!(boundaries[0].median_delta_e > 3.0);
         assert!(boundary_has_continuous_gradient(&boundaries[0]));
@@ -7136,9 +7375,13 @@ mod tests {
             );
             let segmentation = two_face_segmentation(&source);
             let mut boundaries =
-                smooth_paint_boundaries(&lab_pixels(&source), &segmentation, 8, true);
+                smooth_paint_boundaries(&oklab_pixels(&source), &segmentation, 8, true);
             assert_eq!(boundaries.len(), 1);
-            measure_boundary_material_step(&lab_pixels(&source), &segmentation, &mut boundaries[0]);
+            measure_boundary_material_step(
+                &oklab_pixels(&source),
+                &segmentation,
+                &mut boundaries[0],
+            );
             assert_eq!(boundary_has_material_step(&boundaries[0]), blurred_step);
             assert_eq!(boundary_is_smooth(&boundaries[0]), !blurred_step);
         }
@@ -7154,7 +7397,9 @@ mod tests {
         }
         let source = Raster::new(12, 8, pixels);
         let segmentation = two_face_segmentation(&source);
-        assert!(smooth_paint_boundaries(&lab_pixels(&source), &segmentation, 8, false).is_empty());
+        assert!(
+            smooth_paint_boundaries(&oklab_pixels(&source), &segmentation, 8, false).is_empty()
+        );
     }
 
     fn coupling_boundary(length: usize, median_delta_e: f32) -> CouplingBoundary {
@@ -7445,9 +7690,9 @@ mod tests {
         assert!(paints.iter().all(|p| !matches!(p, Paint::Layered { .. })));
         for (i, &owner) in segmentation.labels.iter().enumerate() {
             assert!(
-                delta_e2000(
-                    rgb_to_lab(source.pixels[i]),
-                    rgb_to_lab(paint_at(&paints[owner as usize], i, 32))
+                delta_e_ok(
+                    rgb_to_oklab(source.pixels[i]),
+                    rgb_to_oklab(paint_at(&paints[owner as usize], i, 32))
                 ) < 0.01
             );
         }

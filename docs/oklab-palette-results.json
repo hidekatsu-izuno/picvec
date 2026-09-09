@@ -1,0 +1,518 @@
+{
+  "date": "2026-09-08",
+  "scope": "OKLab palette distance only; scale applied to adaptive and protected tolerances",
+  "sweep": [
+    {
+      "input": "boy_and_turtle.png",
+      "input_sha256": "91ec0385e31175a0192896bf84804541366da769773a3a0fa8b95fe9a74bd3b8",
+      "variant": "cielab",
+      "bytes": 130150,
+      "quality": {
+        "delta_e00_mean": 0.6295381,
+        "delta_e00_p90": 0.0,
+        "delta_e00_p99": 20.139826,
+        "global_ssim": 0.9932103
+      },
+      "processing_size": [
+        800,
+        744
+      ],
+      "palette_colours": 417,
+      "regions": 93,
+      "svg_sha256": "8851dc2a3ab5080f82616b47daad90157fbda95a2ee30a9ae5ea9999e9356d9a",
+      "wall_seconds_contended": 5.145243434002623,
+      "palette_seconds_contended": 0.024
+    },
+    {
+      "input": "boy_and_turtle.png",
+      "input_sha256": "91ec0385e31175a0192896bf84804541366da769773a3a0fa8b95fe9a74bd3b8",
+      "variant": "oklab-0.5",
+      "bytes": 131215,
+      "quality": {
+        "delta_e00_mean": 0.6311044,
+        "delta_e00_p90": 0.0,
+        "delta_e00_p99": 20.22364,
+        "global_ssim": 0.9928068
+      },
+      "processing_size": [
+        800,
+        744
+      ],
+      "palette_colours": 866,
+      "regions": 93,
+      "svg_sha256": "a3a35d64b02dd013a2750e232bfb6b34a34ddb77ec1b8a38840c4d858d617abe",
+      "wall_seconds_contended": 9.935166514012963,
+      "palette_seconds_contended": 0.048
+    },
+    {
+      "input": "boy_and_turtle.png",
+      "input_sha256": "91ec0385e31175a0192896bf84804541366da769773a3a0fa8b95fe9a74bd3b8",
+      "variant": "oklab-0.75",
+      "bytes": 132365,
+      "quality": {
+        "delta_e00_mean": 0.62883365,
+        "delta_e00_p90": 0.0,
+        "delta_e00_p99": 20.127449,
+        "global_ssim": 0.9929363
+      },
+      "processing_size": [
+        800,
+        744
+      ],
+      "palette_colours": 500,
+      "regions": 94,
+      "svg_sha256": "640c4fa04c755655a8dc2fac73e6eff01b3040843a94f45364fe03e90e4ef045",
+      "wall_seconds_contended": 7.6446245410479605,
+      "palette_seconds_contended": 0.047
+    },
+    {
+      "input": "boy_and_turtle.png",
+      "input_sha256": "91ec0385e31175a0192896bf84804541366da769773a3a0fa8b95fe9a74bd3b8",
+      "variant": "oklab-1.0",
+      "bytes": 130343,
+      "quality": {
+        "delta_e00_mean": 0.6293388,
+        "delta_e00_p90": 0.0,
+        "delta_e00_p99": 20.171843,
+        "global_ssim": 0.99288094
+      },
+      "processing_size": [
+        800,
+        744
+      ],
+      "palette_colours": 348,
+      "regions": 92,
+      "svg_sha256": "1e99887cee43bd8f3829c4b771eaa53fbd5510e8a5f2d7b32818be66d7c630ec",
+      "wall_seconds_contended": 6.577695710002445,
+      "palette_seconds_contended": 0.036
+    },
+    {
+      "input": "car.png",
+      "input_sha256": "7bac8b1676a62a6ddfc4519d3e17f92c4b76f78cd4b947efddc1eb45baa20cf7",
+      "variant": "cielab",
+      "bytes": 1982104,
+      "quality": {
+        "delta_e00_mean": 0.8296735,
+        "delta_e00_p90": 1.4737856,
+        "delta_e00_p99": 10.125679,
+        "global_ssim": 0.9965172
+      },
+      "processing_size": [
+        1254,
+        1254
+      ],
+      "palette_colours": 1765,
+      "regions": 1887,
+      "svg_sha256": "c7ff5f3993b3fa5f724ed5b494cacc3cdad5f8f3eb4a57d23d1f5a019ea64e03",
+      "wall_seconds_contended": 44.56233010801952,
+      "palette_seconds_contended": 0.287
+    },
+    {
+      "input": "car.png",
+      "input_sha256": "7bac8b1676a62a6ddfc4519d3e17f92c4b76f78cd4b947efddc1eb45baa20cf7",
+      "variant": "oklab-0.5",
+      "bytes": 2204475,
+      "quality": {
+        "delta_e00_mean": 0.85193646,
+        "delta_e00_p90": 1.5675249,
+        "delta_e00_p99": 10.228488,
+        "global_ssim": 0.99637043
+      },
+      "processing_size": [
+        1254,
+        1254
+      ],
+      "palette_colours": 2197,
+      "regions": 2019,
+      "svg_sha256": "dc6abdb5a762be6df3308c3aa217d5ef54d5d5a8cd7df837785ff1cd255a9966",
+      "wall_seconds_contended": 49.878430193988606,
+      "palette_seconds_contended": 0.135
+    },
+    {
+      "input": "car.png",
+      "input_sha256": "7bac8b1676a62a6ddfc4519d3e17f92c4b76f78cd4b947efddc1eb45baa20cf7",
+      "variant": "oklab-0.75",
+      "bytes": 2052981,
+      "quality": {
+        "delta_e00_mean": 0.8321889,
+        "delta_e00_p90": 1.4734595,
+        "delta_e00_p99": 10.23738,
+        "global_ssim": 0.9963699
+      },
+      "processing_size": [
+        1254,
+        1254
+      ],
+      "palette_colours": 966,
+      "regions": 1942,
+      "svg_sha256": "6434c56416a9830b70fe1969aad7f1e4400d28d1bdef1d3fd42b20847d31286e",
+      "wall_seconds_contended": 42.15038753207773,
+      "palette_seconds_contended": 0.101
+    },
+    {
+      "input": "car.png",
+      "input_sha256": "7bac8b1676a62a6ddfc4519d3e17f92c4b76f78cd4b947efddc1eb45baa20cf7",
+      "variant": "oklab-1.0",
+      "bytes": 1841977,
+      "quality": {
+        "delta_e00_mean": 0.8230042,
+        "delta_e00_p90": 1.4099615,
+        "delta_e00_p99": 10.146318,
+        "global_ssim": 0.99644375
+      },
+      "processing_size": [
+        1254,
+        1254
+      ],
+      "palette_colours": 555,
+      "regions": 1719,
+      "svg_sha256": "c070573c3e0bda79f9ca699b5b105ad69326426377c4cd4012687a76c5fa9910",
+      "wall_seconds_contended": 40.00358531798702,
+      "palette_seconds_contended": 0.076
+    },
+    {
+      "input": "viewport1.jpg",
+      "input_sha256": "f1a817bbedf41a5ece55d4bac54a5d87497d94f5504a0fc391f182640edb6cd9",
+      "variant": "cielab",
+      "bytes": 8593326,
+      "quality": {
+        "delta_e00_mean": 6.322011,
+        "delta_e00_p90": 13.418265,
+        "delta_e00_p99": 25.879904,
+        "global_ssim": 0.96169335
+      },
+      "processing_size": [
+        640,
+        426
+      ],
+      "palette_colours": 8163,
+      "regions": 19697,
+      "svg_sha256": "7ef94126bfbc831ef1cb34186176664216208eba62b282bdf69a385b628aca0e",
+      "wall_seconds_contended": 26.713373989914544,
+      "palette_seconds_contended": 3.568
+    },
+    {
+      "input": "viewport1.jpg",
+      "input_sha256": "f1a817bbedf41a5ece55d4bac54a5d87497d94f5504a0fc391f182640edb6cd9",
+      "variant": "oklab-0.5",
+      "bytes": 8268998,
+      "quality": {
+        "delta_e00_mean": 6.378575,
+        "delta_e00_p90": 13.515391,
+        "delta_e00_p99": 26.18396,
+        "global_ssim": 0.9610231
+      },
+      "processing_size": [
+        640,
+        426
+      ],
+      "palette_colours": 9264,
+      "regions": 18858,
+      "svg_sha256": "dae5d31626c031254e4d55fda4015e7b0d7dd2fabdcad8782fef69e75c4cd5af",
+      "wall_seconds_contended": 22.786027268040925,
+      "palette_seconds_contended": 0.741
+    },
+    {
+      "input": "viewport1.jpg",
+      "input_sha256": "f1a817bbedf41a5ece55d4bac54a5d87497d94f5504a0fc391f182640edb6cd9",
+      "variant": "oklab-0.75",
+      "bytes": 7950681,
+      "quality": {
+        "delta_e00_mean": 6.3752494,
+        "delta_e00_p90": 13.521448,
+        "delta_e00_p99": 26.089605,
+        "global_ssim": 0.9616013
+      },
+      "processing_size": [
+        640,
+        426
+      ],
+      "palette_colours": 4059,
+      "regions": 18378,
+      "svg_sha256": "5326b996e03e9073238a67c55d1e46ce61be9b587ed5c3c6dba6bacff46ce28e",
+      "wall_seconds_contended": 19.92863033397589,
+      "palette_seconds_contended": 0.365
+    },
+    {
+      "input": "viewport1.jpg",
+      "input_sha256": "f1a817bbedf41a5ece55d4bac54a5d87497d94f5504a0fc391f182640edb6cd9",
+      "variant": "oklab-1.0",
+      "bytes": 7943273,
+      "quality": {
+        "delta_e00_mean": 6.353047,
+        "delta_e00_p90": 13.465066,
+        "delta_e00_p99": 25.958458,
+        "global_ssim": 0.9622127
+      },
+      "processing_size": [
+        640,
+        426
+      ],
+      "palette_colours": 2258,
+      "regions": 19041,
+      "svg_sha256": "31957933e707b2613652e8e5621bee0fc3c8bf736e225aa5fbdfbc7ba58f7038",
+      "wall_seconds_contended": 20.183554733055644,
+      "palette_seconds_contended": 0.206
+    },
+    {
+      "input": "boy_and_turtle.png",
+      "input_sha256": "91ec0385e31175a0192896bf84804541366da769773a3a0fa8b95fe9a74bd3b8",
+      "variant": "oklab-1.25",
+      "bytes": 128277,
+      "quality": {
+        "delta_e00_mean": 0.6277417,
+        "delta_e00_p90": 0.0,
+        "delta_e00_p99": 20.114883,
+        "global_ssim": 0.9932587
+      },
+      "processing_size": [
+        800,
+        744
+      ],
+      "palette_colours": 264,
+      "regions": 88,
+      "svg_sha256": "44c8e544c7c582989d16c2644c7398de9226618349c80fbcad7b9fe65cd57d91",
+      "wall_seconds_contended": 5.126430452102795,
+      "palette_seconds_contended": 0.019
+    },
+    {
+      "input": "boy_and_turtle.png",
+      "input_sha256": "91ec0385e31175a0192896bf84804541366da769773a3a0fa8b95fe9a74bd3b8",
+      "variant": "oklab-1.5",
+      "bytes": 129700,
+      "quality": {
+        "delta_e00_mean": 0.6307958,
+        "delta_e00_p90": 0.0,
+        "delta_e00_p99": 20.24414,
+        "global_ssim": 0.9928658
+      },
+      "processing_size": [
+        800,
+        744
+      ],
+      "palette_colours": 209,
+      "regions": 90,
+      "svg_sha256": "f5538f66be68489f990ad7ebf7c8544fb70693cf851e6ce3c6cd823b203bfe60",
+      "wall_seconds_contended": 5.038295460981317,
+      "palette_seconds_contended": 0.019
+    },
+    {
+      "input": "car.png",
+      "input_sha256": "7bac8b1676a62a6ddfc4519d3e17f92c4b76f78cd4b947efddc1eb45baa20cf7",
+      "variant": "oklab-1.25",
+      "bytes": 1757110,
+      "quality": {
+        "delta_e00_mean": 0.83457124,
+        "delta_e00_p90": 1.4543523,
+        "delta_e00_p99": 10.107002,
+        "global_ssim": 0.99636495
+      },
+      "processing_size": [
+        1254,
+        1254
+      ],
+      "palette_colours": 351,
+      "regions": 1594,
+      "svg_sha256": "b23d8b330fb6405d64b2673b9b43429c22a9f6b38b41a970c7565b26a6530891",
+      "wall_seconds_contended": 38.32880107499659,
+      "palette_seconds_contended": 0.095
+    },
+    {
+      "input": "car.png",
+      "input_sha256": "7bac8b1676a62a6ddfc4519d3e17f92c4b76f78cd4b947efddc1eb45baa20cf7",
+      "variant": "oklab-1.5",
+      "bytes": 1692229,
+      "quality": {
+        "delta_e00_mean": 0.83511704,
+        "delta_e00_p90": 1.4735255,
+        "delta_e00_p99": 10.138429,
+        "global_ssim": 0.99653226
+      },
+      "processing_size": [
+        1254,
+        1254
+      ],
+      "palette_colours": 251,
+      "regions": 1548,
+      "svg_sha256": "5a5520d10c895a0bbdd06bea934b0789d5a508305ddf5a237c76bdae5c48ed4d",
+      "wall_seconds_contended": 35.829852114082314,
+      "palette_seconds_contended": 0.077
+    },
+    {
+      "input": "viewport1.jpg",
+      "input_sha256": "f1a817bbedf41a5ece55d4bac54a5d87497d94f5504a0fc391f182640edb6cd9",
+      "variant": "oklab-1.25",
+      "bytes": 7418296,
+      "quality": {
+        "delta_e00_mean": 6.360529,
+        "delta_e00_p90": 13.51815,
+        "delta_e00_p99": 25.964062,
+        "global_ssim": 0.9616618
+      },
+      "processing_size": [
+        640,
+        426
+      ],
+      "palette_colours": 1385,
+      "regions": 17934,
+      "svg_sha256": "a29dd43eb3c64bdf074c94c48ee42419ed922c7a53657e25da1ea05b3a7fa7bb",
+      "wall_seconds_contended": 20.302800441975705,
+      "palette_seconds_contended": 0.166
+    },
+    {
+      "input": "viewport1.jpg",
+      "input_sha256": "f1a817bbedf41a5ece55d4bac54a5d87497d94f5504a0fc391f182640edb6cd9",
+      "variant": "oklab-1.5",
+      "bytes": 7429483,
+      "quality": {
+        "delta_e00_mean": 6.3588843,
+        "delta_e00_p90": 13.487627,
+        "delta_e00_p99": 26.127922,
+        "global_ssim": 0.9618684
+      },
+      "processing_size": [
+        640,
+        426
+      ],
+      "palette_colours": 934,
+      "regions": 18426,
+      "svg_sha256": "599cf408ac609bbd4bb294d2468b767cc4bdbd43251b7afaabda009dc3673bc5",
+      "wall_seconds_contended": 19.89760186895728,
+      "palette_seconds_contended": 0.125
+    }
+  ],
+  "timing_repeats": [
+    {
+      "input": "sample/input/boy_and_turtle.png",
+      "variant": "cielab",
+      "repeat": 0,
+      "wall_seconds": 4.469391628983431,
+      "bytes": 130150,
+      "sha256": "8851dc2a3ab5080f82616b47daad90157fbda95a2ee30a9ae5ea9999e9356d9a",
+      "binary_sha256": "da7b6a0eccb03ed40706c5fbcae3c88297e2ac26f349e68213b73cfd53d78acb",
+      "input_sha256": "91ec0385e31175a0192896bf84804541366da769773a3a0fa8b95fe9a74bd3b8",
+      "palette_seconds": 0.024
+    },
+    {
+      "input": "sample/input/boy_and_turtle.png",
+      "variant": "oklab-1",
+      "repeat": 0,
+      "wall_seconds": 4.359072920982726,
+      "bytes": 130343,
+      "sha256": "1e99887cee43bd8f3829c4b771eaa53fbd5510e8a5f2d7b32818be66d7c630ec",
+      "binary_sha256": "da7b6a0eccb03ed40706c5fbcae3c88297e2ac26f349e68213b73cfd53d78acb",
+      "input_sha256": "91ec0385e31175a0192896bf84804541366da769773a3a0fa8b95fe9a74bd3b8",
+      "palette_seconds": 0.017
+    },
+    {
+      "input": "sample/input/boy_and_turtle.png",
+      "variant": "oklab-1",
+      "repeat": 1,
+      "wall_seconds": 4.313603796064854,
+      "bytes": 130343,
+      "sha256": "1e99887cee43bd8f3829c4b771eaa53fbd5510e8a5f2d7b32818be66d7c630ec",
+      "binary_sha256": "da7b6a0eccb03ed40706c5fbcae3c88297e2ac26f349e68213b73cfd53d78acb",
+      "input_sha256": "91ec0385e31175a0192896bf84804541366da769773a3a0fa8b95fe9a74bd3b8",
+      "palette_seconds": 0.018
+    },
+    {
+      "input": "sample/input/boy_and_turtle.png",
+      "variant": "cielab",
+      "repeat": 1,
+      "wall_seconds": 4.367286271066405,
+      "bytes": 130150,
+      "sha256": "8851dc2a3ab5080f82616b47daad90157fbda95a2ee30a9ae5ea9999e9356d9a",
+      "binary_sha256": "da7b6a0eccb03ed40706c5fbcae3c88297e2ac26f349e68213b73cfd53d78acb",
+      "input_sha256": "91ec0385e31175a0192896bf84804541366da769773a3a0fa8b95fe9a74bd3b8",
+      "palette_seconds": 0.024
+    },
+    {
+      "input": "sample/input/car.png",
+      "variant": "cielab",
+      "repeat": 0,
+      "wall_seconds": 32.65525383898057,
+      "bytes": 1982104,
+      "sha256": "c7ff5f3993b3fa5f724ed5b494cacc3cdad5f8f3eb4a57d23d1f5a019ea64e03",
+      "binary_sha256": "da7b6a0eccb03ed40706c5fbcae3c88297e2ac26f349e68213b73cfd53d78acb",
+      "input_sha256": "7bac8b1676a62a6ddfc4519d3e17f92c4b76f78cd4b947efddc1eb45baa20cf7",
+      "palette_seconds": 0.197
+    },
+    {
+      "input": "sample/input/car.png",
+      "variant": "oklab-1",
+      "repeat": 0,
+      "wall_seconds": 31.205776514019817,
+      "bytes": 1841977,
+      "sha256": "c070573c3e0bda79f9ca699b5b105ad69326426377c4cd4012687a76c5fa9910",
+      "binary_sha256": "da7b6a0eccb03ed40706c5fbcae3c88297e2ac26f349e68213b73cfd53d78acb",
+      "input_sha256": "7bac8b1676a62a6ddfc4519d3e17f92c4b76f78cd4b947efddc1eb45baa20cf7",
+      "palette_seconds": 0.059
+    },
+    {
+      "input": "sample/input/car.png",
+      "variant": "oklab-1",
+      "repeat": 1,
+      "wall_seconds": 31.372017372981645,
+      "bytes": 1841977,
+      "sha256": "c070573c3e0bda79f9ca699b5b105ad69326426377c4cd4012687a76c5fa9910",
+      "binary_sha256": "da7b6a0eccb03ed40706c5fbcae3c88297e2ac26f349e68213b73cfd53d78acb",
+      "input_sha256": "7bac8b1676a62a6ddfc4519d3e17f92c4b76f78cd4b947efddc1eb45baa20cf7",
+      "palette_seconds": 0.057
+    },
+    {
+      "input": "sample/input/car.png",
+      "variant": "cielab",
+      "repeat": 1,
+      "wall_seconds": 33.93008542701136,
+      "bytes": 1982104,
+      "sha256": "c7ff5f3993b3fa5f724ed5b494cacc3cdad5f8f3eb4a57d23d1f5a019ea64e03",
+      "binary_sha256": "da7b6a0eccb03ed40706c5fbcae3c88297e2ac26f349e68213b73cfd53d78acb",
+      "input_sha256": "7bac8b1676a62a6ddfc4519d3e17f92c4b76f78cd4b947efddc1eb45baa20cf7",
+      "palette_seconds": 0.211
+    },
+    {
+      "input": "sample/input/viewport1.jpg",
+      "variant": "cielab",
+      "repeat": 0,
+      "wall_seconds": 19.452801206964068,
+      "bytes": 8593326,
+      "sha256": "7ef94126bfbc831ef1cb34186176664216208eba62b282bdf69a385b628aca0e",
+      "binary_sha256": "da7b6a0eccb03ed40706c5fbcae3c88297e2ac26f349e68213b73cfd53d78acb",
+      "input_sha256": "f1a817bbedf41a5ece55d4bac54a5d87497d94f5504a0fc391f182640edb6cd9",
+      "palette_seconds": 2.774
+    },
+    {
+      "input": "sample/input/viewport1.jpg",
+      "variant": "oklab-1",
+      "repeat": 0,
+      "wall_seconds": 15.921626570052467,
+      "bytes": 7943273,
+      "sha256": "31957933e707b2613652e8e5621bee0fc3c8bf736e225aa5fbdfbc7ba58f7038",
+      "binary_sha256": "da7b6a0eccb03ed40706c5fbcae3c88297e2ac26f349e68213b73cfd53d78acb",
+      "input_sha256": "f1a817bbedf41a5ece55d4bac54a5d87497d94f5504a0fc391f182640edb6cd9",
+      "palette_seconds": 0.132
+    },
+    {
+      "input": "sample/input/viewport1.jpg",
+      "variant": "oklab-1",
+      "repeat": 1,
+      "wall_seconds": 16.67110479203984,
+      "bytes": 7943273,
+      "sha256": "31957933e707b2613652e8e5621bee0fc3c8bf736e225aa5fbdfbc7ba58f7038",
+      "binary_sha256": "da7b6a0eccb03ed40706c5fbcae3c88297e2ac26f349e68213b73cfd53d78acb",
+      "input_sha256": "f1a817bbedf41a5ece55d4bac54a5d87497d94f5504a0fc391f182640edb6cd9",
+      "palette_seconds": 0.133
+    },
+    {
+      "input": "sample/input/viewport1.jpg",
+      "variant": "cielab",
+      "repeat": 1,
+      "wall_seconds": 20.313121702056378,
+      "bytes": 8593326,
+      "sha256": "7ef94126bfbc831ef1cb34186176664216208eba62b282bdf69a385b628aca0e",
+      "binary_sha256": "da7b6a0eccb03ed40706c5fbcae3c88297e2ac26f349e68213b73cfd53d78acb",
+      "input_sha256": "f1a817bbedf41a5ece55d4bac54a5d87497d94f5504a0fc391f182640edb6cd9",
+      "palette_seconds": 2.888
+    }
+  ]
+}

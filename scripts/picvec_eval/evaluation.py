@@ -12,10 +12,10 @@ import numpy as np
 from numpy.typing import NDArray
 from PIL import Image
 from scipy import ndimage
-from skimage import color, metrics
+from skimage import metrics
 from skimage.morphology import skeletonize
 
-from .support import delta_e2000, load_rgb, luminance_edges, resize_image, srgb_to_lab
+from .support import delta_e_ok, load_rgb, luminance_edges, resize_image, srgb_to_oklab
 
 
 FloatImage = NDArray[np.float32]
@@ -138,7 +138,7 @@ def save_rgb(image: NDArray[np.floating], path: str | Path) -> None:
 
 
 def _edge_map(image: FloatImage, config: EvaluationConfig) -> BoolImage:
-    lightness = srgb_to_lab(image)[..., 0] / 100.0
+    lightness = srgb_to_oklab(image)[..., 0] / 100.0
     edges, _ = luminance_edges(
         lightness,
         sigma=max(0.1, float(config.edge_sigma)),
@@ -760,9 +760,9 @@ def _detail_fidelity_metrics(
     contrast_ratio = float(
         np.mean(np.minimum(out_high[support] / np.maximum(ref_high[support], 1e-6), 1.0))
     )
-    colour_error = delta_e2000(
-        np.asarray(color.rgb2lab(ref), dtype=np.float32),
-        np.asarray(color.rgb2lab(out), dtype=np.float32),
+    colour_error = delta_e_ok(
+        np.asarray(srgb_to_oklab(ref), dtype=np.float32),
+        np.asarray(srgb_to_oklab(out), dtype=np.float32),
     )
     colour_score = float(1.0 / (1.0 + float(np.mean(colour_error[support])) / 8.0))
     ref_edge = np.hypot(ndimage.sobel(ref_luma, axis=0), ndimage.sobel(ref_luma, axis=1))
@@ -820,9 +820,9 @@ def _coarse_fidelity_metrics(
     )
     ref = resize_image(reference[::step, ::step], source_shape)
     out = resize_image(rendered[::step, ::step], source_shape)
-    ref_lab = srgb_to_lab(ref)
-    out_lab = srgb_to_lab(out)
-    coarse_delta = delta_e2000(ref_lab, out_lab)
+    ref_lab = srgb_to_oklab(ref)
+    out_lab = srgb_to_oklab(out)
+    coarse_delta = delta_e_ok(ref_lab, out_lab)
     delta_mean = float(np.mean(coarse_delta))
     delta_p90 = float(np.percentile(coarse_delta, 90.0))
     ref_luma = (
@@ -840,8 +840,8 @@ def _coarse_fidelity_metrics(
     return {
         "source_width": float(source_shape[1]),
         "source_height": float(source_shape[0]),
-        "delta_e00_mean": delta_mean,
-        "delta_e00_p90": delta_p90,
+        "delta_e_ok_mean": delta_mean,
+        "delta_e_ok_p90": delta_p90,
         "luma_mae": luma_mae,
         "colour_score": float(colour_score),
         "luma_score": float(luma_score),
@@ -874,15 +874,15 @@ def _pixel_fidelity_metrics(
     out_mean = ndimage.uniform_filter(
         out_source, size=(neighborhood, neighborhood, 1), mode="nearest"
     )
-    local_delta = delta_e2000(srgb_to_lab(ref_mean), srgb_to_lab(out_mean))
+    local_delta = delta_e_ok(srgb_to_oklab(ref_mean), srgb_to_oklab(out_mean))
     values = np.asarray(local_delta, dtype=np.float32)
     finite = values[np.isfinite(values)]
     if not finite.size:
         return {
-            "mean_delta_e00": 0.0,
-            "p90_delta_e00": 0.0,
-            "interior_raw_delta_e00_mean": 0.0,
-            "within_delta_e00_5": 1.0,
+            "mean_delta_e_ok": 0.0,
+            "p90_delta_e_ok": 0.0,
+            "interior_raw_delta_e_ok_mean": 0.0,
+            "within_delta_e_ok_5": 1.0,
             "pixel_score": 1.0,
             "tile_p10_score": 1.0,
             "score": 1.0,
@@ -892,10 +892,10 @@ def _pixel_fidelity_metrics(
     within_five = float(np.mean(finite <= 5.0))
     # Keep a raw-pixel diagnostic for inspection. The score itself does not
     # branch on edge/interior status: every source pixel uses the same mean.
-    raw_lab = delta_e2000(srgb_to_lab(ref_source), srgb_to_lab(out_source))
+    raw_lab = delta_e_ok(srgb_to_oklab(ref_source), srgb_to_oklab(out_source))
     interior_raw_mean = float(np.mean(raw_lab))
-    # Delta-E 20 is visibly wrong; Delta-E 5 is a useful boundary for a
-    # near-match.  The reciprocal form remains stable for antialiasing noise.
+    # These scoring scales are in 100-scaled OKLab units, not a standard
+    # visibility threshold. The reciprocal form tolerates antialiasing noise.
     mean_score = 1.0 / (1.0 + mean_delta / 5.0)
     p90_score = 1.0 / (1.0 + p90_delta / 20.0)
     tile_size = max(8, int(config.worst_tile_size) // max(1, int(config.scale)))
@@ -916,10 +916,10 @@ def _pixel_fidelity_metrics(
         + 0.20 * tile_min
     )
     return {
-        "mean_delta_e00": mean_delta,
-        "p90_delta_e00": p90_delta,
-        "interior_raw_delta_e00_mean": interior_raw_mean,
-        "within_delta_e00_5": within_five,
+        "mean_delta_e_ok": mean_delta,
+        "p90_delta_e_ok": p90_delta,
+        "interior_raw_delta_e_ok_mean": interior_raw_mean,
+        "within_delta_e_ok_5": within_five,
         "mean_score": float(mean_score),
         "p90_score": float(p90_score),
         "tile_p05_score": tile_p05,
@@ -936,7 +936,7 @@ def _feature_maps(image: FloatImage, *, analysis_shape: tuple[int, int], scale: 
     if narrow % 2 == 0:
         narrow += 1
     smooth = ndimage.uniform_filter(value, size=(narrow, narrow, 1), mode="nearest")
-    lab = srgb_to_lab(smooth)
+    lab = srgb_to_oklab(smooth)
     luma = (0.2126 * smooth[..., 0] + 0.7152 * smooth[..., 1] + 0.0722 * smooth[..., 2]).astype(np.float32)
     local = ndimage.gaussian_filter(luma, sigma=max(1.0, narrow / 2.0))
     highlight = np.maximum(luma - local, 0.0)
@@ -1422,19 +1422,19 @@ def _fidelity_metrics(
     if not selected.size:
         return {
             "pixel_count": 0,
-            "delta_e00_mean": None,
-            "delta_e00_p90": None,
-            "delta_e00_p99": None,
-            "within_delta_e00_2_3": None,
+            "delta_e_ok_mean": None,
+            "delta_e_ok_p90": None,
+            "delta_e_ok_p99": None,
+            "within_delta_e_ok_2_3": None,
         }
     report: dict[str, float | int | None] = {
         "pixel_count": int(selected.size),
-        "delta_e00_mean": float(np.mean(selected)),
-        "delta_e00_p90": float(np.percentile(selected, 90.0)),
-        "delta_e00_p99": float(np.percentile(selected, 99.0)),
-        "within_delta_e00_2_3": float(np.mean(selected <= 2.3)),
-        "over_delta_e00_5": float(np.mean(selected > 5.0)),
-        "over_delta_e00_10": float(np.mean(selected > 10.0)),
+        "delta_e_ok_mean": float(np.mean(selected)),
+        "delta_e_ok_p90": float(np.percentile(selected, 90.0)),
+        "delta_e_ok_p99": float(np.percentile(selected, 99.0)),
+        "within_delta_e_ok_2_3": float(np.mean(selected <= 2.3)),
+        "over_delta_e_ok_5": float(np.mean(selected > 5.0)),
+        "over_delta_e_ok_10": float(np.mean(selected > 10.0)),
     }
     if mask is None:
         squared_sum = 0.0
@@ -1474,18 +1474,18 @@ def _fidelity_metrics(
     return report
 
 
-def _delta_e2000_tiled(
+def _delta_e_ok_tiled(
     reference: FloatImage,
     rendered: FloatImage,
     *,
     tile_height: int = 32,
     storage_path: Path | None = None,
 ) -> NDArray[np.float32]:
-    """Compute DeltaE00 without holding both full Lab conversion graphs.
+    """Compute 100-scaled OKLab distance without holding both full OKLab conversion graphs.
 
     A 5016x5016 car render is large enough that the vectorised colour
     conversion's temporary arrays can exceed the evaluator's memory limit.
-    CIEDE2000 is pixel-local, so vertical tiling is numerically equivalent and
+    OKLab distance is pixel-local, so vertical tiling is numerically equivalent and
     keeps peak memory bounded.
     """
 
@@ -1503,9 +1503,9 @@ def _delta_e2000_tiled(
     step = max(1, int(tile_height))
     for top in range(0, height, step):
         bottom = min(height, top + step)
-        reference_lab = srgb_to_lab(reference[top:bottom])
-        rendered_lab = srgb_to_lab(rendered[top:bottom])
-        result[top:bottom] = delta_e2000(reference_lab, rendered_lab)
+        reference_lab = srgb_to_oklab(reference[top:bottom])
+        rendered_lab = srgb_to_oklab(rendered[top:bottom])
+        result[top:bottom] = delta_e_ok(reference_lab, rendered_lab)
         del reference_lab, rendered_lab
     if isinstance(result, np.memmap):
         result.flush()
@@ -1602,9 +1602,9 @@ def _quality_metrics(
     """
 
     primary_f1 = float(boundary["primary"]["f1"])
-    mean_delta = float(global_fidelity.get("delta_e00_mean") or 0.0)
-    p90_delta = float(global_fidelity.get("delta_e00_p90") or 0.0)
-    within = float(global_fidelity.get("within_delta_e00_2_3") or 0.0)
+    mean_delta = float(global_fidelity.get("delta_e_ok_mean") or 0.0)
+    p90_delta = float(global_fidelity.get("delta_e_ok_p90") or 0.0)
+    within = float(global_fidelity.get("within_delta_e_ok_2_3") or 0.0)
     colour_score = (
         0.45 / (1.0 + mean_delta / 2.3)
         + 0.30 / (1.0 + p90_delta / 10.0)
@@ -1800,7 +1800,7 @@ def _write_diagnostics(
     delta_rgb = np.zeros((*delta_e.shape, 3), dtype=np.float32)
     delta_rgb[..., 0] = delta_scale
     delta_rgb[..., 1] = np.clip(1.0 - delta_scale * 1.5, 0.0, 1.0)
-    save_rgb(delta_rgb, output_directory / "delta-e00.png")
+    save_rgb(delta_rgb, output_directory / "delta-e-ok.png")
 
     reference_lines = np.repeat(thin_line_reference[..., None], 3, axis=2).astype(
         np.float32
@@ -1879,8 +1879,8 @@ def evaluate_x4_images(
         rendered_edges,
         resolved,
     )
-    delta_storage = directory / ".delta-e00.dat"
-    delta_e = _delta_e2000_tiled(
+    delta_storage = directory / ".delta-e-ok.dat"
+    delta_e = _delta_e_ok_tiled(
         reference_value,
         rendered_value,
         storage_path=delta_storage,

@@ -32,15 +32,6 @@ pub fn exp_f64_in_place(values: &mut [f64]) {
     }
 }
 
-pub fn cbrt_f32_in_place(values: &mut [f32]) {
-    for chunk in values.chunks_mut(F32_LANES) {
-        let mut input = [0.0_f32; F32_LANES];
-        input[..chunk.len()].copy_from_slice(chunk);
-        let output = f32x8::new(input).cbrt().to_array();
-        chunk.copy_from_slice(&output[..chunk.len()]);
-    }
-}
-
 pub fn pow_f32_in_place(values: &mut [f32], exponent: f32) {
     for chunk in values.chunks_mut(F32_LANES) {
         let mut input = [1.0_f32; F32_LANES];
@@ -53,37 +44,6 @@ pub fn pow_f32_in_place(values: &mut [f32], exponent: f32) {
         };
         let output = output.to_array();
         chunk.copy_from_slice(&output[..chunk.len()]);
-    }
-}
-
-/// Two angles through the same portable SIMD kernel, without heap buffers.
-pub(crate) fn atan2_f32_pair(y: [f32; 2], x: [f32; 2]) -> [f32; 2] {
-    let mut ys = [1.0; F32_LANES];
-    let mut xs = [1.0; F32_LANES];
-    ys[..2].copy_from_slice(&y);
-    xs[..2].copy_from_slice(&x);
-    let result = f32x8::new(ys).atan2(f32x8::new(xs)).to_array();
-    [result[0], result[1]]
-}
-
-pub fn atan2_f32(first: &[f32], second: &[f32]) -> Vec<f32> {
-    assert_eq!(first.len(), second.len());
-    let mut result = Vec::with_capacity(first.len());
-    atan2_f32_into(first, second, &mut result);
-    result
-}
-
-pub fn atan2_f32_into(first: &[f32], second: &[f32], result: &mut Vec<f32>) {
-    assert_eq!(first.len(), second.len());
-    result.clear();
-    result.reserve(first.len());
-    for (first_chunk, second_chunk) in first.chunks(F32_LANES).zip(second.chunks(F32_LANES)) {
-        let mut y = [1.0_f32; F32_LANES];
-        let mut x = [1.0_f32; F32_LANES];
-        y[..first_chunk.len()].copy_from_slice(first_chunk);
-        x[..second_chunk.len()].copy_from_slice(second_chunk);
-        let output = f32x8::new(y).atan2(f32x8::new(x)).to_array();
-        result.extend_from_slice(&output[..first_chunk.len()]);
     }
 }
 
@@ -105,26 +65,10 @@ mod tests {
                 .map(|index| 0.01 + index as f32 * 0.17)
                 .collect::<Vec<_>>();
 
-            let mut roots = source.clone();
-            cbrt_f32_in_place(&mut roots);
-            for (&actual, &value) in roots.iter().zip(&source) {
-                close_f32(actual, value.cbrt(), 2e-5);
-            }
-
             let mut powers = source.clone();
             pow_f32_in_place(&mut powers, 2.4);
             for (&actual, &value) in powers.iter().zip(&source) {
                 close_f32(actual, value.powf(2.4), 2e-5);
-            }
-
-            let second = source
-                .iter()
-                .enumerate()
-                .map(|(index, &value)| value + 0.3 + index as f32 * 0.01)
-                .collect::<Vec<_>>();
-            let angles = atan2_f32(&source, &second);
-            for ((&actual, &y), &x) in angles.iter().zip(&source).zip(&second) {
-                close_f32(actual, y.atan2(x), 2e-5);
             }
 
             let mut exponentials = (0..length)

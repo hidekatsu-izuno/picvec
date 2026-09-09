@@ -11,7 +11,7 @@ use rayon::prelude::*;
 use serde::Serialize;
 
 use crate::chroma::AlphaMatte;
-use crate::color::{delta_e2000_pairs, rgb_to_lab, Lab};
+use crate::color::{delta_e_ok_pairs, rgb_to_oklab, Oklab};
 use crate::raster::{percentile, Raster, RasterSource};
 use crate::{Error, Result};
 
@@ -483,18 +483,18 @@ pub(crate) fn perceptual_score<S: RasterSource + ?Sized>(
         .ceil() as usize)
         .max(1);
     let sample_capacity = region.area().div_ceil(step * step);
-    let mut source_samples = Vec::<Lab>::with_capacity(sample_capacity);
-    let mut represented_samples = Vec::<Lab>::with_capacity(sample_capacity);
-    let mut source_edge_starts = Vec::<Lab>::with_capacity(sample_capacity * 2);
-    let mut source_edge_ends = Vec::<Lab>::with_capacity(sample_capacity * 2);
-    let mut represented_edge_starts = Vec::<Lab>::with_capacity(sample_capacity * 2);
+    let mut source_samples = Vec::<Oklab>::with_capacity(sample_capacity);
+    let mut represented_samples = Vec::<Oklab>::with_capacity(sample_capacity);
+    let mut source_edge_starts = Vec::<Oklab>::with_capacity(sample_capacity * 2);
+    let mut source_edge_ends = Vec::<Oklab>::with_capacity(sample_capacity * 2);
+    let mut represented_edge_starts = Vec::<Oklab>::with_capacity(sample_capacity * 2);
     let mut represented_edge_ends = Vec::<(usize, usize)>::with_capacity(sample_capacity * 2);
     for y in (region.y..region.y + region.height).step_by(step) {
         for x in (region.x..region.x + region.width).step_by(step) {
             let source_pixel = source.get(x, y);
             let represented = mapped_sample(candidate, candidate_source, x as f32, y as f32);
-            let source_lab = rgb_to_lab(source_pixel);
-            let represented_lab = rgb_to_lab(represented);
+            let source_lab = rgb_to_oklab(source_pixel);
+            let represented_lab = rgb_to_oklab(represented);
             source_samples.push(source_lab);
             represented_samples.push(represented_lab);
             for (following_x, following_y) in [
@@ -505,26 +505,23 @@ pub(crate) fn perceptual_score<S: RasterSource + ?Sized>(
                     continue;
                 }
                 source_edge_starts.push(source_lab);
-                source_edge_ends.push(rgb_to_lab(source.get(following_x, following_y)));
+                source_edge_ends.push(rgb_to_oklab(source.get(following_x, following_y)));
                 represented_edge_starts.push(represented_lab);
                 represented_edge_ends.push((following_x, following_y));
             }
         }
     }
-    let deltas = delta_e2000_pairs(&source_samples, &represented_samples);
+    let deltas = delta_e_ok_pairs(&source_samples, &represented_samples);
     if deltas.is_empty() {
         return PerceptualScore::default();
     }
 
-    // CIEDE2000 contains several elementary functions. Evaluate all source
-    // edges in contiguous SIMD batches, then evaluate only the rendered edges
-    // whose source counterparts are visible. This retains the exact sampling
-    // and thresholds while avoiding tens of thousands of one-element SIMD
-    // allocations per refinement region.
-    let source_edges = delta_e2000_pairs(&source_edge_starts, &source_edge_ends);
+    // Evaluate source edges together, then only the rendered counterparts
+    // whose source edges are visible.
+    let source_edges = delta_e_ok_pairs(&source_edge_starts, &source_edge_ends);
     let mut visible_source_edges = Vec::<f32>::new();
-    let mut visible_represented_starts = Vec::<Lab>::new();
-    let mut visible_represented_ends = Vec::<Lab>::new();
+    let mut visible_represented_starts = Vec::<Oklab>::new();
+    let mut visible_represented_ends = Vec::<Oklab>::new();
     for ((&source_edge, &represented_start), &(following_x, following_y)) in source_edges
         .iter()
         .zip(&represented_edge_starts)
@@ -541,10 +538,10 @@ pub(crate) fn perceptual_score<S: RasterSource + ?Sized>(
         );
         visible_source_edges.push(source_edge);
         visible_represented_starts.push(represented_start);
-        visible_represented_ends.push(rgb_to_lab(represented_following));
+        visible_represented_ends.push(rgb_to_oklab(represented_following));
     }
     let represented_edges =
-        delta_e2000_pairs(&visible_represented_starts, &visible_represented_ends);
+        delta_e_ok_pairs(&visible_represented_starts, &visible_represented_ends);
     let edge_samples = visible_source_edges.len();
     let missing_edges = represented_edges
         .iter()

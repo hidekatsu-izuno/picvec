@@ -167,7 +167,7 @@ fn split_cell(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::color::rgb_to_lab;
+    use crate::color::rgb_to_oklab;
     use crate::raster::Raster;
     use crate::segment::{RegionStats, SegmentationSummary};
 
@@ -195,7 +195,7 @@ mod tests {
                     max_x: width,
                     max_y: height,
                     mean_rgb: [0.5; 3],
-                    mean_lab: rgb_to_lab([0.5; 3]),
+                    mean_lab: rgb_to_oklab([0.5; 3]),
                 })
                 .collect(),
             summary: SegmentationSummary::default(),
