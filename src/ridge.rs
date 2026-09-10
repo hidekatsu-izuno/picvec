@@ -36,9 +36,10 @@ pub struct RidgeAnalysis {
 }
 
 pub fn analyze(image: &Raster) -> RidgeAnalysis {
+    let labs = oklab_pixels(image);
     RidgeAnalysis {
-        evidence: detect(image),
-        labs: oklab_pixels(image),
+        evidence: detect_with_labs(image, &labs),
+        labs,
     }
 }
 
@@ -401,9 +402,12 @@ fn hysteresis(values: &[f32], width: usize, height: usize, low: f32, high: f32) 
 }
 
 pub fn detect(image: &Raster) -> RidgeEvidence {
+    detect_with_labs(image, &oklab_pixels(image))
+}
+
+fn detect_with_labs(image: &Raster, labs: &[Oklab]) -> RidgeEvidence {
     let width = image.width;
     let height = image.height;
-    let labs = oklab_pixels(image);
     let luminance: Vec<f32> = labs.par_iter().map(|value| value.l / 100.0).collect();
     let scale = width.max(height) as f64 / 1024.0;
     let sigmas: Vec<f64> = [1.0, 1.5, 2.0, 3.0, 4.0]
@@ -713,6 +717,11 @@ pub fn adjust_paint_samples_from_analysis(
     let lightness: Vec<f32> = labs.iter().map(|lab| lab.l).collect();
     let minima = local_extreme(&lightness, image.width, image.height, true);
     let maxima = local_extreme(&lightness, image.width, image.height, false);
+    // Geometry quantization flattens small faces. Its extrema alone cannot
+    // establish that an excluded pixel is an actual source ink/highlight core.
+    let source_lightness: Vec<f32> = oklab_pixels(image).iter().map(|lab| lab.l).collect();
+    let source_minima = local_extreme(&source_lightness, image.width, image.height, true);
+    let source_maxima = local_extreme(&source_lightness, image.width, image.height, false);
     let mut samples = original.to_vec();
     for index in 0..samples.len() {
         if dark[index] || bright[index] {
@@ -721,7 +730,9 @@ pub fn adjust_paint_samples_from_analysis(
         if (dark[index] && lightness[index] <= minima[index] + 1e-6)
             || (bright[index] && lightness[index] >= maxima[index] - 1e-6)
         {
-            samples[index] = true;
+            samples[index] = original[index]
+                || (dark[index] && source_lightness[index] <= source_minima[index] + 1e-6)
+                || (bright[index] && source_lightness[index] >= source_maxima[index] - 1e-6);
         }
     }
     samples
@@ -753,6 +764,33 @@ mod tests {
                     .zip(expected)
                     .all(|(a, b)| (a - b).abs() < 1e-6));
             }
+        }
+    }
+
+    #[test]
+    fn canonical_ridge_extrema_require_source_support_to_restore_samples() {
+        let mut image = Raster::blank(32, 24, [0.82; 3]);
+        for x in 4..28 {
+            image.pixels[7 * image.width + x] = [0.05; 3];
+            image.pixels[16 * image.width + x] = [0.96; 3];
+        }
+        let analysis = analyze(&image);
+        let valid = vec![true; image.pixels.len()];
+        let selected = adjust_paint_samples_from_analysis(&image, &valid, &analysis);
+        let excluded = [7 * image.width + 16, 16 * image.width + 16];
+        let mut mask = valid;
+        let mut source = image.clone();
+        source.pixels[excluded[0]] = [0.4; 3];
+        source.pixels[excluded[1]] = [0.85; 3];
+        for i in excluded {
+            assert!(selected[i], "a valid ridge core should remain usable");
+            mask[i] = false;
+            mask[i - 1] = false;
+        }
+        let selected = adjust_paint_samples_from_analysis(&source, &mask, &analysis);
+        for i in excluded {
+            assert!(!selected[i], "canonical extrema are not source evidence");
+            assert!(selected[i - 1], "restore actual source ridge cores");
         }
     }
 

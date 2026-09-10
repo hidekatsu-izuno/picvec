@@ -182,6 +182,31 @@ fn pair_mixture(
     best
 }
 
+// Both sRGB and linear light can explain the same dark-edge sample. A tiny
+// chroma residual must not flip Paint ownership when the models straddle
+// half coverage. Resolve that ambiguity by the perceptual error of the two
+// opaque paints; otherwise keep the measured coverage.
+fn partition_coverage_alpha(value: [f32; 3], first: [f32; 3], second: [f32; 3]) -> f32 {
+    let (alpha, _, _) = pair_mixture(value, value, first, second);
+    let first_lab = rgb_to_oklab(first);
+    let second_lab = rgb_to_oklab(second);
+    if first_lab.l.min(second_lab.l) >= 35.3 || first_lab.l.max(second_lab.l) < 56.9 {
+        return alpha;
+    }
+    let source = rgb_to_oklab(value);
+    let (srgb_alpha, srgb) = mixture_prediction(value, first, second, false);
+    let (linear_alpha, linear) = mixture_prediction(value, first, second, true);
+    if (srgb_alpha >= 0.5) != (linear_alpha >= 0.5)
+        && delta_e_ok(source, rgb_to_oklab(srgb)) <= 1.5
+        && delta_e_ok(source, rgb_to_oklab(linear)) <= 1.5
+    {
+        let first_error = delta_e_ok(source, first_lab);
+        let second_error = delta_e_ok(source, second_lab);
+        return second_error / (first_error + second_error).max(1e-6);
+    }
+    alpha
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 struct OklabKey(i16, i16, i16);
 
@@ -1528,6 +1553,18 @@ fn boundary_sleeve_assignment(
     }
 
     let mut best = None::<((usize, usize, usize), u32, u32)>;
+    let same_incident_paint = |first: u32, second: u32| {
+        let first = parent_lab[first as usize];
+        let second = parent_lab[second as usize];
+        delta_e_ok(first, second) <= 2.3
+            // Near black, tiny RGB variations produce large OKLab lightness
+            // differences. Treat only neutral, very dark shades as one ink
+            // for this junction test; their actual Paint owners stay separate.
+            || (first.l < 15.0
+                && second.l < 15.0
+                && first.a.hypot(first.b) <= 2.3
+                && second.a.hypot(second.b) <= 2.3)
+    };
     for first_index in 0..candidates.len() - 1 {
         let (first, first_support) = candidates[first_index];
         for &(second, second_support) in candidates.iter().skip(first_index + 1) {
@@ -1550,14 +1587,17 @@ fn boundary_sleeve_assignment(
             if both < required_both || opposite < required_opposite {
                 continue;
             }
-            // Broad support from any third durable face makes this a real
-            // junction rather than a two-sided boundary sleeve.
+            // A third, perceptually distinct durable face proves a junction.
+            // Quantized shades of either incident paint do not: the same ink
+            // contour can have several stable owners along an AA shoulder.
             if candidates.iter().any(|&(owner, amount)| {
                 let junction_amount = junction_support.get(&owner).copied().unwrap_or(0);
                 owner != first
                     && owner != second
                     && amount * 4 > component.len()
                     && junction_amount * 4 > component.len()
+                    && !same_incident_paint(owner, first)
+                    && !same_incident_paint(owner, second)
             }) {
                 continue;
             }
@@ -1605,8 +1645,7 @@ fn boundary_sleeve_assignment(
                     // tie on diagonal steps; using them as coverage can erase a
                     // saturated contour into a light face. Recover coverage from
                     // the observed colour, including sharpened endpoint overshoot.
-                    let (amount, _, _) = pair_mixture(
-                        image.pixels[index],
+                    let amount = partition_coverage_alpha(
                         image.pixels[index],
                         oklab_to_rgb(parent_lab[first as usize]),
                         oklab_to_rgb(parent_lab[second as usize]),
@@ -2015,6 +2054,49 @@ fn correct_antialias_partition(
         }
     }
 
+    // Dark-boundary coverage includes the AA shoulder, not just authored ink.
+    // A two-sided, coreless sleeve with intermediate mixture samples does not
+    // need to span both alpha tails. Keep medial ridges and near-black ink
+    // protected, and require every sample to fit the incident paints.
+    for label in 0..count {
+        if sleeve_accepted[label] {
+            continue;
+        }
+        let Some((first, second, _)) = sleeve_candidates[label].as_ref() else {
+            continue;
+        };
+        // An AA run can end in a few dark coverage samples. Protect a dark
+        // feature by its median, rather than preserving an entire grey sleeve
+        // whenever just one endpoint crosses the ink threshold.
+        let mut lightness: Vec<_> = components[label]
+            .iter()
+            .map(|&index| source_lab[index].l)
+            .collect();
+        if median_channel(&mut lightness) < 35.3 {
+            continue;
+        }
+        if components[label].iter().all(|&index| {
+            if roles.visible_ridge_centres[index] {
+                return false;
+            }
+            // A lower-error linear-light explanation can have alpha near one
+            // even when an equally valid sRGB explanation is intermediate.
+            // Test coverage and colour error together in each mixing space.
+            [false, true].into_iter().any(|linear| {
+                let (alpha, prediction) = mixture_prediction(
+                    image.pixels[index],
+                    parents[*first as usize],
+                    parents[*second as usize],
+                    linear,
+                );
+                (0.08..=0.92).contains(&alpha)
+                    && delta_e_ok(source_lab[index], rgb_to_oklab(prediction)) <= 1.5
+            })
+        }) {
+            sleeve_accepted[label] = true;
+        }
+    }
+
     // A dark antialiased contour is frequently quantized into a chain of
     // one-pixel Paint labels. Keeping every shade as an independent face
     // exposes their raster rectangles in the SVG even though their union is
@@ -2026,6 +2108,7 @@ fn correct_antialias_partition(
     for label in 0..count {
         let component = &components[label];
         if component.is_empty()
+            || sleeve_accepted[label]
             || component.len() > 64
             || core_counts[label] != 0
             || component
@@ -2398,6 +2481,74 @@ fn correct_antialias_partition(
         }
     }
 
+    // Sharpening can leave a long dark undershoot and a faint shoulder inside
+    // an existing ink contour. A few core pixels in the shoulder do not make
+    // its grid-aligned inner edge an authored boundary. Require a narrow,
+    // edge-supported run, no source ridge, and a much larger incident ink face.
+    let mut dark_edge_owner = vec![None; count];
+    for _ in 0..2 {
+        let previous_owners = dark_edge_owner.clone();
+        for label in 0..count {
+            let component = &components[label];
+            if !(16..=256).contains(&component.len())
+                || core_counts[label] * 3 > component.len()
+                || component.iter().any(|&i| roles.visible_ridge_centres[i])
+                || component
+                    .iter()
+                    .filter(|&&i| roles.dark_boundary[i])
+                    .count()
+                    * 10
+                    < component.len() * 9
+                || !native_antialias_width(
+                    component,
+                    labels,
+                    label as u32,
+                    image.width,
+                    image.height,
+                )
+            {
+                continue;
+            }
+            let xs = component.iter().map(|i| i % image.width);
+            let ys = component.iter().map(|i| i / image.width);
+            let width = xs.clone().max().unwrap() - xs.min().unwrap() + 1;
+            let height = ys.clone().max().unwrap() - ys.min().unwrap() + 1;
+            if width.min(height) > 5 || width.max(height) < 16 {
+                continue;
+            }
+            let mut ls: Vec<_> = component.iter().map(|&i| source_lab[i].l).collect();
+            let mut aa: Vec<_> = component.iter().map(|&i| source_lab[i].a).collect();
+            let mut bb: Vec<_> = component.iter().map(|&i| source_lab[i].b).collect();
+            let lab = Oklab {
+                l: median_channel(&mut ls),
+                a: median_channel(&mut aa),
+                b: median_channel(&mut bb),
+            };
+            if lab.l >= 20.0 {
+                continue;
+            }
+            dark_edge_owner[label] = contacts[label]
+                .iter()
+                .filter_map(|(&owner, &contact)| {
+                    let owner = previous_owners[owner as usize].unwrap_or(owner);
+                    let parent = parent_lab[owner as usize];
+                    if components[owner as usize].len() < component.len() * 8
+                        || contact * 8 < component.len()
+                        || parent.l >= 15.0
+                    {
+                        return None;
+                    }
+                    let compatible = delta_e_ok(lab, parent) <= 6.2;
+                    let undershoot = core_counts[label] == 0
+                        && lab.l < parent.l
+                        && (lab.a - parent.a).hypot(lab.b - parent.b) <= 2.3;
+                    (compatible || undershoot).then_some((owner, contact))
+                })
+                .max_by_key(|&(owner, contact)| (contact, std::cmp::Reverse(owner)))
+                .map(|(owner, _)| owner);
+        }
+    }
+
     let mut corrected = labels.to_vec();
     let mut split_regions = 0_usize;
     for label in 0..count {
@@ -2405,6 +2556,15 @@ fn correct_antialias_partition(
         if component.is_empty()
             || !native_antialias_width(component, labels, label as u32, image.width, image.height)
         {
+            continue;
+        }
+        if let Some(owner) = dark_edge_owner[label] {
+            for &index in component {
+                corrected[index] = owner;
+                antialias[index] = true;
+                paint_samples[index] = false;
+            }
+            split_regions += 1;
             continue;
         }
         if let Some(owner) = dark_outline_owner[label] {
@@ -2453,6 +2613,87 @@ fn correct_antialias_partition(
             split_regions += 1;
             continue;
         }
+        // A sampled dark rim may have no three-by-three core: its adjacent
+        // palette fragments are not durable parents. Still absorb compact
+        // coverage when local source colours prove the dark/face mixture and
+        // several neighbouring samples support the same dark rim.
+        if component.len() <= 4
+            && component
+                .iter()
+                .all(|&i| roles.dark_boundary[i] && !roles.visible_ridge_centres[i])
+        {
+            let mut best = None::<(f32, Vec<u32>)>;
+            for &face in contacts[label].keys() {
+                if parent_lab[face as usize].l < 56.9 {
+                    continue;
+                }
+                for &outline in &component_adjacency[label] {
+                    let dark_pixels = &components[outline as usize];
+                    if dark_pixels.is_empty() || dark_pixels.len() > 32 {
+                        continue;
+                    }
+                    let dark = median_lab(&source_lab, dark_pixels);
+                    if dark.l >= 35.3 {
+                        continue;
+                    }
+                    let dark_rgb = oklab_to_rgb(dark);
+                    let mut assignments = Vec::new();
+                    let mut maximum_error = 0.0_f32;
+                    for &i in component {
+                        if source_lab[i].l <= dark.l + 4.0
+                            || source_lab[i].l >= parent_lab[face as usize].l - 4.0
+                        {
+                            break;
+                        }
+                        let x = i % image.width;
+                        let y = i / image.width;
+                        let support = (y.saturating_sub(2)..=(y + 2).min(image.height - 1))
+                            .flat_map(|py| {
+                                (x.saturating_sub(2)..=(x + 2).min(image.width - 1))
+                                    .map(move |px| py * image.width + px)
+                            })
+                            .filter(|&j| {
+                                roles.dark_boundary[j] && delta_e_ok(source_lab[j], dark) <= 6.2
+                            })
+                            .count();
+                        if support < 3 {
+                            break;
+                        }
+                        let (alpha, _, error) = pair_mixture(
+                            image.pixels[i],
+                            image.pixels[i],
+                            dark_rgb,
+                            parents[face as usize],
+                        );
+                        if !(0.08..=0.92).contains(&alpha) || error > 1.5 {
+                            break;
+                        }
+                        maximum_error = maximum_error.max(error);
+                        assignments.push(if alpha >= 0.5 {
+                            dark_outline_owner[outline as usize].unwrap_or(outline)
+                        } else {
+                            face
+                        });
+                    }
+                    if assignments.len() == component.len()
+                        && best.as_ref().is_none_or(|b| {
+                            maximum_error < b.0 || (maximum_error == b.0 && assignments < b.1)
+                        })
+                    {
+                        best = Some((maximum_error, assignments));
+                    }
+                }
+            }
+            if let Some((_, assignments)) = best {
+                for (&i, owner) in component.iter().zip(assignments) {
+                    corrected[i] = owner;
+                    antialias[i] = true;
+                    paint_samples[i] = false;
+                }
+                split_regions += 1;
+                continue;
+            }
+        }
         let mut candidates: Vec<(u32, usize)> = contacts[label]
             .iter()
             .map(|(&owner, &amount)| (owner, amount))
@@ -2485,7 +2726,11 @@ fn correct_antialias_partition(
                         valid = false;
                         break;
                     }
-                    alpha.push(amount);
+                    alpha.push(partition_coverage_alpha(
+                        image.pixels[index],
+                        parents[first as usize],
+                        parents[second as usize],
+                    ));
                     errors.push(error);
                 }
                 if !valid || alpha.is_empty() {
@@ -2637,6 +2882,22 @@ fn correct_antialias_partition(
     }
 }
 
+fn partition_canonical(quantized: &Raster, labels: &[u32], regions: &[RegionStats]) -> Raster {
+    let mut canonical = region_mean_raster_for(quantized, labels, regions.len());
+    // A palette reassignment can outlive the neighbour it originally joined.
+    // A tiny disconnected remnant must not inherit an unrelated colour from
+    // that former owner when all of its source samples are masked as coverage.
+    for (index, &label) in labels.iter().enumerate() {
+        let region = &regions[label as usize];
+        if region.area <= 4
+            && delta_e_ok(rgb_to_oklab(canonical.pixels[index]), region.mean_lab) > 10.5
+        {
+            canonical.pixels[index] = region.mean_rgb;
+        }
+    }
+    canonical
+}
+
 /// Absolute Oklab histogram quantization without transitive spatial chaining.
 /// Only equal-palette four-connected samples become one geometry owner.
 pub fn segment(image: &Raster, roles: &EdgeRoles, config: &Config) -> Segmentation {
@@ -2749,7 +3010,7 @@ pub fn segment(image: &Raster, roles: &EdgeRoles, config: &Config) -> Segmentati
         .max()
         .map_or(0, |value| value as usize + 1);
     let regions = region_stats(image, &labels, count);
-    let canonical = region_mean_raster_for(&quantized, &labels, count);
+    let canonical = partition_canonical(&quantized, &labels, &regions);
     if cfg!(feature = "diagnostics") && config.retain_diagnostics {
         eprintln!(
             "picvec segmentation substage finalize: {:.3}s (total {:.3}s)",
@@ -4294,6 +4555,55 @@ mod tests {
     use crate::edge::classify;
 
     #[test]
+    fn ambiguous_headlight_coverage_does_not_become_dark_ink() {
+        // Native car headlight samples: both mixing spaces explain these
+        // colours, but a minute residual difference used to pick black.
+        for (value, light, dark) in [
+            (
+                [0.45277935, 0.5408499, 0.58111066],
+                [0.65986395, 0.74419475, 0.7910196],
+                [0.03210497, 0.032667756, 0.030182343],
+            ),
+            (
+                [83.0 / 255.0, 98.0 / 255.0, 109.0 / 255.0],
+                [0.5024745, 0.5916716, 0.6489957],
+                [0.049291536, 0.047945917, 0.04566788],
+            ),
+        ] {
+            assert!(partition_coverage_alpha(value, light, dark) > 0.5);
+            assert!(partition_coverage_alpha(value, dark, light) < 0.5);
+            assert!(partition_coverage_alpha(dark, light, dark) < 0.5);
+            assert!(partition_coverage_alpha(light, light, dark) > 0.5);
+        }
+    }
+
+    #[test]
+    fn orphaned_coverage_does_not_inherit_a_remote_red_palette() {
+        // A glass/trim coverage pixel was left alone after its former palette
+        // neighbour moved. Masked Paint fitting will use this canonical colour.
+        let mut source = Raster::blank(8, 8, [0.53, 0.73, 0.81]);
+        source.pixels[27] = [76.0 / 255.0, 82.0 / 255.0, 91.0 / 255.0];
+        let mut labels = vec![0; 64];
+        labels[27] = 1;
+        let mut quantized = Raster::blank(8, 8, [0.52, 0.72, 0.80]);
+        quantized.pixels[27] = [188.0 / 255.0, 37.0 / 255.0, 36.0 / 255.0];
+        let canonical =
+            partition_canonical(&quantized, &labels, &region_stats(&source, &labels, 2));
+        assert!(
+            delta_e_ok(
+                rgb_to_oklab(canonical.pixels[27]),
+                rgb_to_oklab(source.pixels[27])
+            ) < 0.01
+        );
+        assert!(
+            delta_e_ok(
+                rgb_to_oklab(canonical.pixels[0]),
+                rgb_to_oklab(quantized.pixels[0])
+            ) < 0.01
+        );
+    }
+
+    #[test]
     fn source_highlight_is_not_quantized_into_its_incident_paint() {
         let mut colours = vec![
             Oklab {
@@ -4709,6 +5019,47 @@ mod tests {
     }
 
     #[test]
+    fn compact_coverage_next_to_a_fragmented_rim_is_not_a_third_face() {
+        for protected in [false, true] {
+            let (width, height) = (24, 160);
+            let mut image =
+                Raster::blank(width, height, [134.0 / 255.0, 185.0 / 255.0, 207.0 / 255.0]);
+            let mut labels = vec![0_u32; width * height];
+            for y in 0..height {
+                for x in 0..6 {
+                    let i = y * width + x;
+                    labels[i] = 1;
+                    image.pixels[i] = [0.75, 0.1, 0.1];
+                }
+                for x in 6..8 {
+                    let i = y * width + x;
+                    labels[i] = 2 + y as u32;
+                    image.pixels[i] = [37.0 / 255.0, 23.0 / 255.0, 26.0 / 255.0];
+                }
+            }
+            let index = 80 * width + 8;
+            labels[index] = 162;
+            image.pixels[index] = [76.0 / 255.0, 82.0 / 255.0, 91.0 / 255.0];
+            let mut roles = classify(&image);
+            for y in 0..height {
+                for x in 6..8 {
+                    roles.dark_boundary[y * width + x] = true;
+                }
+            }
+            roles.dark_boundary[index] = true;
+            roles.visible_ridge_centres[index] = protected;
+            let result = correct_antialias_partition(&image, &labels, 163, &roles);
+            if protected {
+                assert_ne!(result.labels[index], result.labels[index - 1]);
+                assert_ne!(result.labels[index], result.labels[index + 1]);
+            } else {
+                assert_eq!(result.labels[index], result.labels[index - 1]);
+                assert!(!result.paint_samples[index]);
+            }
+        }
+    }
+
+    #[test]
     fn isolated_intermediate_antialias_pixel_is_absorbed_by_a_parent_face() {
         let width = 7;
         let height = 7;
@@ -4734,6 +5085,138 @@ mod tests {
         );
         assert!(!correction.paint_samples[intermediate]);
         assert_eq!(correction.split_regions, 1);
+    }
+
+    #[test]
+    fn long_ink_edge_shoulder_and_undershoot_share_the_durable_outline() {
+        for protected in [false, true] {
+            let width = 64;
+            let height = 64;
+            let mut image = Raster::blank(width, height, [0.015; 3]);
+            let mut labels = vec![0; width * height];
+            for y in 0..height {
+                for x in 35..width {
+                    image.pixels[y * width + x] = [0.98; 3];
+                    labels[y * width + x] = 1;
+                }
+            }
+            for y in 16..48 {
+                for x in 31..35 {
+                    let i = y * width + x;
+                    labels[i] = if x < 34 { 2 } else { 3 };
+                    image.pixels[i] = if x < 34 { [0.03; 3] } else { [0.0; 3] };
+                }
+            }
+            let mut roles = classify(&image);
+            for y in 16..48 {
+                for x in 31..35 {
+                    let i = y * width + x;
+                    roles.dark_boundary[i] = true;
+                    roles.visible_ridge_centres[i] = protected;
+                }
+            }
+            let result = correct_antialias_partition(&image, &labels, 4, &roles);
+            for y in 16..48 {
+                for x in 31..35 {
+                    let i = y * width + x;
+                    if protected {
+                        assert_eq!(result.labels[i], labels[i]);
+                    } else {
+                        assert_eq!(result.labels[i], 0);
+                        assert!(!result.paint_samples[i]);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn intermediate_sleeve_beside_split_ink_is_coverage() {
+        for (third, protected, expected_coverage) in [
+            ([0.018, 0.023, 0.028], false, true),
+            ([0.0001, 0.0002, 0.0003], false, true),
+            ([0.8, 0.1, 0.1], false, false),
+            ([0.018, 0.023, 0.028], true, false),
+        ] {
+            let width = 15;
+            let height = 17;
+            let mut image = Raster::blank(width, height, [0.02, 0.025, 0.03]);
+            let mut labels = vec![0_u32; width * height];
+            for y in 0..height {
+                for x in 0..width {
+                    let i = y * width + x;
+                    if x >= 7 {
+                        image.pixels[i] = [0.98, 0.96, 0.92];
+                        labels[i] = 2;
+                    } else if y >= 10 {
+                        image.pixels[i] = third;
+                        labels[i] = 3;
+                    }
+                }
+            }
+            for y in 4..13 {
+                let i = y * width + 7;
+                image.pixels[i] = [0.40, 0.40, 0.38];
+                labels[i] = 1;
+            }
+            let mut roles = classify(&image);
+            for y in 4..13 {
+                let i = y * width + 7;
+                roles.dark_boundary[i] = true;
+                roles.visible_ridge_centres[i] = protected;
+            }
+            let correction = correct_antialias_partition(&image, &labels, 4, &roles);
+            for y in 4..13 {
+                let i = y * width + 7;
+                assert_eq!(!correction.paint_samples[i], expected_coverage);
+                if expected_coverage {
+                    assert!(
+                        correction.labels[i] == correction.labels[4 * width + 6]
+                            || correction.labels[i] == correction.labels[i + 1]
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn short_and_dark_tailed_mixture_runs_are_not_independent_paint() {
+        for length in [1, 4, 9] {
+            let width = 17;
+            let height = 17;
+            let mut image = Raster::blank(width, height, [0.01; 3]);
+            let mut labels = vec![0; width * height];
+            for y in 0..height {
+                for x in 8..width {
+                    image.pixels[y * width + x] = [0.98; 3];
+                    labels[y * width + x] = 2;
+                }
+            }
+            for offset in 0..length {
+                let i = (4 + offset) * width + 8;
+                image.pixels[i] = [if length == 9 && offset >= 7 {
+                    0.15
+                } else {
+                    0.45
+                }; 3];
+                labels[i] = 1;
+            }
+            let mut roles = classify(&image);
+            for offset in 0..length {
+                let i = (4 + offset) * width + 8;
+                roles.dark_boundary[i] = true;
+                roles.visible_ridge_centres[i] = false;
+            }
+            let correction = correct_antialias_partition(&image, &labels, 3, &roles);
+            for offset in 0..length {
+                let i = (4 + offset) * width + 8;
+                assert!(
+                    !correction.paint_samples[i],
+                    "length={length}, offset={offset}"
+                );
+                assert_eq!(correction.labels[i], correction.labels[i - 1]);
+            }
+        }
     }
 
     #[test]

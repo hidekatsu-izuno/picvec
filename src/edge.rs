@@ -3075,10 +3075,12 @@ fn bilateral_range_weights(
     dx: isize,
     dy: isize,
     config: &Config,
-) -> Vec<f32> {
-    let mut weights = (0..lab.len())
-        .into_par_iter()
-        .map(|index| {
+    weights: &mut [f32],
+) {
+    weights
+        .par_iter_mut()
+        .enumerate()
+        .for_each(|(index, weight)| {
             let x = (index % width) as isize;
             let y = (index / width) as isize;
             let px = (x + dx).clamp(0, width as isize - 1) as usize;
@@ -3088,11 +3090,9 @@ fn bilateral_range_weights(
             let distance = delta_e_ok(centre, sample);
             let threshold = adaptive_tolerance(0.5 * (centre.l + sample.l), config).max(1e-3);
             let ratio = distance / threshold;
-            -0.5_f32 * (ratio * ratio)
-        })
-        .collect::<Vec<_>>();
-    crate::elementary::exp_f32_in_place(&mut weights);
-    weights
+            *weight = -0.5_f32 * (ratio * ratio);
+        });
+    crate::elementary::exp_f32_in_place(weights);
 }
 
 /// Small-radius bilateral smoothing that never averages through a strong
@@ -3116,6 +3116,7 @@ pub fn perceptual_smooth(image: &Raster, config: &Config) -> Raster {
     let sigma = config.smoothing_spatial_sigma.max(0.1);
     let mut numerator = vec![[0.0_f32; 3]; image.pixels.len()];
     let mut denominator = vec![0.0_f32; image.pixels.len()];
+    let mut range_weights = vec![0.0_f32; image.pixels.len()];
     // Python advances one complete shifted image at a time. Besides enabling
     // NumPy's dispatched contiguous `exp`, this fixes the accumulation order
     // for every output pixel. Keep that same dy/dx-major traversal while
@@ -3124,8 +3125,10 @@ pub fn perceptual_smooth(image: &Raster, config: &Config) -> Raster {
         for dx in -radius..=radius {
             let spatial =
                 crate::elementary::exp_f64(-0.5_f64 * (dx * dx + dy * dy) as f64 / (sigma * sigma));
-            let range_weights = (dx != 0 || dy != 0)
-                .then(|| bilateral_range_weights(&lab, image.width, image.height, dx, dy, config));
+            let shifted = dx != 0 || dy != 0;
+            if shifted {
+                bilateral_range_weights(&lab, image.width, image.height, dx, dy, config, &mut range_weights);
+            }
             numerator
                 .par_iter_mut()
                 .zip(denominator.par_iter_mut())
@@ -3137,7 +3140,7 @@ pub fn perceptual_smooth(image: &Raster, config: &Config) -> Raster {
                     let py = (y + dy).clamp(0, image.height as isize - 1);
                     let sample_index = py as usize * image.width + px as usize;
                     let sample = lab[sample_index];
-                    let range = range_weights.as_ref().map_or(1.0, |weights| weights[index]);
+                    let range = if shifted { range_weights[index] } else { 1.0 };
                     let weight = (spatial * range as f64) as f32;
                     sum[0] += sample.l * weight;
                     sum[1] += sample.a * weight;

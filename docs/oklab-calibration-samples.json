@@ -301,7 +301,7 @@
       }
     }
   ],
-  "provenance_note": "Root source_tree_sha256 and validation describe the earlier all-sample calibration. The car was subsequently regenerated; see latest_car_regeneration. Other outputs were not regenerated during the window repair.",
+  "provenance_note": "Root source_tree_sha256, validation and sample measurements describe the earlier calibration. latest_car_regeneration records the subsequent window repair. All sample outputs were regenerated after that repair; current hashes and adaptive-refinement data are in docs/sample-regeneration-results.json.",
   "latest_car_regeneration": {
     "source_tree_sha256": "469f1d5b50efdb8c6f582f5109c511d10b5d38cccd641bf1d66c71fe798ad3f1",
     "report": "docs/car-windows.md",

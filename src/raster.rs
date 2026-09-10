@@ -378,21 +378,61 @@ pub fn percentile(mut values: Vec<f32>, quantile: f32) -> f32 {
     if values.is_empty() {
         return 0.0;
     }
-    values.sort_by(|a, b| a.total_cmp(b));
     let position = quantile.clamp(0.0, 1.0) * (values.len() - 1) as f32;
     let low = position.floor() as usize;
     let high = position.ceil() as usize;
+    let (lower, upper, _) = values.select_nth_unstable_by(high, f32::total_cmp);
     if low == high {
-        values[low]
+        *upper
     } else {
+        // The two interpolation ranks are adjacent. The lower rank is the
+        // maximum of the lower partition; no complete sort is necessary.
+        let lower = *lower.iter().max_by(|a, b| a.total_cmp(b)).unwrap();
         let amount = position - low as f32;
-        values[low] * (1.0 - amount) + values[high] * amount
+        lower * (1.0 - amount) + *upper * amount
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn percentile_selection_matches_sorted_interpolation() {
+        for length in 1..258 {
+            let values = (0..length)
+                .map(|i| ((i * 73 + length * 31) % 101) as f32 - 50.0)
+                .collect::<Vec<_>>();
+            let mut sorted = values.clone();
+            sorted.sort_by(f32::total_cmp);
+            for q in [-1.0_f32, 0.0, 0.01, 0.25, 0.5, 0.9, 0.99, 1.0, 2.0] {
+                let position = q.clamp(0.0, 1.0) * (length - 1) as f32;
+                let low = position.floor() as usize;
+                let high = position.ceil() as usize;
+                let amount = position - low as f32;
+                let expected = if low == high { sorted[low] } else {
+                    sorted[low] * (1.0 - amount) + sorted[high] * amount
+                };
+                assert_eq!(percentile(values.clone(), q).to_bits(), expected.to_bits());
+            }
+        }
+        for values in [vec![], vec![-0.0, 0.0], vec![f32::NEG_INFINITY, 1.0, f32::INFINITY]] {
+            let mut sorted = values.clone();
+            sorted.sort_by(f32::total_cmp);
+            for q in [0.0, 0.5, 1.0] {
+                let expected = if sorted.is_empty() { 0.0 } else {
+                    let position = q * (sorted.len() - 1) as f32;
+                    let low = position.floor() as usize;
+                    let high = position.ceil() as usize;
+                    if low == high { sorted[low] } else {
+                        let amount = position - low as f32;
+                        sorted[low] * (1.0 - amount) + sorted[high] * amount
+                    }
+                };
+                assert_eq!(percentile(values.clone(), q).to_bits(), expected.to_bits());
+            }
+        }
+    }
 
     #[test]
     fn input_dimensions_are_limited_before_full_decode() {

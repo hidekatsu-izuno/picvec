@@ -8,7 +8,7 @@ use serde::Serialize;
 use crate::color::rgb_hex;
 use crate::geometry::{open_path_data, Primitive, RegionGeometry};
 use crate::gradient::{ColorStop, OpacityStop, Paint, PaintOverlay};
-use crate::optimize::{format_number, optimize_path, separated_bboxes, OptimizedElement};
+use crate::optimize::{format_number, optimize_path, separated_bboxes, OptimizedElement, PathOptimization};
 use crate::structural::StructuralInk;
 use crate::Result;
 
@@ -86,6 +86,7 @@ pub(crate) struct AlphaMask {
 struct PaintElement {
     geometry: OptimizedElement,
     attributes: String,
+    underpaint_attributes: Option<String>,
     batchable: bool,
 }
 
@@ -133,16 +134,18 @@ fn paint_key(paint: &Paint) -> Option<String> {
             stops_key(stops)
         )),
         Paint::Radial {
+            rotation,
             center,
             radius,
             stops,
             ..
         } => Some(format!(
-            "R:{},{},{},{}:{}",
+            "R:{},{},{},{},{}:{}",
             number(center.x),
             number(center.y),
             number(radius.x),
             number(radius.y),
+            number(rotation.to_degrees()),
             stops_key(stops)
         )),
         Paint::Layered { .. } => None,
@@ -250,14 +253,34 @@ fn fill_value(paint: &Paint, gradient_ids: &HashMap<String, String>) -> String {
     }
 }
 
-fn paint_attributes(fill: &str, overlap: f32) -> String {
-    if overlap <= 0.0 {
-        format!("fill=\"{}\"", fill)
-    } else {
+fn underpaint_attributes(fill: &str, overlap: f32) -> Option<String> {
+    (overlap > 0.0).then(|| {
         format!(
-            "fill=\"{}\" stroke=\"{}\" stroke-width=\"{}\" stroke-linejoin=\"round\" paint-order=\"stroke fill\"",
-            fill, fill, number(overlap * 2.0)
+            "fill=\"none\" stroke=\"{}\" stroke-width=\"{}\" stroke-linejoin=\"round\"",
+            fill,
+            number(overlap * 2.0)
         )
+    })
+}
+
+fn write_paint_elements(
+    body: &mut String,
+    elements: &[Option<PaintElement>],
+    summary: &mut SvgSummary,
+) {
+    // Seal rasterizer seams below all fills. Stroking each face in paint
+    // order displaces a shared boundary by +/- overlap whenever a shade
+    // changes, even if all faces reuse the very same straight/curved master.
+    for element in elements.iter().flatten() {
+        if let Some(attributes) = &element.underpaint_attributes {
+            count_element(summary, write_geometry(body, &element.geometry, attributes));
+        }
+    }
+    for element in elements.iter().flatten() {
+        count_element(
+            summary,
+            write_geometry(body, &element.geometry, &element.attributes),
+        );
     }
 }
 
@@ -293,7 +316,7 @@ fn batch_equal_paint_paths(elements: &mut [Option<PaintElement>], summary: &mut 
         let Some(element) = elements[current].as_ref() else {
             continue;
         };
-        let signature = element.attributes.clone();
+        let signature = format!("{}|{:?}", element.attributes, element.underpaint_attributes);
         let next_signature = signature_ids.len();
         let signature_id = *signature_ids.entry(signature).or_insert(next_signature);
         if !element.batchable {
@@ -495,6 +518,7 @@ fn register_gradient(
             };
         }
         Paint::Radial {
+            rotation,
             center,
             radius,
             stops,
@@ -503,7 +527,12 @@ fn register_gradient(
             let elements = opacity_stops
                 .map(|opacity| overlay_stop_elements(stops, opacity))
                 .unwrap_or_else(|| stop_elements(stops));
-            let _ = write!(definitions, "<radialGradient id=\"{}\" gradientUnits=\"userSpaceOnUse\" cx=\"0\" cy=\"0\" r=\"1\" gradientTransform=\"translate({} {}) scale({} {})\">{}</radialGradient>", id, number(center.x), number(center.y), number(radius.x.max(0.001)), number(radius.y.max(0.001)), elements);
+            let rotation = if *rotation == 0.0 {
+                String::new()
+            } else {
+                format!(" rotate({})", number(rotation.to_degrees()))
+            };
+            let _ = write!(definitions, "<radialGradient id=\"{}\" gradientUnits=\"userSpaceOnUse\" cx=\"0\" cy=\"0\" r=\"1\" gradientTransform=\"translate({} {}){} scale({} {})\">{}</radialGradient>", id, number(center.x), number(center.y), rotation, number(radius.x.max(0.001)), number(radius.y.max(0.001)), elements);
             summary.radial_gradients += 1;
             summary.gradient_stops += if let Some(opacity) = opacity_stops {
                 let mut offsets = stops.iter().map(|stop| stop.offset).collect::<Vec<_>>();
@@ -532,7 +561,8 @@ fn append_paint_elements(
             let base_fill = fill_value(base, gradient_ids);
             elements.push(Some(PaintElement {
                 geometry: geometry.clone(),
-                attributes: paint_attributes(&base_fill, paint_overlap),
+                attributes: format!("fill=\"{base_fill}\""),
+                underpaint_attributes: underpaint_attributes(&base_fill, paint_overlap),
                 batchable: false,
             }));
             for overlay in overlays {
@@ -546,6 +576,7 @@ fn append_paint_elements(
                 elements.push(Some(PaintElement {
                     geometry: geometry.clone(),
                     attributes: format!("fill=\"{}\"", fill),
+                    underpaint_attributes: None,
                     batchable: false,
                 }));
             }
@@ -554,7 +585,8 @@ fn append_paint_elements(
             let fill = fill_value(paint, gradient_ids);
             elements.push(Some(PaintElement {
                 geometry,
-                attributes: paint_attributes(&fill, paint_overlap),
+                attributes: format!("fill=\"{fill}\""),
+                underpaint_attributes: underpaint_attributes(&fill, paint_overlap),
                 batchable: true,
             }));
         }
@@ -613,6 +645,24 @@ pub(crate) fn serialize_filtered(
     )
 }
 
+/// A conversion-local cache of exact Paint path normalization. The input
+/// string is the key, so ordinary and occlusion paths cannot share stale data.
+#[derive(Default)]
+pub(crate) struct GeometryCache {
+    paths: HashMap<String, Option<(OptimizedElement, PathOptimization)>>,
+}
+
+impl GeometryCache {
+    fn optimize(&mut self, path: &str) -> Option<(OptimizedElement, PathOptimization)> {
+        if let Some(cached) = self.paths.get(path) {
+            return cached.clone();
+        }
+        let optimized = optimize_path(path, true, false);
+        self.paths.insert(path.to_owned(), optimized.clone());
+        optimized
+    }
+}
+
 /// Serialize selected raster regions and optionally apply an independent
 /// vector alpha mask to the complete Paint and structural content.
 #[allow(clippy::too_many_arguments)]
@@ -626,6 +676,25 @@ pub(crate) fn serialize_filtered_with_alpha(
     final_geometry: bool,
     excluded_regions: &[bool],
     alpha_mask: Option<&AlphaMask>,
+) -> (String, SvgSummary) {
+    serialize_filtered_with_alpha_cached(
+        width, height, geometries, paints, structural, paint_overlap,
+        final_geometry, excluded_regions, alpha_mask, &mut GeometryCache::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn serialize_filtered_with_alpha_cached(
+    width: usize,
+    height: usize,
+    geometries: &[RegionGeometry],
+    paints: &[Paint],
+    structural: &StructuralInk,
+    paint_overlap: f32,
+    final_geometry: bool,
+    excluded_regions: &[bool],
+    alpha_mask: Option<&AlphaMask>,
+    geometry_cache: &mut GeometryCache,
 ) -> (String, SvgSummary) {
     let mut gradient_ids = HashMap::<String, String>::new();
     let mut definitions = String::new();
@@ -649,29 +718,40 @@ pub(crate) fn serialize_filtered_with_alpha(
             "<mask id=\"source-alpha-mask\" maskUnits=\"userSpaceOnUse\" maskContentUnits=\"userSpaceOnUse\" x=\"0\" y=\"0\" width=\"{}\" height=\"{}\" mask-type=\"{mode}\" style=\"mask-type:{mode}\">",
             width, height
         );
-        for (i, layer) in mask.layers.iter().enumerate() {
-            if layer.path_data.is_empty() || layer.opacity <= 0.0 {
-                continue;
+        // Seal seams underneath every mask fill. A stroke painted with its
+        // own fill can overwrite a neighbouring alpha value and create a
+        // bright fringe where RGB and authored transparency compensate.
+        for underpass in [true, false] {
+            for (i, layer) in mask.layers.iter().enumerate() {
+                if layer.path_data.is_empty() || layer.opacity <= 0.0 {
+                    continue;
+                }
+                let fill = match &layer.paint {
+                    Some(Paint::Solid { color }) => rgb_hex(*color),
+                    Some(_) => format!("url(#{})", gradient_ids[&format!("mask-{i}")]),
+                    None => "#ffffff".to_string(),
+                };
+                let opacity = number(layer.opacity.clamp(0.0, 1.0));
+                if underpass {
+                    if !mask.luminance
+                        || matches!(&layer.paint, Some(Paint::Solid {color}) if *color == [1.0;3])
+                    {
+                        continue;
+                    }
+                    let _ = write!(
+                        definitions,
+                        "<path d=\"{}\" fill=\"none\" stroke=\"{fill}\" stroke-width=\"1.5\" stroke-opacity=\"{opacity}\"/>",
+                        layer.path_data,
+                    );
+                } else {
+                    let _ = write!(
+                        definitions,
+                        "<path d=\"{}\" fill=\"{fill}\" fill-opacity=\"{opacity}\" fill-rule=\"evenodd\"/>",
+                        layer.path_data,
+                    );
+                }
+                summary.alpha_mask_paths += 1;
             }
-            let fill = match &layer.paint {
-                Some(Paint::Solid { color }) => rgb_hex(*color),
-                Some(_) => format!("url(#{})", gradient_ids[&format!("mask-{i}")]),
-                None => "#ffffff".to_string(),
-            };
-            let stroke = if mask.luminance
-                && !matches!(&layer.paint, Some(Paint::Solid {color}) if *color == [1.0;3])
-            {
-                format!(" stroke=\"{fill}\" stroke-width=\"1.5\"")
-            } else {
-                String::new()
-            };
-            let _ = write!(
-                definitions,
-                "<path d=\"{}\" fill=\"{fill}\"{stroke} fill-opacity=\"{}\" fill-rule=\"evenodd\"/>",
-                layer.path_data,
-                number(layer.opacity.clamp(0.0, 1.0)),
-            );
-            summary.alpha_mask_paths += 1;
         }
         definitions.push_str("</mask>");
     }
@@ -818,7 +898,7 @@ pub(crate) fn serialize_filtered_with_alpha(
                 if path_data.is_empty() {
                     continue;
                 }
-                if let Some((optimized, operations)) = optimize_path(path_data, true, false) {
+                if let Some((optimized, operations)) = geometry_cache.optimize(path_data) {
                     summary.linear_cubics_to_lines += operations.linear_cubics;
                     summary.redundant_segments_removed += operations.redundant_segments;
                     summary.arc_segments += operations.arc_segments;
@@ -859,16 +939,16 @@ pub(crate) fn serialize_filtered_with_alpha(
         if let Some((i, _)) = band {
             for element in elements[first_element..].iter_mut().flatten() {
                 let _ = write!(element.attributes, " clip-path=\"url(#outline-inner-{i})\"");
+                if let Some(attributes) = &mut element.underpaint_attributes {
+                    let _ = write!(attributes, " clip-path=\"url(#outline-inner-{i})\"");
+                }
             }
         }
     }
     batch_equal_paint_paths(&mut paint_elements, &mut summary);
     let mut body = String::new();
     body.push_str("<g id=\"paint-layer\" fill-rule=\"evenodd\">");
-    for element in paint_elements.into_iter().flatten() {
-        let kind = write_geometry(&mut body, &element.geometry, &element.attributes);
-        count_element(&mut summary, kind);
-    }
+    write_paint_elements(&mut body, &paint_elements, &mut summary);
     for (i, (band, mut elements)) in structural.outlines.iter().zip(band_elements).enumerate() {
         // A complete underpaint prevents complementary antialias coverage
         // at the inner clip from exposing the page through a hairline seam.
@@ -886,10 +966,7 @@ pub(crate) fn serialize_filtered_with_alpha(
             summary.path_elements += 1;
         }
         batch_equal_paint_paths(&mut elements, &mut summary);
-        for element in elements.into_iter().flatten() {
-            let kind = write_geometry(&mut body, &element.geometry, &element.attributes);
-            count_element(&mut summary, kind);
-        }
+        write_paint_elements(&mut body, &elements, &mut summary);
     }
     body.push_str("</g>");
     body.push_str("<g id=\"structural-ink-layer\" fill=\"none\" stroke-linecap=\"round\" stroke-linejoin=\"round\">");
@@ -1011,8 +1088,175 @@ mod tests {
                 bbox: Some(bbox),
             },
             attributes: attributes.to_string(),
+            underpaint_attributes: None,
             batchable: true,
         })
+    }
+
+    #[test]
+    fn authored_alpha_boundary_does_not_add_a_bright_fringe() {
+        for reversed in [false, true] {
+            let mut layers = vec![
+                AlphaMaskLayer {
+                    path_data: "M0 0H20V20H0Z".into(),
+                    opacity: 1.0,
+                    paint: Some(Paint::Solid {
+                        color: [170.0 / 255.0; 3],
+                    }),
+                },
+                AlphaMaskLayer {
+                    path_data: "M20 0H40V20H20Z".into(),
+                    opacity: 1.0,
+                    paint: Some(Paint::Solid {
+                        color: [204.0 / 255.0; 3],
+                    }),
+                },
+            ];
+            if reversed {
+                layers.reverse();
+            }
+            let (document, _) = serialize_filtered_with_alpha(
+                40,
+                20,
+                &[],
+                &[],
+                &StructuralInk::empty(),
+                0.0,
+                true,
+                &[],
+                Some(&AlphaMask {
+                    layers,
+                    luminance: true,
+                }),
+            );
+            // The two source RGBA colours have the same premultiplied RGB.
+            let document = document.replace(
+                "<g mask=\"url(#source-alpha-mask)\">",
+                "<g mask=\"url(#source-alpha-mask)\"><path d=\"M0 0H20V20H0Z\" fill=\"#ffffff\"/><path d=\"M20 0H40V20H20Z\" fill=\"#d5d5d5\"/>",
+            );
+            let tree =
+                resvg::usvg::Tree::from_str(&document, &resvg::usvg::Options::default()).unwrap();
+            for background in [
+                resvg::tiny_skia::Color::BLACK,
+                resvg::tiny_skia::Color::WHITE,
+            ] {
+                let mut pixmap = resvg::tiny_skia::Pixmap::new(320, 160).unwrap();
+                pixmap.fill(background);
+                resvg::render(
+                    &tree,
+                    resvg::tiny_skia::Transform::from_scale(8.0, 8.0),
+                    &mut pixmap.as_mut(),
+                );
+                for x in 144..176 {
+                    let expected = if background == resvg::tiny_skia::Color::BLACK {
+                        170
+                    } else if x < 160 {
+                        255
+                    } else {
+                        221
+                    };
+                    let actual = pixmap.pixel(x, 80).unwrap().red();
+                    assert!(
+                        (actual as i32 - expected).abs() <= 1,
+                        "reversed={reversed}, x={x}: {actual}, expected {expected}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rotated_radial_gradient_renders_its_major_axis_and_has_a_distinct_key() {
+        let mut paint = Paint::Radial {
+            origin: crate::gradient::RadialOrigin::Fitted,
+            center: crate::geometry::Point { x: 16.0, y: 16.0 },
+            radius: crate::geometry::Point { x: 12.0, y: 4.0 },
+            rotation: std::f32::consts::FRAC_PI_4,
+            stops: vec![
+                ColorStop {
+                    offset: 0.0,
+                    color: [0.0; 3],
+                },
+                ColorStop {
+                    offset: 1.0,
+                    color: [1.0; 3],
+                },
+            ],
+        };
+        let key = paint_key(&paint).unwrap();
+        let mut ids = HashMap::new();
+        let mut definitions = String::new();
+        register_gradient(
+            &paint,
+            None,
+            key.clone(),
+            &mut ids,
+            &mut definitions,
+            &mut SvgSummary::default(),
+        );
+        let document=format!("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"32\" height=\"32\"><defs>{definitions}</defs><rect width=\"32\" height=\"32\" fill=\"url(#{})\"/></svg>",ids[&key]);
+        let tree =
+            resvg::usvg::Tree::from_str(&document, &resvg::usvg::Options::default()).unwrap();
+        let mut pixmap = resvg::tiny_skia::Pixmap::new(32, 32).unwrap();
+        resvg::render(
+            &tree,
+            resvg::tiny_skia::Transform::identity(),
+            &mut pixmap.as_mut(),
+        );
+        assert!(pixmap.pixel(22, 22).unwrap().red() < 210);
+        assert!(pixmap.pixel(22, 9).unwrap().red() > 245);
+        if let Paint::Radial { rotation, .. } = &mut paint {
+            *rotation = 0.0;
+        }
+        assert_ne!(paint_key(&paint).unwrap(), key);
+        let unrotated_key = paint_key(&paint).unwrap();
+        if let Paint::Radial { rotation, .. } = &mut paint {
+            *rotation = 0.0004;
+        }
+        assert_ne!(paint_key(&paint).unwrap(), unrotated_key);
+    }
+
+    #[test]
+    fn shared_edge_does_not_step_when_paint_order_changes() {
+        let mut elements = Vec::new();
+        for (x, y, width, height, color) in [
+            (0.0, 0.0, 20.0, 10.25, [0.02; 3]),
+            (0.0, 10.25, 40.0, 9.75, [1.0; 3]),
+            (20.0, 0.0, 20.0, 10.25, [0.03; 3]),
+        ] {
+            append_paint_elements(
+                &mut elements,
+                OptimizedElement::Rect {
+                    x,
+                    y,
+                    width,
+                    height,
+                },
+                &Paint::Solid { color },
+                &HashMap::new(),
+                0.3,
+            );
+        }
+        let mut body = String::new();
+        write_paint_elements(&mut body, &elements, &mut SvgSummary::default());
+        let document = format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"40\" height=\"20\">{body}</svg>"
+        );
+        let tree =
+            resvg::usvg::Tree::from_str(&document, &resvg::usvg::Options::default()).unwrap();
+        let mut pixmap = resvg::tiny_skia::Pixmap::new(320, 160).unwrap();
+        resvg::render(
+            &tree,
+            resvg::tiny_skia::Transform::from_scale(8.0, 8.0),
+            &mut pixmap.as_mut(),
+        );
+        for x in [80, 240] {
+            assert!(pixmap.pixel(x, 80).unwrap().red() < 30);
+            assert!(pixmap.pixel(x, 83).unwrap().red() > 245);
+            for y in 79..85 {
+                assert_eq!(pixmap.pixel(x, y).unwrap().alpha(), 255);
+            }
+        }
     }
 
     #[test]
@@ -1042,6 +1286,7 @@ mod tests {
     fn layered_paint_emits_ordered_transparent_gradient_components() {
         let overlay = PaintOverlay {
             paint: Box::new(Paint::Radial {
+                rotation: 0.0,
                 origin: crate::gradient::RadialOrigin::Fitted,
                 center: crate::geometry::Point { x: 5.0, y: 5.0 },
                 radius: crate::geometry::Point { x: 4.0, y: 3.0 },

@@ -2,13 +2,100 @@
 use super::*;
 use std::collections::VecDeque;
 
+// Keep both orders: fitting samples in raster order, while domain propagation
+// resolves equal-distance ownership in the original breadth-first seed order.
+struct QuietDomains {
+    breadth_first: Vec<Vec<usize>>,
+    sorted: Vec<Vec<usize>>,
+}
+
+impl QuietDomains {
+    fn new(boundary_source: &Raster, threshold: f32) -> Self {
+        let w = boundary_source.width;
+        let len = boundary_source.pixels.len();
+        let neighbours = |i: usize| {
+            [
+                if !i.is_multiple_of(w) { i - 1 } else { i },
+                if i % w + 1 < w { i + 1 } else { i },
+                if i >= w { i - w } else { i },
+                if i + w < len { i + w } else { i },
+            ]
+        };
+        // A colour change across a pixel edge is not itself a new Paint owner.
+        // Extract smooth interiors directly from the source, independently of the
+        // quantizer labels (which can contain unrelated boundary fragments).
+        let quiet = (0..len)
+            .map(|i| {
+                neighbours(i).iter().all(|&j| {
+                    (0..3).all(|c| {
+                        (boundary_source.pixels[i][c] - boundary_source.pixels[j][c]).abs()
+                            <= threshold / 255.0
+                    })
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut seen = vec![false; len];
+        let mut components = Vec::new();
+        for i in 0..len {
+            if seen[i] || !quiet[i] {
+                continue;
+            }
+            seen[i] = true;
+            let mut queue = VecDeque::from([i]);
+            let mut pixels = Vec::new();
+            while let Some(j) = queue.pop_front() {
+                pixels.push(j);
+                for k in neighbours(j) {
+                    if quiet[k] && !seen[k] {
+                        seen[k] = true;
+                        queue.push_back(k);
+                    }
+                }
+            }
+            if pixels.len() >= 2048 {
+                components.push(pixels);
+            }
+        }
+        let mut sorted = components.clone();
+        for pixels in &mut sorted {
+            pixels.sort_unstable();
+        }
+        Self {
+            breadth_first: components,
+            sorted,
+        }
+    }
+}
+
 pub(crate) fn reconstruct(
     source: &Raster,
     boundary_source: &Raster,
     segmentation: &mut Segmentation,
     config: &Config,
 ) -> Vec<Option<Paint>> {
-    let mut hints = reconstruct_domains(source, boundary_source, segmentation, config);
+    let mut quiet = QuietDomains::new(boundary_source, 3.0);
+    let mut hints = reconstruct_domains(source, boundary_source, segmentation, config, &quiet);
+    let protected_pixels: Vec<_> = segmentation
+        .labels
+        .iter()
+        .map(|&label| hints[label as usize].is_some())
+        .collect();
+    // Start with quiet interiors, then admit steeper highlights. Both passes
+    // retain the same material-boundary and full-face reconstruction gates.
+    for threshold in [3.0, 5.0] {
+        if threshold != 3.0 {
+            quiet = QuietDomains::new(boundary_source, threshold);
+        }
+        localize_source_domains(
+            source,
+            boundary_source,
+            segmentation,
+            config,
+            &mut hints,
+            &protected_pixels,
+            &quiet,
+        );
+    }
     let mut faces = vec![Vec::new(); segmentation.regions.len()];
     for (i, &label) in segmentation.labels.iter().enumerate() {
         faces[label as usize].push(i);
@@ -78,11 +165,83 @@ pub(crate) fn reconstruct(
     hints
 }
 
+// A paint owner can cross an occluding structural line and cover several
+// source domains. Fit those domains independently before deciding whether
+// their quantizer bands can share a continuous field.
+fn localize_source_domains(
+    source: &Raster,
+    boundary_source: &Raster,
+    segmentation: &mut Segmentation,
+    config: &Config,
+    existing_hints: &mut Vec<Option<Paint>>,
+    protected_pixels: &[bool],
+    quiet: &QuietDomains,
+) {
+    let w = source.width;
+    let len = source.pixels.len();
+    let neighbours = |i: usize| {
+        [
+            if i % w > 0 { i - 1 } else { i },
+            if i % w + 1 < w { i + 1 } else { i },
+            if i >= w { i - w } else { i },
+            if i + w < len { i + w } else { i },
+        ]
+    };
+    let mut domains = vec![0_u32; len];
+    let mut queue = VecDeque::new();
+    for (component, pixels) in quiet.breadth_first.iter().enumerate() {
+        for &i in pixels {
+            domains[i] = component as u32 + 1;
+            queue.push_back(i);
+        }
+    }
+    while let Some(i) = queue.pop_front() {
+        for j in neighbours(i) {
+            if domains[j] == 0 && segmentation.labels[j] == segmentation.labels[i] {
+                domains[j] = domains[i];
+                queue.push_back(j);
+            }
+        }
+    }
+    let mut localized = segmentation.clone();
+    crate::segment::split_partition_by_values(source, &mut localized, &domains);
+    if localized.regions.len() == segmentation.regions.len() {
+        return;
+    }
+    let hints = reconstruct_domains(source, boundary_source, &mut localized, config, quiet);
+    let mut labels = segmentation.labels.clone();
+    let offset = segmentation.regions.len() as u32;
+    let mut protected = vec![false; localized.regions.len()];
+    for (i, &label) in localized.labels.iter().enumerate() {
+        protected[label as usize] |= protected_pixels[i];
+    }
+    let mut changed = false;
+    for (i, &label) in localized.labels.iter().enumerate() {
+        if hints[label as usize].is_some() && !protected[label as usize] {
+            labels[i] = offset + label;
+            changed = true;
+        }
+    }
+    if changed {
+        let mut all_hints = existing_hints.clone();
+        all_hints.extend(hints);
+        let mut used = labels.clone();
+        used.sort_unstable();
+        used.dedup();
+        *existing_hints = used
+            .iter()
+            .map(|&label| all_hints[label as usize].clone())
+            .collect();
+        replace_source_supported_paint_labels(source, segmentation, labels, 0);
+    }
+}
+
 fn reconstruct_domains(
     source: &Raster,
     boundary_source: &Raster,
     segmentation: &mut Segmentation,
     config: &Config,
+    quiet: &QuietDomains,
 ) -> Vec<Option<Paint>> {
     let n = segmentation.regions.len();
     let len = source.pixels.len();
@@ -106,42 +265,7 @@ fn reconstruct_domains(
             if i + w < len { i + w } else { i },
         ]
     };
-    // A colour change across a pixel edge is not itself a new Paint owner.
-    // Extract smooth interiors directly from the source, independently of the
-    // quantizer labels (which can contain unrelated boundary fragments).
-    let quiet = (0..len)
-        .map(|i| {
-            neighbours(i).iter().all(|&j| {
-                (0..3).all(|c| {
-                    (boundary_source.pixels[i][c] - boundary_source.pixels[j][c]).abs()
-                        <= 3.0 / 255.0
-                })
-            })
-        })
-        .collect::<Vec<_>>();
-    let mut seen = vec![false; len];
-    let mut components = Vec::new();
-    for i in 0..len {
-        if seen[i] || !quiet[i] {
-            continue;
-        }
-        seen[i] = true;
-        let mut queue = VecDeque::from([i]);
-        let mut pixels = Vec::new();
-        while let Some(j) = queue.pop_front() {
-            pixels.push(j);
-            for k in neighbours(j) {
-                if quiet[k] && !seen[k] {
-                    seen[k] = true;
-                    queue.push_back(k);
-                }
-            }
-        }
-        if pixels.len() >= 2048 {
-            pixels.sort_unstable();
-            components.push(pixels);
-        }
-    }
+    let components = &quiet.sorted;
     if components.is_empty() {
         return vec![None; n];
     }
@@ -218,12 +342,11 @@ fn reconstruct_domains(
                 return (None, coherence, 0.0, children.len(), Vec::new(), 0, 0);
             }
             let angle = 0.5 * (2.0 * tensor[1]).atan2(tensor[0] - tensor[2]);
-            let mut directions = vec![
+            let directions = unique_candidates([
                 (angle.cos() as f32, angle.sin() as f32),
                 (1.0, 0.0),
                 (0.0, 1.0),
-            ];
-            directions.dedup();
+            ]);
             let solid = Paint::Solid {
                 color: mean_color(source, &samples),
             };
@@ -312,6 +435,34 @@ fn reconstruct_domains(
                     }
                 }
             }
+            let fit_samples = sampled_indices(&members, 2048);
+            let baseline_stats = paint_stats(source, &fit_samples, &best);
+            if baseline_stats.mean > 0.6 {
+                if let Some((candidate, stats)) = office_gradient_candidate(
+                    source,
+                    &labs,
+                    &fit_samples,
+                    bounds(&members, w),
+                    config.maximum_gradient_stops,
+                ) {
+                    if objective(stats) < objective(paint_stats(source, &fit_samples, &best)) {
+                        best = candidate;
+                    }
+                }
+                let (candidate, _) = fit_layered_residual_paint_validated(
+                    source,
+                    &fit_samples,
+                    &members,
+                    bounds(&members, w),
+                    best.clone(),
+                    3,
+                );
+                if objective(paint_stats(source, &fit_samples, &candidate))
+                    < objective(paint_stats(source, &fit_samples, &best))
+                {
+                    best = candidate;
+                }
+            }
             let errors = errors_for_indices(&labs, &members, w, &best);
             let mean = numpy_sum_f32(&errors) / errors.len() as f32;
             let p90 = percentile(errors, 0.90);
@@ -363,7 +514,31 @@ fn reconstruct_domains(
                             let outside = 0.5
                                 * (delta_e_ok(labs[indices[0]], labs[indices[1]])
                                     + delta_e_ok(labs[indices[2]], labs[indices[3]]));
-                            centre >= 2.0 && centre > 3.0 * outside.max(0.25)
+                            if centre < 2.0 || centre <= 3.0 * outside.max(0.25) {
+                                return false;
+                            }
+                            // Preserve a step between locally flat materials,
+                            // even when a stop profile can reproduce its blur.
+                            if outside < 0.5 {
+                                return true;
+                            }
+                            // A steep part of a smooth highlight is not an
+                            // unexplained material step when the fitted field
+                            // reproduces its colour change (including direction).
+                            let first = rgb_to_oklab(paint_at(&best, indices[1], w));
+                            let second = rgb_to_oklab(paint_at(&best, indices[2], w));
+                            delta_e_ok(
+                                Oklab {
+                                    l: labs[indices[2]].l - labs[indices[1]].l,
+                                    a: labs[indices[2]].a - labs[indices[1]].a,
+                                    b: labs[indices[2]].b - labs[indices[1]].b,
+                                },
+                                Oklab {
+                                    l: second.l - first.l,
+                                    a: second.a - first.a,
+                                    b: second.b - first.b,
+                                },
+                            ) > 2.3
                         })
                     })
                 })
@@ -622,6 +797,46 @@ mod tests {
         segmentation
     }
     #[test]
+    fn shared_quantizer_owners_do_not_join_fields_across_an_occluding_line() {
+        let mut source = Raster::blank(256, 128, [1.0; 3]);
+        let mut labels = vec![0; 256 * 128];
+        for y in 8..120 {
+            for x in 8..248 {
+                let t = if x < 128 {
+                    (y - 8) as f32 / 111.0
+                } else {
+                    (x - 128) as f32 / 119.0
+                };
+                source.pixels[y * 256 + x] = [0.2 + 0.5 * t; 3];
+                labels[y * 256 + x] = 1 + (t * 3.0).min(2.0) as u32;
+            }
+        }
+        let mut boundary = source.clone();
+        for y in 8..120 {
+            for x in 127..130 {
+                boundary.pixels[y * 256 + x] = [0.0; 3];
+            }
+        }
+        let mut segmentation = partition(&source, labels);
+        let hints = reconstruct(&source, &boundary, &mut segmentation, &Config::default());
+        let left = segmentation.labels[20 * 256 + 64];
+        let right = segmentation.labels[64 * 256 + 150];
+        assert_ne!(left, right);
+        assert_eq!(left, segmentation.labels[100 * 256 + 64]);
+        assert_eq!(right, segmentation.labels[64 * 256 + 230]);
+        for (x, y) in [(64, 20), (64, 100), (150, 64), (230, 64)] {
+            let i = y * 256 + x;
+            let paint = hints[segmentation.labels[i] as usize].as_ref().unwrap();
+            assert!(
+                delta_e_ok(
+                    rgb_to_oklab(source.pixels[i]),
+                    rgb_to_oklab(paint_at(paint, i, 256))
+                ) < 1.0
+            );
+        }
+    }
+
+    #[test]
     fn quiet_bridge_cannot_erase_a_measured_material_interface() {
         let source = Raster::new(
             128,
@@ -715,7 +930,7 @@ mod tests {
             dark: vec![false; 256 * 256],
             bright: vec![false; 256 * 256],
         };
-        let (paints, _) = fit_all_without_topology(
+        let (paints, _, _) = fit_all_without_topology(
             &hints,
             &source,
             &source,

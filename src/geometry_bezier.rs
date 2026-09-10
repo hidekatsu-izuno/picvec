@@ -135,6 +135,9 @@ fn estimate(
 }
 
 fn derivatives(c: CurveSegment, t: f32) -> (Point, Point) {
+    if let CurveSegment::Line { start, end } = c {
+        return (sub(end, start), Point::default());
+    }
     let CurveSegment::Cubic {
         start: a,
         first: b,
@@ -294,6 +297,34 @@ pub(super) fn fit(
     start: Option<Point>,
     end: Option<Point>,
 ) -> Option<Vec<CurveSegment>> {
+    fit_with_budget(source, baseline, tolerance, start, end, 1.25)
+}
+
+pub(super) fn fit_shading(
+    source: &[Point],
+    baseline: &[CurveSegment],
+    tolerance: f32,
+) -> Option<Vec<CurveSegment>> {
+    let start = derivatives(*baseline.first()?, 0.0).0;
+    let end = derivatives(*baseline.last()?, 1.0).0;
+    fit_with_budget(
+        source,
+        baseline,
+        tolerance,
+        Some(start),
+        Some(end),
+        tolerance,
+    )
+}
+
+fn fit_with_budget(
+    source: &[Point],
+    baseline: &[CurveSegment],
+    tolerance: f32,
+    start: Option<Point>,
+    end: Option<Point>,
+    maximum_error: f32,
+) -> Option<Vec<CurveSegment>> {
     if baseline.len() < 2 || source.len() < 16 || source.first() == source.last() {
         return None;
     }
@@ -318,7 +349,7 @@ pub(super) fn fit(
     }
     let reference = sample_curve_sequence(baseline, 0.5);
     let corners = super::persistent_open_corners(source);
-    let allowed = tolerance.min(1.25);
+    let allowed = tolerance.min(maximum_error);
     let validate = |curves: &[CurveSegment], model: &str| {
         let metrics = error(&points, curves);
         let reason = if metrics.maximum > allowed {
@@ -505,22 +536,44 @@ pub(super) fn compact(
     if source.len() < 2 || baseline.len() < 2 {
         return baseline.to_vec();
     }
-    // A short line can be a raster stair step within a longer smooth strand.
-    // Allow mixed line/cubic intervals; fit() still preserves source corners,
-    // shared endpoints, endpoint tangents and the bidirectional corridor.
-    // Preserve exact analytic line/arc runs already handled by the primitive fitter.
-    let mut protected: Vec<bool> = baseline
-        .iter()
-        .map(|c| matches!(c, CurveSegment::Line { .. }) && c.start().distance(c.end()) <= 2.0)
-        .collect();
+    // Try the complete source-supported interval before protecting local
+    // analytic pieces. Short pieces of almost any smooth curve look like
+    // lines or circular arcs; freezing those pieces first preserves their
+    // joins and can prevent even a single cubic from being considered.
+    // Keep a genuinely analytic whole interval in its exact representation.
+    let reference = sample_curve_sequence(baseline, 0.5);
+    let analytic_whole = super::geometry_primitives::fit(&reference, 0.25, start, end)
+        .is_some_and(|candidate| super::boundary_corridor_supported(&reference, &candidate, 0.025));
+    if analytic_whole {
+        return baseline.to_vec();
+    } else {
+        let mut observations = source.to_vec();
+        observations[0] = baseline[0].start();
+        *observations.last_mut().unwrap() = baseline.last().unwrap().end();
+        if let Some(candidate) = fit(&observations, baseline, tolerance, start, end) {
+            return candidate;
+        }
+    }
+    // Local analytic pieces are not boundaries of a source-supported fit.
+    // Preserve their shape through the corridor and corner checks instead of
+    // freezing them before larger intervals have been considered.
+    // A substantial exact circular span is different: keep its analytic
+    // representation so the SVG serializer can still emit an arc.
+    let mut circular = vec![false; baseline.len()];
     for (i, pair) in baseline.windows(2).enumerate() {
-        if super::geometry_primitives::fit(&sample_curve_sequence(pair, 0.75), 0.25, None, None)
-            .is_some_and(|c| {
-                super::boundary_corridor_supported(&sample_curve_sequence(pair, 0.25), &c, 0.025)
-            })
+        let samples = sample_curve_sequence(pair, 0.5);
+        let chord = [CurveSegment::Line {
+            start: pair[0].start(),
+            end: pair[1].end(),
+        }];
+        if pair[0].start().distance(pair[1].end()) >= 16.0
+            && !super::boundary_corridor_supported(&samples, &chord, 1.0)
+            && super::geometry_primitives::fit(&samples, 0.25, None, None).is_some_and(
+                |candidate| super::boundary_corridor_supported(&samples, &candidate, 0.025),
+            )
         {
-            protected[i] = true;
-            protected[i + 1] = true;
+            circular[i] = true;
+            circular[i + 1] = true;
         }
     }
     let mut knots = vec![0];
@@ -532,15 +585,13 @@ pub(super) fn compact(
     let mut result = Vec::new();
     let mut i = 0;
     while i < baseline.len() {
-        let run = protected[i..]
+        let run = circular[i..]
             .iter()
             .position(|&p| p)
-            .unwrap_or(baseline.len() - i);
-        let mut counts = vec![run.min(12), 8, 4, 2];
-        counts.retain(|&n| n >= 2 && n <= run);
-        counts.dedup();
+            .unwrap_or(baseline.len() - i)
+            .min(12);
         let mut accepted = None;
-        for n in counts {
+        for n in (2..=run).rev() {
             let first = knots[i];
             let last = knots[i + n];
             if last <= first {
@@ -549,12 +600,24 @@ pub(super) fn compact(
             let mut observations = source[first..=last].to_vec();
             observations[0] = baseline[i].start();
             *observations.last_mut().unwrap() = baseline[i + n - 1].end();
+            // Keep the existing join direction when only part of a strand
+            // is replaced; free endpoint fits otherwise create new kinks.
+            let interval_start = if i == 0 {
+                start
+            } else {
+                Some(derivatives(baseline[i], 0.0).0)
+            };
+            let interval_end = if i + n == baseline.len() {
+                end
+            } else {
+                Some(derivatives(baseline[i + n - 1], 1.0).0)
+            };
             let candidate = fit(
                 &observations,
                 &baseline[i..i + n],
                 tolerance,
-                (i == 0).then_some(start).flatten(),
-                (i + n == baseline.len()).then_some(end).flatten(),
+                interval_start,
+                interval_end,
             )
             .or_else(|| {
                 (n == 2).then(|| {
@@ -562,8 +625,8 @@ pub(super) fn compact(
                         &observations,
                         &baseline[i..i + n],
                         tolerance,
-                        (i == 0).then_some(start).flatten(),
-                        (i + n == baseline.len()).then_some(end).flatten(),
+                        interval_start,
+                        interval_end,
                     )
                 })?
             });
@@ -803,6 +866,56 @@ mod tests {
     use super::*;
 
     #[test]
+    fn car_hood_tonal_contour_can_use_fewer_curves_with_fixed_end_tangents() {
+        let record: serde_json::Value =
+            serde_json::from_str(include_str!("test-data/car-hood-contour.json")).unwrap();
+        let point = |v: &serde_json::Value| Point {
+            x: v[0].as_f64().unwrap() as f32,
+            y: v[1].as_f64().unwrap() as f32,
+        };
+        let mut source: Vec<_> = record["source"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(point)
+            .collect();
+        let baseline: Vec<_> = record["curves"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| CurveSegment::Cubic {
+                start: point(&c["start"]),
+                first: point(&c["first"]),
+                second: point(&c["second"]),
+                end: point(&c["end"]),
+            })
+            .collect();
+        source[0] = baseline[0].start();
+        *source.last_mut().unwrap() = baseline.last().unwrap().end();
+        let result = fit_shading(&source, &baseline, 6.0).unwrap();
+        let image = crate::raster::Raster::load(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("sample/input/car.png"),
+            2000,
+            4_000_000,
+            64_000_000,
+        )
+        .unwrap();
+        let accepted = super::super::fair_shading_contour(&image, &source, &baseline);
+        assert!(
+            accepted.len() <= 2,
+            "the source-colour gate must allow the hood fit"
+        );
+        assert!(result.len() <= 2);
+        assert_eq!(result[0].start(), baseline[0].start());
+        assert_eq!(result.last().unwrap().end(), baseline.last().unwrap().end());
+        assert!(super::super::geometry_primitives::supports_tangents(
+            &result,
+            Some(derivatives(baseline[0], 0.0).0),
+            Some(derivatives(*baseline.last().unwrap(), 1.0).0)
+        ));
+    }
+
+    #[test]
     fn equal_adjacent_corner_turns_do_not_reject_the_window_loop() {
         // The same lower window corner occupies (683,513) and (683,514).
         // Treating its two 90-degree maxima as separate knots previously
@@ -966,6 +1079,56 @@ mod tests {
     }
 
     #[test]
+    fn partial_analytic_run_merges_up_to_a_real_corner() {
+        let pieces = [
+            CurveSegment::Line {
+                start: Point { x: 0.0, y: 0.0 },
+                end: Point { x: 20.0, y: 0.0 },
+            },
+            CurveSegment::Line {
+                start: Point { x: 20.0, y: 0.0 },
+                end: Point { x: 40.0, y: 0.0 },
+            },
+            CurveSegment::Line {
+                start: Point { x: 40.0, y: 0.0 },
+                end: Point { x: 60.0, y: 0.0 },
+            },
+            cubic((60.0, 0.0), (60.0, 20.0), (60.0, 40.0), (60.0, 60.0)),
+        ];
+        let source = sample_curve_sequence(&pieces, 0.5);
+        let result = compact(&source, &pieces, 1.0, None, None);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].end(), pieces[2].end());
+        assert_eq!(result[1], pieces[3]);
+        assert!(error(&source, &result).maximum < 0.01);
+    }
+
+    #[test]
+    fn three_cubics_merge_before_a_corner_without_a_new_endpoint_kink() {
+        let model = cubic((0.0, 0.0), (40.0, 0.0), (60.0, 40.0), (100.0, 40.0));
+        let mut pieces: Vec<_> = (0..3)
+            .map(|i| super::super::curve_interval(model, i as f64 / 3.0, (i + 1) as f64 / 3.0))
+            .collect();
+        pieces.push(CurveSegment::Line {
+            start: model.end(),
+            end: Point { x: 100.0, y: 100.0 },
+        });
+        let source = sample_curve_sequence(&pieces, 0.5);
+        let result = compact(&source, &pieces, 1.0, None, None);
+        assert_eq!(result.len(), 2);
+        assert!(matches!(result[0], CurveSegment::Cubic { .. }));
+        assert_eq!(result[0].end(), model.end());
+        assert_eq!(result[1], pieces[3]);
+        assert!(error(&source, &result).maximum < 0.05);
+        assert!(
+            dot(
+                normalized(derivatives(result[0], 1.0).0),
+                normalized(derivatives(model, 1.0).0)
+            ) > 0.999_999
+        );
+    }
+
+    #[test]
     fn short_s_curve_loses_a_node_without_losing_its_inflection_or_tangents() {
         // Exact halves of a cubic with a visible change of curvature. Neither
         // the old 16-pixel interval search nor analytic arc fitting covers it.
@@ -1027,6 +1190,63 @@ mod tests {
         let source = sample_curve_sequence(&bump, 1.0);
         assert!(compact_pair(&source, &bump, 0.5, None, None).is_none());
     }
+    #[test]
+    fn remojii_spiral_arc_uses_one_cubic_with_shared_graph_mapping() {
+        let record: serde_json::Value =
+            serde_json::from_str(include_str!("test-data/remojii-spiral-contour.json")).unwrap();
+        let point = |p: &serde_json::Value| Point {
+            x: p[0].as_f64().unwrap() as f32,
+            y: p[1].as_f64().unwrap() as f32,
+        };
+        let source: Vec<_> = record["source"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(point)
+            .collect();
+        let baseline: Vec<_> = record["result"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| CurveSegment::Cubic {
+                start: point(&c[0]),
+                first: point(&c[1]),
+                second: point(&c[2]),
+                end: point(&c[3]),
+            })
+            .collect();
+        let tolerance = record["raster_corridor"].as_f64().unwrap() as f32;
+        let result = compact(&source, &baseline, tolerance, None, None);
+        assert_eq!(baseline.len(), 6);
+        assert_eq!(result.len(), 1);
+        assert!(matches!(result[0], CurveSegment::Cubic { .. }));
+        assert_eq!(result[0].start(), baseline[0].start());
+        assert_eq!(result[0].end(), baseline.last().unwrap().end());
+        assert!(error(&source, &result).maximum <= 1.25);
+        assert!(super::super::geometry_mapping::map(&source, &result, tolerance, &mut 0).is_some());
+    }
+
+    #[test]
+    fn tiny_analytic_pieces_do_not_block_a_source_supported_cubic() {
+        let model = cubic((0.0, 0.0), (40.0, 1.0), (60.0, 21.0), (120.0, 20.0));
+        let source: Vec<_> = (0..=240)
+            .map(|i| cubic_point(model, i as f32 / 240.0))
+            .collect();
+        let pieces: Vec<_> = source
+            .windows(2)
+            .map(|p| CurveSegment::Line {
+                start: p[0],
+                end: p[1],
+            })
+            .collect();
+        let result = compact(&source, &pieces, 1.0, None, None);
+        assert_eq!(result.len(), 1);
+        assert!(matches!(result[0], CurveSegment::Cubic { .. }));
+        assert!(error(&source, &result).maximum < 0.3);
+        assert_eq!(result[0].start(), source[0]);
+        assert_eq!(result[0].end(), *source.last().unwrap());
+    }
+
     #[test]
     fn single_cubic_uses_geometric_distance_with_nonuniform_observations() {
         let model = cubic((0.0, 0.0), (40.0, 1.0), (60.0, 21.0), (120.0, 20.0));

@@ -20,7 +20,7 @@ use crate::geometry::{
     build_with_source as build_geometry, fitted_alpha_contour_path_data, GeometrySummary,
 };
 use crate::gradient::{
-    fit_all_without_topology, merge_partition, merge_source_supported_paints, refresh_summary,
+    fit_all_without_topology, merge_partition, merge_source_supported_paints_with_evidence, refresh_summary,
     GradientSummary, Paint,
 };
 use crate::hierarchy::{HierarchicalTopology, HierarchicalTopologySummary};
@@ -34,7 +34,7 @@ use crate::segment::{
 };
 use crate::structural::{analyse as analyse_structural, StructuralInk, StructuralSummary};
 use crate::svg::{
-    serialize_filtered_with_alpha as serialize_svg, AlphaMask, AlphaMaskLayer, SvgSummary,
+    serialize_filtered_with_alpha_cached as serialize_svg, AlphaMask, AlphaMaskLayer, GeometryCache, SvgSummary,
 };
 use crate::union_find::UnionFind;
 use crate::{Error, Result};
@@ -676,6 +676,7 @@ fn render_svg_preview(
     excluded_regions: &[bool],
     alpha_mask: Option<&AlphaMask>,
     background: [f32; 3],
+    geometry_cache: &mut GeometryCache,
 ) -> Result<Raster> {
     let (width, height) = dimensions;
     let (geometry, paints) = paint_layer;
@@ -689,6 +690,7 @@ fn render_svg_preview(
         final_geometry,
         excluded_regions,
         alpha_mask,
+        geometry_cache,
     );
     render_svg_document_on(&document, width, height, background)
 }
@@ -1580,7 +1582,7 @@ fn vectorize_processing(
     report_progress(config, "thin-paint-ownership", started, &mut checkpoint);
     let ridge_analysis = crate::ridge::analyze(&segmentation.canonical);
     segmentation.paint_samples = crate::ridge::adjust_paint_samples_from_analysis(
-        &segmentation.canonical,
+        &paint_reference,
         &segmentation.paint_samples,
         &ridge_analysis,
     );
@@ -1643,7 +1645,7 @@ fn vectorize_processing(
         started,
         &mut checkpoint,
     );
-    let (mut paints, mut gradient_report) = fit_all_without_topology(
+    let (mut paints, mut gradient_report, paint_evidence) = fit_all_without_topology(
         &coherent_hints,
         &paint_reference,
         &processing,
@@ -1652,12 +1654,13 @@ fn vectorize_processing(
         config,
     );
     report_progress(config, "paint-fitting", started, &mut checkpoint);
-    let supported_paint_merges = merge_source_supported_paints(
+    let supported_paint_merges = merge_source_supported_paints_with_evidence(
         &paint_reference,
         &processing,
         &mut segmentation,
         &mut paints,
         config,
+        paint_evidence,
     );
     report_progress(
         config,
@@ -1667,9 +1670,20 @@ fn vectorize_processing(
     );
     let exact_paint_merges =
         merge_exact_final_paints(&paint_reference, &mut segmentation, &mut paints);
+    report_progress(config, "exact-paint-merge", started, &mut checkpoint);
     let simplified_layers =
         crate::gradient::simplify_layered_paints(&paint_reference, &segmentation, &mut paints);
-    if supported_paint_merges.merges > 0 || exact_paint_merges > 0 || simplified_layers > 0 {
+    report_progress(config, "layered-paint-simplification", started, &mut checkpoint);
+    // Simplification validates its replacement against the source above.
+    // Check the slope support of any remaining layered fields here.
+    let refined_shapes =
+        crate::gradient::refine_residual_shapes(&paint_reference, &segmentation, &mut paints);
+    report_progress(config, "residual-shape-refinement", started, &mut checkpoint);
+    if supported_paint_merges.merges > 0
+        || exact_paint_merges > 0
+        || simplified_layers > 0
+        || refined_shapes > 0
+    {
         refresh_summary(&mut gradient_report, &paints);
     }
 
@@ -1721,7 +1735,7 @@ fn vectorize_processing(
     };
     report_progress(config, "source-alpha-mask", started, &mut checkpoint);
     let topology = HierarchicalTopology::build(&segmentation);
-    report_progress(config, "exact-paint-merge", started, &mut checkpoint);
+    report_progress(config, "hierarchical-topology", started, &mut checkpoint);
     let (geometry, geometry_report) =
         build_geometry(&segmentation, &topology, &geometry_edge_reference);
     report_progress(config, "shared-geometry", started, &mut checkpoint);
@@ -1730,6 +1744,7 @@ fn vectorize_processing(
     // authored Paint or structural owner. Native alpha is absent from this
     // comparison: both references must describe straight RGB. A preview
     // backdrop or alpha contour must not become a candidate ink colour.
+    let mut geometry_cache = GeometryCache::default();
     let paint_render = render_svg_preview(
         (processing.width, processing.height),
         (&geometry, &paints),
@@ -1747,6 +1762,7 @@ fn vectorize_processing(
         } else {
             preview_background
         },
+        &mut geometry_cache,
     )?;
     report_progress(config, "paint-preview", started, &mut checkpoint);
     let optimization = optimization_summary(&geometry, &paints, &geometry_report);
@@ -1800,6 +1816,7 @@ fn vectorize_processing(
             &excluded_regions,
             alpha_mask.as_ref(),
             preview_background,
+            &mut geometry_cache,
         )?;
         ownership.structural.outlines = outlines;
         let after = render_svg_preview(
@@ -1811,6 +1828,7 @@ fn vectorize_processing(
             &excluded_regions,
             alpha_mask.as_ref(),
             preview_background,
+            &mut geometry_cache,
         )?;
         ownership
             .structural
@@ -1818,7 +1836,7 @@ fn vectorize_processing(
             .retain(|band| band.supported_by_render(&processing_reference, &before, &after));
     }
     if !ownership.structural.strokes.is_empty() {
-        let preview = |ink: &StructuralInk| {
+        let mut preview = |ink: &StructuralInk| {
             render_svg_preview(
                 (processing.width, processing.height),
                 (&geometry, &paints),
@@ -1828,6 +1846,7 @@ fn vectorize_processing(
                 &excluded_regions,
                 alpha_mask.as_ref(),
                 preview_background,
+                &mut geometry_cache,
             )
         };
         let before = preview(&ownership.structural)?;
@@ -1857,29 +1876,6 @@ fn vectorize_processing(
     }
     ownership.summary.structural_strokes = ownership.structural.strokes.len();
     report_progress(config, "structural-selection", started, &mut checkpoint);
-    // Outline candidates were checked above. This additional complete
-    // preview is only needed when diagnostic quality metrics are requested.
-    #[cfg(feature = "diagnostics")]
-    let quality = if config.compute_quality_metrics {
-        let residual_render = render_svg_preview(
-            (processing.width, processing.height),
-            (&geometry, &paints),
-            &ownership.structural,
-            ownership.paint_overlap,
-            excluded_regions.iter().all(|&excluded| !excluded),
-            &excluded_regions,
-            alpha_mask.as_ref(),
-            preview_background,
-        )?;
-        report_progress(config, "quality-preview", started, &mut checkpoint);
-        let quality = crate::metrics::compare(&processing_reference, &residual_render);
-        report_progress(config, "quality-metrics", started, &mut checkpoint);
-        Some(quality)
-    } else {
-        None
-    };
-    #[cfg(not(feature = "diagnostics"))]
-    let quality = None;
     let ownership_summary = ownership.summary.clone();
     let paint_overlap = ownership.paint_overlap;
     let structural = ownership.structural;
@@ -1893,7 +1889,9 @@ fn vectorize_processing(
         excluded_regions.iter().all(|&excluded| !excluded),
         &excluded_regions,
         alpha_mask.as_ref(),
+        &mut geometry_cache,
     );
+    drop(geometry_cache);
     // Use a neutral comparison backing; the chroma diagnostic backing is
     // deliberately saturated and must not veto grayscale source evidence.
     let soft_reference = if source_alpha {
@@ -1921,8 +1919,11 @@ fn vectorize_processing(
             &final_render,
         ))
     } else {
-        quality
+        None
     };
+
+    #[cfg(not(feature = "diagnostics"))]
+    let quality = None;
 
     report_progress(config, "final-svg", started, &mut checkpoint);
     Ok(CoreVectorization {
@@ -2612,7 +2613,7 @@ mod tests {
         let input = directory.path().join("wifi.png");
         let output = directory.path().join("wifi.svg");
         fs::write(&input, include_bytes!("test-data/wifi-source.png")).unwrap();
-        let summary = vectorize(
+        vectorize(
             &input,
             &output,
             &Config {
@@ -2625,7 +2626,9 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(summary.svg.outline_bands >= 2);
+        // Seam underpaint can make an extra outline band unnecessary. Check
+        // the rendered rim's colour, contrast and roughness below instead of
+        // requiring a particular number of reconstruction primitives.
         let document = fs::read_to_string(output).unwrap();
         let tree = parse_svg_document(&document).unwrap();
         let rendered = render_svg_tree_on(
@@ -3077,6 +3080,150 @@ mod tests {
             }
         }
         assert_eq!(pixmap.pixels()[73 * 96 + 47].alpha(), 0);
+    }
+
+    #[test]
+    #[ignore = "renders the full-size car sample"]
+    fn car_headlight_boundary_has_no_dark_spurs() {
+        let input = Path::new(env!("CARGO_MANIFEST_DIR")).join("sample/input/car.png");
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("car.svg");
+        vectorize(
+            &input,
+            &output,
+            &Config {
+                rayon_threads: 4,
+                ..Config::default()
+            },
+        )
+        .unwrap();
+        let source = image::open(input).unwrap().to_rgb8();
+        let tree = parse_svg_document(&fs::read_to_string(output).unwrap()).unwrap();
+        let mut pixmap = resvg::tiny_skia::Pixmap::new(1254, 1254).unwrap();
+        pixmap.fill(resvg::tiny_skia::Color::WHITE);
+        resvg::render(
+            &tree,
+            resvg::tiny_skia::Transform::identity(),
+            &mut pixmap.as_mut(),
+        );
+        // The AA samples at both tips used to acquire the near-black Paint
+        // of the adjacent rim. Inspect the final composite, not just labels.
+        for (x, y) in [(170, 637), (281, 593)] {
+            let expected = source.get_pixel(x, y).0;
+            let pixel = pixmap.pixels()[(y * 1254 + x) as usize];
+            let actual = [pixel.red(), pixel.green(), pixel.blue()];
+            assert!(
+                expected
+                    .into_iter()
+                    .zip(actual)
+                    .all(|(a, b)| a.abs_diff(b) <= 64),
+                "headlight spur at ({x}, {y}): source {expected:?}, SVG {actual:?}"
+            );
+        }
+        // The bumper highlight brightens towards the lower trim. The former
+        // radial focus reversed this slope in the final rendered SVG.
+        let upper = pixmap.pixels()[739 * 1254 + 216];
+        let lower = pixmap.pixels()[745 * 1254 + 216];
+        assert!(
+            lower.green() >= upper.green() + 3,
+            "bumper gradient reversed: {} -> {}",
+            upper.green(),
+            lower.green()
+        );
+        assert!(lower.green().abs_diff(source.get_pixel(216, 745)[1]) <= 24);
+        // Residual corrections along the window rim must not spread a dark
+        // patch into otherwise smooth blue glass.
+        for (x, y) in [
+            (664, 403),
+            (664, 405),
+            (670, 403),
+            (690, 510),
+            (735, 504),
+            (819, 491),
+        ] {
+            let expected = source.get_pixel(x, y).0.map(|v| v as f32 / 255.0);
+            let pixel = pixmap.pixels()[(y * 1254 + x) as usize];
+            let actual = [pixel.red(), pixel.green(), pixel.blue()].map(|v| v as f32 / 255.0);
+            let error = crate::color::delta_e_ok(rgb_to_oklab(expected), rgb_to_oklab(actual));
+            assert!(
+                error <= 3.0,
+                "unsupported window shadow at {x},{y}: {error}"
+            );
+        }
+        // Residual overlays must not reverse the smooth source ramps under
+        // the mirror or above the front wheel into circular dark/light spots.
+        for ((x0, y0), (x1, y1)) in [((628, 550), (628, 556)), ((380, 637), (386, 637))] {
+            let lightness = |x: u32, y: u32| {
+                let p = pixmap.pixels()[(y * 1254 + x) as usize];
+                rgb_to_oklab([p.red(), p.green(), p.blue()].map(|c| c as f32 / 255.0)).l
+            };
+            let source_lightness =
+                |x, y| rgb_to_oklab(source.get_pixel(x, y).0.map(|c| c as f32 / 255.0)).l;
+            assert!(source_lightness(x1, y1) > source_lightness(x0, y0));
+            assert!(
+                lightness(x1, y1) >= lightness(x0, y0) - 0.5,
+                "circular residual reversed the highlight at {x0},{y0} -> {x1},{y1}"
+            );
+        }
+        // Smooth body highlights must not acquire nested quantizer bands.
+        // Check both the rear quarter and the door, including the left bend.
+        // resvg renders 672 / 1053 such steps in the original sample. Keep
+        // substantial headroom for antialiasing while requiring a large drop.
+        for (name, x0, y0, x1, y1, maximum_jumps, maximum_mean_error) in [
+            ("rear", 950, 475, 1120, 524, 250, 2.8),
+            ("door", 558, 543, 840, 610, 300, 4.1),
+        ] {
+            let mut jumps = 0;
+            let mut colour_error = 0_u64;
+            let mut colour_samples = 0_u64;
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let reference = source.get_pixel(x, y).0;
+                    if reference[0] < 220 || !(36..175).contains(&reference[1]) {
+                        continue;
+                    }
+                    let pixel = pixmap.pixels()[(y * 1254 + x) as usize];
+                    let actual = [pixel.red(), pixel.green(), pixel.blue()];
+                    colour_error += (0..3)
+                        .map(|c| u64::from(actual[c].abs_diff(reference[c])))
+                        .sum::<u64>();
+                    colour_samples += 3;
+                    for (nx, ny) in [(x + 1, y), (x, y + 1)] {
+                        let neighbour = source.get_pixel(nx, ny).0;
+                        let rendered = pixmap.pixels()[(ny * 1254 + nx) as usize];
+                        let rendered = [rendered.red(), rendered.green(), rendered.blue()];
+                        let source_step = (0..3)
+                            .map(|c| reference[c].abs_diff(neighbour[c]))
+                            .max()
+                            .unwrap();
+                        let output_step = (0..3)
+                            .map(|c| actual[c].abs_diff(rendered[c]))
+                            .max()
+                            .unwrap();
+                        if source_step <= 3 && output_step > source_step + 8 {
+                            jumps += 1;
+                        }
+                    }
+                }
+            }
+            assert!(
+                jumps <= maximum_jumps,
+                "nested {name} highlight bands: {jumps}"
+            );
+            let mean = colour_error as f64 / colour_samples.max(1) as f64;
+            assert!(
+                mean <= maximum_mean_error,
+                "{name} highlight colour error: {mean}"
+            );
+        }
+        // Coverage repair must retain the previously restored rim reflection.
+        for (x, y) in [(365, 762), (386, 738)] {
+            let pixel = pixmap.pixels()[y * 1254 + x];
+            assert!(
+                pixel.red() > 120 && pixel.green() > 120 && pixel.blue() > 120,
+                "wheel highlight disappeared at ({x}, {y})"
+            );
+        }
     }
 
     #[test]
@@ -3562,7 +3709,9 @@ mod tests {
             )
             .unwrap();
             assert_eq!(summary.source_alpha.quantization_bits, 8);
-            assert!(summary.source_alpha.mask_paths <= 8);
+            // Each coverage layer now has a separate seam stroke underneath
+            // the fills; allow eight layers plus their eight underpass paths.
+            assert!(summary.source_alpha.mask_paths <= 16);
             let tree = parse_svg_document(&fs::read_to_string(output).unwrap()).unwrap();
             let mut pixmap = resvg::tiny_skia::Pixmap::new(128, 128).unwrap();
             resvg::render(

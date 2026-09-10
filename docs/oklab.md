@@ -127,3 +127,9 @@ edge feature channels use L/100, a/40, b/40, the neutral dark seed accepts
 8-bit greys through 13 (scaled OKLab distance 16.35), and dark-region/shoulder
 lightness gates use 35.3 and 56.9. These are calibrated decision thresholds,
 not claims that CIEDE2000 and OKLab distances are globally proportional.
+
+After the window repair, all nine images in `sample/input` were regenerated
+with the current defaults, retaining chroma-key removal for `cliparts-6x6`.
+All nine comparison images were also updated. Current input/output hashes,
+source provenance, and per-image refinement results are recorded in
+[the sample regeneration results](sample-regeneration-results.json).

@@ -1856,7 +1856,40 @@ fn classify_boundary_role(
     width: usize,
     height: usize,
 ) -> &'static str {
-    if stroke.role != "ridge-on-boundary" {
+    if !matches!(stroke.role, "ridge" | "ridge-on-boundary") {
+        return stroke.role;
+    }
+    // Some medial detector runs carry no polarity in their role name. A
+    // positive source peak must not be sampled/refined as dark ink later.
+    let mut bright = 0;
+    for (i, &p) in stroke.points.iter().enumerate() {
+        let a = stroke.points[i.saturating_sub(3)];
+        let b = stroke.points[(i + 3).min(stroke.points.len() - 1)];
+        let length = a.distance(b);
+        if length < 1.0 {
+            continue;
+        }
+        let (nx, ny) = ((a.y - b.y) / length, (b.x - a.x) / length);
+        let sample = |d: f32| {
+            bilinear_lab_precise(
+                source_lab,
+                width,
+                height,
+                [(p.x + d * nx) as f64, (p.y + d * ny) as f64],
+            )
+            .l
+        };
+        let reach = (stroke.width * 0.5 + 1.5).max(2.0);
+        let peak = [-0.5, 0.0, 0.5]
+            .into_iter()
+            .map(sample)
+            .fold(f32::NEG_INFINITY, f32::max);
+        bright += usize::from(peak > sample(-reach).max(sample(reach)) + 6.0);
+    }
+    if stroke.points.len() >= 3 && bright * 4 >= stroke.points.len() * 3 {
+        return "bright-ridge-on-boundary";
+    }
+    if stroke.role == "ridge" {
         return stroke.role;
     }
     let mut chroma = stroke
@@ -2507,6 +2540,11 @@ fn connect_graph_edges(
             if first == second {
                 continue;
             }
+            if (current[first].role == "bright-ridge-on-boundary")
+                != (current[second].role == "bright-ridge-on-boundary")
+            {
+                continue;
+            }
             let dx = second_point.x - first_point.x;
             let dy = second_point.y - first_point.y;
             let distance = dx.hypot(dy);
@@ -2724,18 +2762,79 @@ fn graph_continuation_tangents(strokes: &[StructuralStroke]) -> HashMap<(usize, 
 /// response along the local normal.  The profile search is followed by a
 /// three-sample median, which removes alternating pixel-centre jitter without
 /// moving graph endpoints; high-turn samples themselves are never scored.
+// The detector can follow one antialiased side of a narrow bright rim.
+// Recover the local brightness peak before graph snapping and colour sampling;
+// fitting towards the old (dark side) colour moves the highlight away again.
+fn refine_bright_ridge(
+    stroke: &mut StructuralStroke,
+    source_lab: &[Oklab],
+    width: usize,
+    height: usize,
+) {
+    if stroke.role != "bright-ridge-on-boundary" || stroke.points.len() < 3 {
+        return;
+    }
+    let original = stroke.points.clone();
+    let reach = (stroke.width + 2.0).clamp(2.5, 4.0);
+    for (i, &point) in original.iter().enumerate() {
+        let a = original[i.saturating_sub(3)];
+        let b = original[(i + 3).min(original.len() - 1)];
+        let length = a.distance(b);
+        if length < 1.0 {
+            continue;
+        }
+        let normal = Point {
+            x: (a.y - b.y) / length,
+            y: (b.x - a.x) / length,
+        };
+        let sample = |offset: f32| {
+            bilinear_lab_precise(
+                source_lab,
+                width,
+                height,
+                [
+                    (point.x + offset * normal.x) as f64,
+                    (point.y + offset * normal.y) as f64,
+                ],
+            )
+            .l
+        };
+        let steps = (reach * 8.0).ceil() as i32;
+        let best = (-steps..=steps)
+            .map(|j| j as f32 / 8.0)
+            .max_by(|&a, &b| (sample(a) - 0.05 * a * a).total_cmp(&(sample(b) - 0.05 * b * b)))
+            .unwrap();
+        let peak = sample(best);
+        if peak < sample(-reach).max(sample(reach)) + 3.0 {
+            continue;
+        }
+        // A symmetric peak centroid reduces the phase bias of bilinear raster
+        // samples without following either side of the neighbouring dark rim.
+        let floor = peak - 8.0;
+        let mut weight = 0.0;
+        let mut moment = 0.0;
+        for j in -4..=4 {
+            let offset = best + j as f32 / 8.0;
+            let w = (sample(offset) - floor).max(0.0);
+            weight += w;
+            moment += w * offset;
+        }
+        let offset = if weight > 0.0 { moment / weight } else { best };
+        stroke.points[i] = Point {
+            x: point.x + offset * normal.x,
+            y: point.y + offset * normal.y,
+        };
+    }
+    stroke.precise_points = None;
+}
+
 fn refine_stroke_centerline(
     stroke: &StructuralStroke,
     source_lab: &[Oklab],
     width: usize,
     height: usize,
 ) -> Vec<Point> {
-    if stroke.points.len() < 5
-        || !matches!(
-            stroke.role,
-            "ridge" | "bright-ridge-on-boundary" | "legacy-structural"
-        )
-    {
+    if stroke.points.len() < 5 || !matches!(stroke.role, "ridge" | "legacy-structural") {
         return stroke.points.clone();
     }
     let target = rgb_to_oklab(stroke.color);
@@ -4034,6 +4133,95 @@ fn snap_graph_to_paint_junctions(
     current
 }
 
+/// Score the whole rendered footprint, including round caps. Centreline-only
+/// residuals can mistake a tapering Paint tip for a constant-width line and
+/// extend a rounded spur beyond the source silhouette.
+fn stroke_overlay_improves_paint(
+    stroke: &StructuralStroke,
+    source: &Raster,
+    rendered: &Raster,
+) -> bool {
+    if stroke.points.len() < 2 || stroke.role == "boundary-stroke" {
+        return true;
+    }
+    let radius = stroke.width * 0.5 + 2.0;
+    let left = (stroke
+        .points
+        .iter()
+        .map(|p| p.x)
+        .fold(f32::INFINITY, f32::min)
+        - radius)
+        .floor()
+        .max(0.0) as usize;
+    let top = (stroke
+        .points
+        .iter()
+        .map(|p| p.y)
+        .fold(f32::INFINITY, f32::min)
+        - radius)
+        .floor()
+        .max(0.0) as usize;
+    let right = ((stroke
+        .points
+        .iter()
+        .map(|p| p.x)
+        .fold(f32::NEG_INFINITY, f32::max)
+        + radius)
+        .ceil() as usize)
+        .min(source.width);
+    let bottom = ((stroke
+        .points
+        .iter()
+        .map(|p| p.y)
+        .fold(f32::NEG_INFINITY, f32::max)
+        + radius)
+        .ceil() as usize)
+        .min(source.height);
+    if right <= left || bottom <= top {
+        return false;
+    }
+    let path = stroke.path_data.clone().unwrap_or_else(|| {
+        stroke
+            .points
+            .iter()
+            .enumerate()
+            .map(|(i, p)| format!("{} {} {} ", if i == 0 { "M" } else { "L" }, p.x, p.y))
+            .collect::<String>()
+    });
+    let w = right - left;
+    let h = bottom - top;
+    let document = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="{left} {top} {w} {h}"><path d="{path}" fill="none" stroke="white" stroke-width="{}" stroke-linecap="round" stroke-linejoin="round"/></svg>"#,
+        stroke.width
+    );
+    let Ok(tree) = resvg::usvg::Tree::from_str(&document, &resvg::usvg::Options::default()) else {
+        return true;
+    };
+    let Some(mut mask) = resvg::tiny_skia::Pixmap::new(w as u32, h as u32) else {
+        return true;
+    };
+    resvg::render(
+        &tree,
+        resvg::tiny_skia::Transform::identity(),
+        &mut mask.as_mut(),
+    );
+    let mut before = 0.0_f64;
+    let mut after = 0.0_f64;
+    for (i, pixel) in mask.pixels().iter().enumerate() {
+        if pixel.alpha() == 0 {
+            continue;
+        }
+        let alpha = pixel.alpha() as f32 / 255.0;
+        let index = (top + i / w) * source.width + left + i % w;
+        let original = rgb_to_oklab(source.pixels[index]);
+        let paint = rendered.pixels[index];
+        let composite = std::array::from_fn(|c| paint[c] * (1.0 - alpha) + stroke.color[c] * alpha);
+        before += (delta_e_ok(original, rgb_to_oklab(paint)) as f64).powi(2);
+        after += (delta_e_ok(original, rgb_to_oklab(composite)) as f64).powi(2);
+    }
+    after < before
+}
+
 /// Resolve the single authoritative legacy source-line topology after Paint
 /// ownership is known.  No speculative legacy graph is built and discarded
 /// during structural analysis.
@@ -4045,6 +4233,20 @@ pub fn select_missing(
     select_missing_with_junctions(source, rendered, structural, &[])
 }
 
+#[cfg(feature = "diagnostics")]
+fn diagnose_strokes(name: &str, strokes: &[StructuralStroke]) {
+    if let Some(prefix) = std::env::var_os("PICVEC_STRUCTURAL_DIAGNOSTICS") {
+        let data: Vec<_> = strokes.iter().map(|s| serde_json::json!({
+            "role": s.role, "width": s.width, "color": s.color,
+            "points": s.points.iter().map(|p| [p.x,p.y]).collect::<Vec<_>>(), "path": s.path_data
+        })).collect();
+        let _ = std::fs::write(
+            format!("{}-{name}.json", prefix.to_string_lossy()),
+            serde_json::to_vec(&data).unwrap(),
+        );
+    }
+}
+
 pub fn select_missing_with_junctions(
     source: &Raster,
     rendered: &Raster,
@@ -4054,6 +4256,8 @@ pub fn select_missing_with_junctions(
     if source.width != rendered.width || source.height != rendered.height {
         return structural.clone();
     }
+    #[cfg(feature = "diagnostics")]
+    diagnose_strokes("input-strokes", &structural.strokes);
     let width = source.width;
     let height = source.height;
     let source_lab = oklab_pixels(source);
@@ -4126,6 +4330,12 @@ pub fn select_missing_with_junctions(
     let mut visible_graph = Vec::new();
     let mut boundary_graph = Vec::new();
     for mut stroke in graph_candidates {
+        stroke.role = classify_boundary_role(&stroke, &source_lab, width, height);
+        refine_bright_ridge(&mut stroke, &source_lab, width, height);
+        if stroke.role == "bright-ridge-on-boundary" {
+            stroke.color = sample_graph_color(source, &stroke);
+        }
+
         if stroke.role == "boundary-stroke"
             || (!structural.boundary_stroke_mask.is_empty()
                 && mask_fraction_along(&stroke, &structural.boundary_stroke_mask, width, height)
@@ -4495,6 +4705,8 @@ pub fn select_missing_with_junctions(
             *endpoint_counts.entry(key).or_default() += 1;
         }
     }
+    #[cfg(feature = "diagnostics")]
+    diagnose_strokes("selected-strokes", &selected_graph);
     let endpoint_tangents = graph_continuation_tangents(&selected_graph);
     // Indexed collection preserves SVG order while sharing the caller's worker limit.
     let strokes: Vec<_> = selected_graph
@@ -4529,9 +4741,14 @@ pub fn select_missing_with_junctions(
             let end_key = point_key(stroke.points[stroke.points.len() - 1]);
             let shared_start = endpoint_counts.get(&start_key).copied().unwrap_or(0) > 1;
             let shared_end = endpoint_counts.get(&end_key).copied().unwrap_or(0) > 1;
+            let bright = stroke.role == "bright-ridge-on-boundary";
             let straight = straight_graph_line(
                 &stroke.points,
-                std::f32::consts::FRAC_1_SQRT_2,
+                if bright {
+                    0.25
+                } else {
+                    std::f32::consts::FRAC_1_SQRT_2
+                },
                 minimum,
                 shared_start,
                 shared_end,
@@ -4553,7 +4770,7 @@ pub fn select_missing_with_junctions(
                 let fitting_points = refine_stroke_centerline(&stroke, &source_lab, width, height);
                 let path_data = fitted_structural_open_path_data_with_tangents(
                     &fitting_points,
-                    0.75,
+                    if bright { 0.35 } else { 0.75 },
                     0.45,
                     endpoint_tangents.get(&(stroke_index, true)).copied(),
                     endpoint_tangents.get(&(stroke_index, false)).copied(),
@@ -4564,7 +4781,7 @@ pub fn select_missing_with_junctions(
                 return None;
             }
             let color = sample_graph_color(source, &stroke);
-            Some(StructuralStroke {
+            let fitted = StructuralStroke {
                 points,
                 path_data,
                 precise_points: None,
@@ -4576,9 +4793,12 @@ pub fn select_missing_with_junctions(
                 } else {
                     stroke.width_samples.clone()
                 },
-            })
+            };
+            stroke_overlay_improves_paint(&fitted, source, rendered).then_some(fitted)
         })
         .collect();
+    #[cfg(feature = "diagnostics")]
+    diagnose_strokes("fitted-strokes", &strokes);
     let mut summary = structural.summary.clone();
     summary.skeleton_pixels = residual_skeleton_pixels;
     summary.stroke_count = strokes.len();
@@ -4621,6 +4841,194 @@ pub fn select_missing_with_junctions(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_bright_rim_does_not_join_the_adjacent_dark_trim() {
+        let first = StructuralStroke {
+            points: vec![Point { x: 4.5, y: 8.5 }, Point { x: 14.5, y: 8.5 }],
+            path_data: None,
+            precise_points: None,
+            color: [0.9; 3],
+            width: 1.5,
+            role: "bright-ridge-on-boundary",
+            width_samples: Vec::new(),
+        };
+        let mut second = StructuralStroke {
+            points: vec![Point { x: 16.5, y: 8.5 }, Point { x: 26.5, y: 8.5 }],
+            role: "ridge",
+            color: [0.1; 3],
+            ..first.clone()
+        };
+        let support = vec![true; 32 * 16];
+        assert_eq!(
+            connect_graph_edges(
+                vec![first.clone(), second.clone()],
+                &support,
+                32,
+                16,
+                6.0,
+                15.0
+            )
+            .len(),
+            2
+        );
+        second.role = "bright-ridge-on-boundary";
+        second.color = first.color;
+        assert_eq!(
+            connect_graph_edges(vec![first, second], &support, 32, 16, 6.0, 15.0).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn car_wheel_highlight_is_centred_on_its_bright_source_ridge() {
+        let raster = |bytes: &[u8]| {
+            let image = image::load_from_memory(bytes).unwrap().to_rgb8();
+            Raster::new(
+                image.width() as usize,
+                image.height() as usize,
+                image
+                    .pixels()
+                    .map(|p| p.0.map(|c| c as f32 / 255.0))
+                    .collect(),
+            )
+        };
+        let source = raster(include_bytes!("test-data/car-wheel-highlight.png"));
+        let paint = raster(include_bytes!("test-data/car-wheel-underpaint.png"));
+        let record: serde_json::Value =
+            serde_json::from_str(include_str!("test-data/car-wheel-ridge.json")).unwrap();
+        let mut stroke = StructuralStroke {
+            points: record["points"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|p| Point {
+                    x: p[0].as_f64().unwrap() as f32,
+                    y: p[1].as_f64().unwrap() as f32,
+                })
+                .collect(),
+            path_data: None,
+            precise_points: None,
+            color: std::array::from_fn(|c| record["color"][c].as_f64().unwrap() as f32),
+            width: record["width"].as_f64().unwrap() as f32,
+            role: "bright-ridge-on-boundary",
+            width_samples: Vec::new(),
+        };
+        refine_bright_ridge(
+            &mut stroke,
+            &oklab_pixels(&source),
+            source.width,
+            source.height,
+        );
+        stroke.color = sample_graph_color(&source, &stroke);
+        stroke.path_data = Some(fitted_structural_open_path_data_with_tangents(
+            &stroke.points,
+            0.35,
+            0.45,
+            None,
+            None,
+        ));
+        assert!(
+            stroke.color[0] > 0.7,
+            "a bright rim must not inherit the dark side colour"
+        );
+        assert!(stroke_overlay_improves_paint(&stroke, &source, &paint));
+        let svg = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="45" height="64"><path d="{}" fill="none" stroke="white" stroke-width="{}" stroke-linecap="round"/></svg>"#,
+            stroke.path_data.as_ref().unwrap(),
+            stroke.width
+        );
+        let tree = resvg::usvg::Tree::from_str(&svg, &resvg::usvg::Options::default()).unwrap();
+        let mut mask = resvg::tiny_skia::Pixmap::new(45, 64).unwrap();
+        resvg::render(
+            &tree,
+            resvg::tiny_skia::Transform::identity(),
+            &mut mask.as_mut(),
+        );
+        assert!(
+            mask.pixels()[17 * 45 + 25].alpha() > 120,
+            "the removed highlight must be painted back at its source position"
+        );
+        let path = stroke.path_data.unwrap();
+        assert_eq!(
+            path.matches('C').count() + path.matches('A').count(),
+            1,
+            "the smooth rim interval should use one curve: {path}"
+        );
+    }
+
+    #[test]
+    fn a_tapered_paint_tip_is_not_retraced_as_a_round_capped_line() {
+        let render = |content: &str| {
+            let document = format!(
+                r##"<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><path fill="#a156ac" d="M0 0H32V32H0Z"/>{content}</svg>"##
+            );
+            let tree =
+                resvg::usvg::Tree::from_str(&document, &resvg::usvg::Options::default()).unwrap();
+            let mut pixels = resvg::tiny_skia::Pixmap::new(32, 32).unwrap();
+            resvg::render(
+                &tree,
+                resvg::tiny_skia::Transform::identity(),
+                &mut pixels.as_mut(),
+            );
+            Raster::new(
+                32,
+                32,
+                pixels
+                    .pixels()
+                    .iter()
+                    .map(|p| {
+                        [
+                            p.red() as f32 / 255.0,
+                            p.green() as f32 / 255.0,
+                            p.blue() as f32 / 255.0,
+                        ]
+                    })
+                    .collect(),
+            )
+        };
+        let stroke = StructuralStroke {
+            points: vec![Point { x: 15.0, y: 17.0 }, Point { x: 10.0, y: 24.0 }],
+            path_data: None,
+            precise_points: None,
+            color: [0.0; 3],
+            width: 4.0,
+            role: "legacy-structural",
+            width_samples: vec![(4.0, 8)],
+        };
+        let source = render(r##"<path fill="#000000" d="M10 24L20 3L28 9Z"/>"##);
+        let paint = render(r##"<path fill="#080808" d="M10 24L20 3L28 9Z"/>"##);
+        // The centreline gets darker, but the full stroke thickens the tip
+        // and adds a round cap outside the authored silhouette.
+        assert!(!stroke_overlay_improves_paint(&stroke, &source, &paint));
+        let actual_line = render(
+            r##"<path fill="none" stroke="#000000" stroke-width="4" stroke-linecap="round" d="M15 17L10 24"/>"##,
+        );
+        assert!(stroke_overlay_improves_paint(
+            &stroke,
+            &actual_line,
+            &render("")
+        ));
+        let bent = StructuralStroke {
+            points: vec![
+                Point { x: 20.0, y: 16.0 },
+                Point { x: 19.5, y: 13.5 },
+                Point { x: 8.5, y: 19.5 },
+            ],
+            path_data: Some("M20 16C19.8 15.2 19.7 14.3 19.5 13.5L8.5 19.5".into()),
+            width: 1.0,
+            ..stroke
+        };
+        let rim =
+            render(r##"<path fill="none" stroke="#000000" stroke-width="2" d="M5 22L25 12"/>"##);
+        let rim_paint =
+            render(r##"<path fill="none" stroke="#080808" stroke-width="2" d="M5 22L25 12"/>"##);
+        assert!(!stroke_overlay_improves_paint(&bent, &rim, &rim_paint));
+        let authored = render(
+            r##"<path fill="none" stroke="#000000" stroke-width="1" stroke-linecap="round" stroke-linejoin="round" d="M20 16C19.8 15.2 19.7 14.3 19.5 13.5L8.5 19.5"/>"##,
+        );
+        assert!(stroke_overlay_improves_paint(&bent, &authored, &render("")));
+    }
 
     #[test]
     fn serialized_interior_colour_patch_preserves_the_stroke_silhouette() {
@@ -5174,6 +5582,23 @@ mod tests {
             role: "bright-ridge-on-boundary",
             width_samples: Vec::new(),
         };
+        for role in ["ridge", "ridge-on-boundary"] {
+            let mut untyped = stroke.clone();
+            untyped.role = role;
+            assert_eq!(
+                classify_boundary_role(&untyped, &oklab_pixels(&source), width, height),
+                "bright-ridge-on-boundary"
+            );
+            let inverse = Raster::new(
+                width,
+                height,
+                source.pixels.iter().map(|p| p.map(|c| 1.0 - c)).collect(),
+            );
+            assert_eq!(
+                classify_boundary_role(&untyped, &oklab_pixels(&inverse), width, height),
+                role
+            );
+        }
         let (missing, supported) = boundary_profile_flags(
             &stroke,
             &oklab_pixels(&source),

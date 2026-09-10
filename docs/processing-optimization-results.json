@@ -1,0 +1,923 @@
+{
+  "date": "2026-09-10",
+  "environment": {
+    "baseline_source_sha256": "e1e33800688169eca770db38532220ad35fe25102ad3d2de5bc4bf69c0069b04",
+    "candidate_source_sha256": "283e3a429ba4067e710f9778b7272342f335d020ee82f6cfac5f299bb7753a3b",
+    "platform": "Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+    "rustc": "rustc 1.95.0 (59807616e 2026-04-14)",
+    "cpu": "AMD Ryzen AI 9 465 w/ Radeon 880M"
+  },
+  "build": "cargo build --release --locked --features diagnostics",
+  "comparison_excluded_fields": [
+    "elapsed_seconds",
+    "output"
+  ],
+  "equivalence": [
+    {
+      "case": "car",
+      "input": "sample/input/car.png",
+      "input_sha256": "7bac8b1676a62a6ddfc4519d3e17f92c4b76f78cd4b947efddc1eb45baa20cf7",
+      "options": [
+        "--threads",
+        "4",
+        "--verbose"
+      ],
+      "svg_sha256": "cde6266c0fd9debeb6aba6c194c8567ac033dffd19d127f3b3e2ed5cc5bc8144",
+      "svg_equal": true,
+      "diagnostics_equal": true
+    },
+    {
+      "case": "boy",
+      "input": "sample/input/boy_and_turtle.png",
+      "input_sha256": "91ec0385e31175a0192896bf84804541366da769773a3a0fa8b95fe9a74bd3b8",
+      "options": [
+        "--threads",
+        "4",
+        "--verbose"
+      ],
+      "svg_sha256": "cd68c30c838e0deb517653aec1841d37c2e9d2bed87546fb938a20fa2117f9e9",
+      "svg_equal": true,
+      "diagnostics_equal": true
+    },
+    {
+      "case": "photo",
+      "input": "sample/input/viewport2.jpg",
+      "input_sha256": "21484ce6fc82059e1441d57852d27d77c19b7b90d11b885065326338d9ed74c5",
+      "options": [
+        "--threads",
+        "4",
+        "--verbose"
+      ],
+      "svg_sha256": "def9930de87dda850a808ddb8e92397155533c334d026f58138a33e6a2582d3b",
+      "svg_equal": true,
+      "diagnostics_equal": true
+    },
+    {
+      "case": "wiki",
+      "input": "sample/input/wikipedia_logo_1_0.png",
+      "input_sha256": "bd6be0ef6093fb9acbeadfd08096fa5b8842562e9f384a76e137a51a72d0ec98",
+      "options": [
+        "--threads",
+        "4",
+        "--verbose"
+      ],
+      "svg_sha256": "33c61cdeb7bbc6c39a71a66ebb4eace0b44942b60f08f6bb4a865c6eaea496fa",
+      "svg_equal": true,
+      "diagnostics_equal": true
+    },
+    {
+      "case": "alpha",
+      "input": "src/test-data/cube-alpha.png",
+      "input_sha256": "2f9931683e632d24070a36ecda8c7e6e2e8e74162c10ff7b1f278af5693124e5",
+      "options": [
+        "--threads",
+        "4",
+        "--verbose"
+      ],
+      "svg_sha256": "41a19adeb9f0a18c2cc2cc78e70eccfc02d393ba6693f9a7fa1c2836c208f8d3",
+      "svg_equal": true,
+      "diagnostics_equal": true
+    },
+    {
+      "case": "key",
+      "input": "src/test-data/round-buttons-source.png",
+      "input_sha256": "8c7ff85c17e1f129926c8713d04d4af2c0f012efd7681ebc8a6b386c88fbc914",
+      "options": [
+        "--threads",
+        "4",
+        "--verbose",
+        "--remove-chroma-key-background"
+      ],
+      "svg_sha256": "982210b5ea3289ac06c587bd0ef03c922dfd83c7b837924b05120e0a06ae7a78",
+      "svg_equal": true,
+      "diagnostics_equal": true
+    },
+    {
+      "case": "adaptive",
+      "input": "sample/input/cliparts-6x6.png",
+      "input_sha256": "2d350c5f071d853c543da8ae1f51e4c38bbe908c2f5580b17fdaad6985c0d571",
+      "options": [
+        "--threads",
+        "4",
+        "--verbose",
+        "--remove-chroma-key-background"
+      ],
+      "svg_sha256": "51a6e138a4aa24abb8fa57816b32a3242cd7a450e159f5b79e8e84b2d97fde48",
+      "svg_equal": true,
+      "diagnostics_equal": true
+    },
+    {
+      "case": "car-3passes",
+      "input": "sample/input/car.png",
+      "input_sha256": "7bac8b1676a62a6ddfc4519d3e17f92c4b76f78cd4b947efddc1eb45baa20cf7",
+      "options": [
+        "--threads",
+        "4",
+        "--verbose",
+        "--paint-merge-passes",
+        "3"
+      ],
+      "svg_sha256": "b8233945498de5b78f4976c11cb607dfdda8c276d6505187176e28834f012daf",
+      "svg_equal": true,
+      "diagnostics_equal": true
+    },
+    {
+      "case": "car-quality",
+      "input": "sample/input/car.png",
+      "input_sha256": "7bac8b1676a62a6ddfc4519d3e17f92c4b76f78cd4b947efddc1eb45baa20cf7",
+      "options": [
+        "--threads",
+        "4",
+        "--verbose",
+        "--quality-metrics"
+      ],
+      "svg_sha256": "cde6266c0fd9debeb6aba6c194c8567ac033dffd19d127f3b3e2ed5cc5bc8144",
+      "svg_equal": true,
+      "diagnostics_equal": true
+    }
+  ],
+  "stages": {
+    "1": {
+      "equal_cases": [
+        "boy",
+        "car"
+      ]
+    },
+    "2": {
+      "equal_cases": [
+        "alpha",
+        "boy",
+        "car",
+        "key",
+        "wiki"
+      ]
+    },
+    "3": {
+      "equal_cases": [
+        "car-quality",
+        "car",
+        "wiki"
+      ]
+    },
+    "4": {
+      "equal_cases": [
+        "adaptive",
+        "alpha",
+        "boy",
+        "car-3passes",
+        "car-quality",
+        "car",
+        "key",
+        "photo",
+        "wiki"
+      ]
+    },
+    "5": {
+      "equal_cases": [
+        "adaptive",
+        "alpha",
+        "boy",
+        "car-3passes",
+        "car-quality",
+        "car",
+        "key",
+        "photo",
+        "wiki"
+      ]
+    }
+  },
+  "validation": {
+    "release_lib_diagnostics": {
+      "passed": 328,
+      "failed": 0,
+      "ignored": 5,
+      "seconds": 76.87
+    },
+    "all_targets_no_default_features": "passed"
+  },
+  "benchmark": {
+    "executables": {
+      "baseline": {
+        "path": "/tmp/picvec-equivalence/baseline/picvec",
+        "sha256": "c159843c6cfed1894b068578844849a4ca2300c17eef1dca454d5ca74a5d4485"
+      },
+      "candidate": {
+        "path": "/tmp/picvec-equivalence/step5/picvec",
+        "sha256": "91fb3d398974aaf0aca231618320b10207412a97d9e4f80ea52dcb44d42ffd68"
+      }
+    },
+    "threads": 4,
+    "runs": [
+      {
+        "case": "car",
+        "repeat": 0,
+        "version": "baseline",
+        "seconds": 56.36091039900202,
+        "sha256": "cde6266c0fd9debeb6aba6c194c8567ac033dffd19d127f3b3e2ed5cc5bc8144",
+        "stages": {
+          "load-resize": 0.005,
+          "edge-roles": 2.431,
+          "structural-analysis": 0.457,
+          "perceptual-smoothing": 0.647,
+          "segmentation": 0.632,
+          "boundary-regularization": 0.269,
+          "paint-aware-merge": 13.65,
+          "thin-paint-ownership": 0.074,
+          "paint-topology-preservation": 2.512,
+          "paint-fitting": 3.687,
+          "source-supported-paint-merge": 5.517,
+          "source-alpha-mask": 14.648,
+          "exact-paint-merge": 0.003,
+          "shared-geometry": 9.593,
+          "paint-preview": 0.086,
+          "structural-selection": 1.915,
+          "final-svg": 0.032
+        },
+        "diagnostics_sha256": "97c0a2bac69b82b891620cbda0a83463842fea06e7aace82df7c37b269dbaf1a"
+      },
+      {
+        "case": "car",
+        "repeat": 0,
+        "version": "candidate",
+        "seconds": 46.3206538930026,
+        "sha256": "cde6266c0fd9debeb6aba6c194c8567ac033dffd19d127f3b3e2ed5cc5bc8144",
+        "stages": {
+          "load-resize": 0.006,
+          "edge-roles": 2.387,
+          "structural-analysis": 0.473,
+          "perceptual-smoothing": 0.584,
+          "segmentation": 0.626,
+          "boundary-regularization": 0.205,
+          "paint-aware-merge": 11.597,
+          "thin-paint-ownership": 0.073,
+          "paint-topology-preservation": 2.358,
+          "paint-fitting": 2.424,
+          "source-supported-paint-merge": 5.602,
+          "exact-paint-merge": 0.023,
+          "layered-paint-simplification": 1.974,
+          "residual-shape-refinement": 6.144,
+          "source-alpha-mask": 0.0,
+          "hierarchical-topology": 0.004,
+          "shared-geometry": 9.657,
+          "paint-preview": 0.091,
+          "structural-selection": 1.917,
+          "final-svg": 0.014
+        },
+        "diagnostics_sha256": "97c0a2bac69b82b891620cbda0a83463842fea06e7aace82df7c37b269dbaf1a"
+      },
+      {
+        "case": "wiki",
+        "repeat": 0,
+        "version": "baseline",
+        "seconds": 33.52504817800218,
+        "sha256": "33c61cdeb7bbc6c39a71a66ebb4eace0b44942b60f08f6bb4a865c6eaea496fa",
+        "stages": {
+          "load-resize": 0.005,
+          "edge-roles": 1.674,
+          "structural-analysis": 0.326,
+          "perceptual-smoothing": 0.493,
+          "segmentation": 0.615,
+          "boundary-regularization": 0.165,
+          "paint-aware-merge": 2.862,
+          "thin-paint-ownership": 0.056,
+          "paint-topology-preservation": 1.805,
+          "paint-fitting": 2.169,
+          "source-supported-paint-merge": 9.759,
+          "source-alpha-mask": 4.788,
+          "exact-paint-merge": 0.003,
+          "shared-geometry": 5.217,
+          "paint-preview": 0.114,
+          "structural-selection": 1.248,
+          "final-svg": 2.124
+        },
+        "diagnostics_sha256": "9254410925cce44f0bba2106e65b558bd688b92caa0aa413e9c130e616ccf904"
+      },
+      {
+        "case": "wiki",
+        "repeat": 0,
+        "version": "candidate",
+        "seconds": 30.303673032001825,
+        "sha256": "33c61cdeb7bbc6c39a71a66ebb4eace0b44942b60f08f6bb4a865c6eaea496fa",
+        "stages": {
+          "load-resize": 0.005,
+          "edge-roles": 1.591,
+          "structural-analysis": 0.286,
+          "perceptual-smoothing": 0.437,
+          "segmentation": 0.595,
+          "boundary-regularization": 0.155,
+          "paint-aware-merge": 2.701,
+          "thin-paint-ownership": 0.052,
+          "paint-topology-preservation": 1.759,
+          "paint-fitting": 2.486,
+          "source-supported-paint-merge": 8.704,
+          "exact-paint-merge": 0.019,
+          "layered-paint-simplification": 1.28,
+          "residual-shape-refinement": 1.383,
+          "source-alpha-mask": 0.171,
+          "hierarchical-topology": 0.003,
+          "shared-geometry": 5.17,
+          "paint-preview": 0.114,
+          "structural-selection": 1.195,
+          "final-svg": 2.096
+        },
+        "diagnostics_sha256": "9254410925cce44f0bba2106e65b558bd688b92caa0aa413e9c130e616ccf904"
+      },
+      {
+        "case": "boy",
+        "repeat": 0,
+        "version": "baseline",
+        "seconds": 4.121730644998024,
+        "sha256": "cd68c30c838e0deb517653aec1841d37c2e9d2bed87546fb938a20fa2117f9e9",
+        "stages": {
+          "load-resize": 0.003,
+          "edge-roles": 0.585,
+          "structural-analysis": 0.281,
+          "perceptual-smoothing": 0.251,
+          "segmentation": 0.128,
+          "boundary-regularization": 0.067,
+          "paint-aware-merge": 0.074,
+          "thin-paint-ownership": 0.017,
+          "paint-topology-preservation": 0.42,
+          "paint-fitting": 0.021,
+          "source-supported-paint-merge": 0.016,
+          "source-alpha-mask": 0.095,
+          "exact-paint-merge": 0.001,
+          "shared-geometry": 1.926,
+          "paint-preview": 0.008,
+          "structural-selection": 0.177,
+          "final-svg": 0.004
+        },
+        "diagnostics_sha256": "01f00ac8764044f3690a5ec894de49b75eef1d33cd412fd1de2e9b0387c993f0"
+      },
+      {
+        "case": "boy",
+        "repeat": 0,
+        "version": "candidate",
+        "seconds": 3.9464788710029097,
+        "sha256": "cd68c30c838e0deb517653aec1841d37c2e9d2bed87546fb938a20fa2117f9e9",
+        "stages": {
+          "load-resize": 0.003,
+          "edge-roles": 0.56,
+          "structural-analysis": 0.273,
+          "perceptual-smoothing": 0.247,
+          "segmentation": 0.125,
+          "boundary-regularization": 0.066,
+          "paint-aware-merge": 0.044,
+          "thin-paint-ownership": 0.017,
+          "paint-topology-preservation": 0.4,
+          "paint-fitting": 0.022,
+          "source-supported-paint-merge": 0.002,
+          "exact-paint-merge": 0.001,
+          "layered-paint-simplification": 0.001,
+          "residual-shape-refinement": 0.0,
+          "source-alpha-mask": 0.091,
+          "hierarchical-topology": 0.001,
+          "shared-geometry": 1.861,
+          "paint-preview": 0.008,
+          "structural-selection": 0.17,
+          "final-svg": 0.002
+        },
+        "diagnostics_sha256": "01f00ac8764044f3690a5ec894de49b75eef1d33cd412fd1de2e9b0387c993f0"
+      },
+      {
+        "case": "alpha",
+        "repeat": 0,
+        "version": "baseline",
+        "seconds": 0.9176124919977156,
+        "sha256": "41a19adeb9f0a18c2cc2cc78e70eccfc02d393ba6693f9a7fa1c2836c208f8d3",
+        "stages": {
+          "load-resize": 0.0,
+          "edge-roles": 0.124,
+          "structural-analysis": 0.05,
+          "perceptual-smoothing": 0.072,
+          "segmentation": 0.027,
+          "boundary-regularization": 0.016,
+          "paint-aware-merge": 0.005,
+          "thin-paint-ownership": 0.004,
+          "paint-topology-preservation": 0.072,
+          "paint-fitting": 0.005,
+          "source-supported-paint-merge": 0.003,
+          "source-alpha-mask": 0.0,
+          "exact-paint-merge": 0.0,
+          "shared-geometry": 0.518,
+          "paint-preview": 0.001,
+          "structural-selection": 0.01,
+          "final-svg": 0.002
+        },
+        "diagnostics_sha256": "e8b7e8162a7a575037518514956e887d3b7e2eb6ea4e3e1e3e965dc2285ef39a"
+      },
+      {
+        "case": "alpha",
+        "repeat": 0,
+        "version": "candidate",
+        "seconds": 0.8633394530043006,
+        "sha256": "41a19adeb9f0a18c2cc2cc78e70eccfc02d393ba6693f9a7fa1c2836c208f8d3",
+        "stages": {
+          "load-resize": 0.0,
+          "edge-roles": 0.109,
+          "structural-analysis": 0.041,
+          "perceptual-smoothing": 0.065,
+          "segmentation": 0.025,
+          "boundary-regularization": 0.016,
+          "paint-aware-merge": 0.005,
+          "thin-paint-ownership": 0.003,
+          "paint-topology-preservation": 0.067,
+          "paint-fitting": 0.004,
+          "source-supported-paint-merge": 0.0,
+          "exact-paint-merge": 0.0,
+          "layered-paint-simplification": 0.0,
+          "residual-shape-refinement": 0.0,
+          "source-alpha-mask": 0.0,
+          "hierarchical-topology": 0.0,
+          "shared-geometry": 0.502,
+          "paint-preview": 0.001,
+          "structural-selection": 0.012,
+          "final-svg": 0.003
+        },
+        "diagnostics_sha256": "e8b7e8162a7a575037518514956e887d3b7e2eb6ea4e3e1e3e965dc2285ef39a"
+      },
+      {
+        "case": "car",
+        "repeat": 1,
+        "version": "candidate",
+        "seconds": 47.28356056800112,
+        "sha256": "cde6266c0fd9debeb6aba6c194c8567ac033dffd19d127f3b3e2ed5cc5bc8144",
+        "stages": {
+          "load-resize": 0.006,
+          "edge-roles": 2.345,
+          "structural-analysis": 0.44,
+          "perceptual-smoothing": 0.616,
+          "segmentation": 0.649,
+          "boundary-regularization": 0.222,
+          "paint-aware-merge": 12.017,
+          "thin-paint-ownership": 0.075,
+          "paint-topology-preservation": 2.404,
+          "paint-fitting": 2.262,
+          "source-supported-paint-merge": 6.054,
+          "exact-paint-merge": 0.023,
+          "layered-paint-simplification": 2.204,
+          "residual-shape-refinement": 6.346,
+          "source-alpha-mask": 0.0,
+          "hierarchical-topology": 0.003,
+          "shared-geometry": 9.56,
+          "paint-preview": 0.087,
+          "structural-selection": 1.796,
+          "final-svg": 0.017
+        },
+        "diagnostics_sha256": "97c0a2bac69b82b891620cbda0a83463842fea06e7aace82df7c37b269dbaf1a"
+      },
+      {
+        "case": "car",
+        "repeat": 1,
+        "version": "baseline",
+        "seconds": 57.90972009699908,
+        "sha256": "cde6266c0fd9debeb6aba6c194c8567ac033dffd19d127f3b3e2ed5cc5bc8144",
+        "stages": {
+          "load-resize": 0.006,
+          "edge-roles": 2.415,
+          "structural-analysis": 0.486,
+          "perceptual-smoothing": 0.631,
+          "segmentation": 0.632,
+          "boundary-regularization": 0.251,
+          "paint-aware-merge": 15.617,
+          "thin-paint-ownership": 0.077,
+          "paint-topology-preservation": 2.557,
+          "paint-fitting": 3.229,
+          "source-supported-paint-merge": 6.388,
+          "source-alpha-mask": 13.879,
+          "exact-paint-merge": 0.003,
+          "shared-geometry": 9.565,
+          "paint-preview": 0.087,
+          "structural-selection": 1.894,
+          "final-svg": 0.032
+        },
+        "diagnostics_sha256": "97c0a2bac69b82b891620cbda0a83463842fea06e7aace82df7c37b269dbaf1a"
+      },
+      {
+        "case": "wiki",
+        "repeat": 1,
+        "version": "candidate",
+        "seconds": 32.155804332993284,
+        "sha256": "33c61cdeb7bbc6c39a71a66ebb4eace0b44942b60f08f6bb4a865c6eaea496fa",
+        "stages": {
+          "load-resize": 0.005,
+          "edge-roles": 1.586,
+          "structural-analysis": 0.29,
+          "perceptual-smoothing": 0.445,
+          "segmentation": 0.598,
+          "boundary-regularization": 0.16,
+          "paint-aware-merge": 4.837,
+          "thin-paint-ownership": 0.053,
+          "paint-topology-preservation": 1.642,
+          "paint-fitting": 2.461,
+          "source-supported-paint-merge": 8.534,
+          "exact-paint-merge": 0.019,
+          "layered-paint-simplification": 1.159,
+          "residual-shape-refinement": 1.377,
+          "source-alpha-mask": 0.169,
+          "hierarchical-topology": 0.003,
+          "shared-geometry": 5.281,
+          "paint-preview": 0.117,
+          "structural-selection": 1.197,
+          "final-svg": 2.115
+        },
+        "diagnostics_sha256": "9254410925cce44f0bba2106e65b558bd688b92caa0aa413e9c130e616ccf904"
+      },
+      {
+        "case": "wiki",
+        "repeat": 1,
+        "version": "baseline",
+        "seconds": 33.02512890499929,
+        "sha256": "33c61cdeb7bbc6c39a71a66ebb4eace0b44942b60f08f6bb4a865c6eaea496fa",
+        "stages": {
+          "load-resize": 0.005,
+          "edge-roles": 1.661,
+          "structural-analysis": 0.31,
+          "perceptual-smoothing": 0.461,
+          "segmentation": 0.595,
+          "boundary-regularization": 0.161,
+          "paint-aware-merge": 2.648,
+          "thin-paint-ownership": 0.054,
+          "paint-topology-preservation": 1.812,
+          "paint-fitting": 1.951,
+          "source-supported-paint-merge": 9.673,
+          "source-alpha-mask": 4.821,
+          "exact-paint-merge": 0.003,
+          "shared-geometry": 5.261,
+          "paint-preview": 0.115,
+          "structural-selection": 1.239,
+          "final-svg": 2.155
+        },
+        "diagnostics_sha256": "9254410925cce44f0bba2106e65b558bd688b92caa0aa413e9c130e616ccf904"
+      },
+      {
+        "case": "boy",
+        "repeat": 1,
+        "version": "candidate",
+        "seconds": 3.99214604300505,
+        "sha256": "cd68c30c838e0deb517653aec1841d37c2e9d2bed87546fb938a20fa2117f9e9",
+        "stages": {
+          "load-resize": 0.003,
+          "edge-roles": 0.57,
+          "structural-analysis": 0.289,
+          "perceptual-smoothing": 0.259,
+          "segmentation": 0.124,
+          "boundary-regularization": 0.068,
+          "paint-aware-merge": 0.055,
+          "thin-paint-ownership": 0.018,
+          "paint-topology-preservation": 0.42,
+          "paint-fitting": 0.024,
+          "source-supported-paint-merge": 0.003,
+          "exact-paint-merge": 0.001,
+          "layered-paint-simplification": 0.001,
+          "residual-shape-refinement": 0.0,
+          "source-alpha-mask": 0.091,
+          "hierarchical-topology": 0.002,
+          "shared-geometry": 1.832,
+          "paint-preview": 0.008,
+          "structural-selection": 0.172,
+          "final-svg": 0.002
+        },
+        "diagnostics_sha256": "01f00ac8764044f3690a5ec894de49b75eef1d33cd412fd1de2e9b0387c993f0"
+      },
+      {
+        "case": "boy",
+        "repeat": 1,
+        "version": "baseline",
+        "seconds": 4.045019990997389,
+        "sha256": "cd68c30c838e0deb517653aec1841d37c2e9d2bed87546fb938a20fa2117f9e9",
+        "stages": {
+          "load-resize": 0.003,
+          "edge-roles": 0.572,
+          "structural-analysis": 0.279,
+          "perceptual-smoothing": 0.265,
+          "segmentation": 0.124,
+          "boundary-regularization": 0.064,
+          "paint-aware-merge": 0.071,
+          "thin-paint-ownership": 0.016,
+          "paint-topology-preservation": 0.414,
+          "paint-fitting": 0.022,
+          "source-supported-paint-merge": 0.018,
+          "source-alpha-mask": 0.094,
+          "exact-paint-merge": 0.001,
+          "shared-geometry": 1.858,
+          "paint-preview": 0.008,
+          "structural-selection": 0.184,
+          "final-svg": 0.004
+        },
+        "diagnostics_sha256": "01f00ac8764044f3690a5ec894de49b75eef1d33cd412fd1de2e9b0387c993f0"
+      },
+      {
+        "case": "alpha",
+        "repeat": 1,
+        "version": "candidate",
+        "seconds": 0.89384710000013,
+        "sha256": "41a19adeb9f0a18c2cc2cc78e70eccfc02d393ba6693f9a7fa1c2836c208f8d3",
+        "stages": {
+          "load-resize": 0.0,
+          "edge-roles": 0.128,
+          "structural-analysis": 0.048,
+          "perceptual-smoothing": 0.07,
+          "segmentation": 0.026,
+          "boundary-regularization": 0.017,
+          "paint-aware-merge": 0.006,
+          "thin-paint-ownership": 0.004,
+          "paint-topology-preservation": 0.068,
+          "paint-fitting": 0.004,
+          "source-supported-paint-merge": 0.0,
+          "exact-paint-merge": 0.0,
+          "layered-paint-simplification": 0.0,
+          "residual-shape-refinement": 0.0,
+          "source-alpha-mask": 0.0,
+          "hierarchical-topology": 0.0,
+          "shared-geometry": 0.497,
+          "paint-preview": 0.001,
+          "structural-selection": 0.012,
+          "final-svg": 0.002
+        },
+        "diagnostics_sha256": "e8b7e8162a7a575037518514956e887d3b7e2eb6ea4e3e1e3e965dc2285ef39a"
+      },
+      {
+        "case": "alpha",
+        "repeat": 1,
+        "version": "baseline",
+        "seconds": 0.9113074659981066,
+        "sha256": "41a19adeb9f0a18c2cc2cc78e70eccfc02d393ba6693f9a7fa1c2836c208f8d3",
+        "stages": {
+          "load-resize": 0.0,
+          "edge-roles": 0.124,
+          "structural-analysis": 0.05,
+          "perceptual-smoothing": 0.074,
+          "segmentation": 0.025,
+          "boundary-regularization": 0.017,
+          "paint-aware-merge": 0.005,
+          "thin-paint-ownership": 0.004,
+          "paint-topology-preservation": 0.064,
+          "paint-fitting": 0.005,
+          "source-supported-paint-merge": 0.004,
+          "source-alpha-mask": 0.0,
+          "exact-paint-merge": 0.0,
+          "shared-geometry": 0.515,
+          "paint-preview": 0.001,
+          "structural-selection": 0.011,
+          "final-svg": 0.002
+        },
+        "diagnostics_sha256": "e8b7e8162a7a575037518514956e887d3b7e2eb6ea4e3e1e3e965dc2285ef39a"
+      },
+      {
+        "case": "car",
+        "repeat": 2,
+        "version": "baseline",
+        "seconds": 58.38919095100573,
+        "sha256": "cde6266c0fd9debeb6aba6c194c8567ac033dffd19d127f3b3e2ed5cc5bc8144",
+        "stages": {
+          "load-resize": 0.006,
+          "edge-roles": 2.598,
+          "structural-analysis": 0.476,
+          "perceptual-smoothing": 0.644,
+          "segmentation": 0.643,
+          "boundary-regularization": 0.262,
+          "paint-aware-merge": 15.713,
+          "thin-paint-ownership": 0.075,
+          "paint-topology-preservation": 2.454,
+          "paint-fitting": 3.284,
+          "source-supported-paint-merge": 6.486,
+          "source-alpha-mask": 14.134,
+          "exact-paint-merge": 0.003,
+          "shared-geometry": 9.47,
+          "paint-preview": 0.092,
+          "structural-selection": 1.857,
+          "final-svg": 0.031
+        },
+        "diagnostics_sha256": "97c0a2bac69b82b891620cbda0a83463842fea06e7aace82df7c37b269dbaf1a"
+      },
+      {
+        "case": "car",
+        "repeat": 2,
+        "version": "candidate",
+        "seconds": 47.000923540996155,
+        "sha256": "cde6266c0fd9debeb6aba6c194c8567ac033dffd19d127f3b3e2ed5cc5bc8144",
+        "stages": {
+          "load-resize": 0.005,
+          "edge-roles": 2.241,
+          "structural-analysis": 0.446,
+          "perceptual-smoothing": 0.604,
+          "segmentation": 0.63,
+          "boundary-regularization": 0.211,
+          "paint-aware-merge": 12.909,
+          "thin-paint-ownership": 0.069,
+          "paint-topology-preservation": 2.327,
+          "paint-fitting": 2.137,
+          "source-supported-paint-merge": 5.273,
+          "exact-paint-merge": 0.023,
+          "layered-paint-simplification": 2.047,
+          "residual-shape-refinement": 6.377,
+          "source-alpha-mask": 0.0,
+          "hierarchical-topology": 0.002,
+          "shared-geometry": 9.565,
+          "paint-preview": 0.091,
+          "structural-selection": 1.865,
+          "final-svg": 0.014
+        },
+        "diagnostics_sha256": "97c0a2bac69b82b891620cbda0a83463842fea06e7aace82df7c37b269dbaf1a"
+      },
+      {
+        "case": "wiki",
+        "repeat": 2,
+        "version": "baseline",
+        "seconds": 34.92309401500097,
+        "sha256": "33c61cdeb7bbc6c39a71a66ebb4eace0b44942b60f08f6bb4a865c6eaea496fa",
+        "stages": {
+          "load-resize": 0.005,
+          "edge-roles": 1.611,
+          "structural-analysis": 0.307,
+          "perceptual-smoothing": 0.476,
+          "segmentation": 0.597,
+          "boundary-regularization": 0.162,
+          "paint-aware-merge": 4.509,
+          "thin-paint-ownership": 0.051,
+          "paint-topology-preservation": 1.713,
+          "paint-fitting": 1.817,
+          "source-supported-paint-merge": 9.931,
+          "source-alpha-mask": 4.856,
+          "exact-paint-merge": 0.003,
+          "shared-geometry": 5.351,
+          "paint-preview": 0.114,
+          "structural-selection": 1.213,
+          "final-svg": 2.107
+        },
+        "diagnostics_sha256": "9254410925cce44f0bba2106e65b558bd688b92caa0aa413e9c130e616ccf904"
+      },
+      {
+        "case": "wiki",
+        "repeat": 2,
+        "version": "candidate",
+        "seconds": 31.86506031400495,
+        "sha256": "33c61cdeb7bbc6c39a71a66ebb4eace0b44942b60f08f6bb4a865c6eaea496fa",
+        "stages": {
+          "load-resize": 0.004,
+          "edge-roles": 1.562,
+          "structural-analysis": 0.28,
+          "perceptual-smoothing": 0.457,
+          "segmentation": 0.599,
+          "boundary-regularization": 0.159,
+          "paint-aware-merge": 3.804,
+          "thin-paint-ownership": 0.055,
+          "paint-topology-preservation": 1.636,
+          "paint-fitting": 2.303,
+          "source-supported-paint-merge": 9.263,
+          "exact-paint-merge": 0.018,
+          "layered-paint-simplification": 1.411,
+          "residual-shape-refinement": 1.371,
+          "source-alpha-mask": 0.174,
+          "hierarchical-topology": 0.003,
+          "shared-geometry": 5.308,
+          "paint-preview": 0.114,
+          "structural-selection": 1.127,
+          "final-svg": 2.116
+        },
+        "diagnostics_sha256": "9254410925cce44f0bba2106e65b558bd688b92caa0aa413e9c130e616ccf904"
+      },
+      {
+        "case": "boy",
+        "repeat": 2,
+        "version": "baseline",
+        "seconds": 4.038890201001777,
+        "sha256": "cd68c30c838e0deb517653aec1841d37c2e9d2bed87546fb938a20fa2117f9e9",
+        "stages": {
+          "load-resize": 0.003,
+          "edge-roles": 0.564,
+          "structural-analysis": 0.289,
+          "perceptual-smoothing": 0.251,
+          "segmentation": 0.127,
+          "boundary-regularization": 0.065,
+          "paint-aware-merge": 0.051,
+          "thin-paint-ownership": 0.017,
+          "paint-topology-preservation": 0.402,
+          "paint-fitting": 0.024,
+          "source-supported-paint-merge": 0.015,
+          "source-alpha-mask": 0.093,
+          "exact-paint-merge": 0.001,
+          "shared-geometry": 1.903,
+          "paint-preview": 0.008,
+          "structural-selection": 0.177,
+          "final-svg": 0.004
+        },
+        "diagnostics_sha256": "01f00ac8764044f3690a5ec894de49b75eef1d33cd412fd1de2e9b0387c993f0"
+      },
+      {
+        "case": "boy",
+        "repeat": 2,
+        "version": "candidate",
+        "seconds": 3.868522277996817,
+        "sha256": "cd68c30c838e0deb517653aec1841d37c2e9d2bed87546fb938a20fa2117f9e9",
+        "stages": {
+          "load-resize": 0.003,
+          "edge-roles": 0.527,
+          "structural-analysis": 0.264,
+          "perceptual-smoothing": 0.215,
+          "segmentation": 0.124,
+          "boundary-regularization": 0.062,
+          "paint-aware-merge": 0.054,
+          "thin-paint-ownership": 0.016,
+          "paint-topology-preservation": 0.382,
+          "paint-fitting": 0.02,
+          "source-supported-paint-merge": 0.002,
+          "exact-paint-merge": 0.001,
+          "layered-paint-simplification": 0.001,
+          "residual-shape-refinement": 0.0,
+          "source-alpha-mask": 0.091,
+          "hierarchical-topology": 0.001,
+          "shared-geometry": 1.881,
+          "paint-preview": 0.008,
+          "structural-selection": 0.166,
+          "final-svg": 0.002
+        },
+        "diagnostics_sha256": "01f00ac8764044f3690a5ec894de49b75eef1d33cd412fd1de2e9b0387c993f0"
+      },
+      {
+        "case": "alpha",
+        "repeat": 2,
+        "version": "baseline",
+        "seconds": 0.8558741660017404,
+        "sha256": "41a19adeb9f0a18c2cc2cc78e70eccfc02d393ba6693f9a7fa1c2836c208f8d3",
+        "stages": {
+          "load-resize": 0.0,
+          "edge-roles": 0.096,
+          "structural-analysis": 0.043,
+          "perceptual-smoothing": 0.058,
+          "segmentation": 0.025,
+          "boundary-regularization": 0.015,
+          "paint-aware-merge": 0.005,
+          "thin-paint-ownership": 0.003,
+          "paint-topology-preservation": 0.063,
+          "paint-fitting": 0.004,
+          "source-supported-paint-merge": 0.003,
+          "source-alpha-mask": 0.0,
+          "exact-paint-merge": 0.0,
+          "shared-geometry": 0.519,
+          "paint-preview": 0.001,
+          "structural-selection": 0.011,
+          "final-svg": 0.003
+        },
+        "diagnostics_sha256": "e8b7e8162a7a575037518514956e887d3b7e2eb6ea4e3e1e3e965dc2285ef39a"
+      },
+      {
+        "case": "alpha",
+        "repeat": 2,
+        "version": "candidate",
+        "seconds": 0.8392501829948742,
+        "sha256": "41a19adeb9f0a18c2cc2cc78e70eccfc02d393ba6693f9a7fa1c2836c208f8d3",
+        "stages": {
+          "load-resize": 0.0,
+          "edge-roles": 0.102,
+          "structural-analysis": 0.043,
+          "perceptual-smoothing": 0.063,
+          "segmentation": 0.025,
+          "boundary-regularization": 0.015,
+          "paint-aware-merge": 0.004,
+          "thin-paint-ownership": 0.003,
+          "paint-topology-preservation": 0.06,
+          "paint-fitting": 0.003,
+          "source-supported-paint-merge": 0.0,
+          "exact-paint-merge": 0.0,
+          "layered-paint-simplification": 0.0,
+          "residual-shape-refinement": 0.0,
+          "source-alpha-mask": 0.0,
+          "hierarchical-topology": 0.0,
+          "shared-geometry": 0.496,
+          "paint-preview": 0.001,
+          "structural-selection": 0.011,
+          "final-svg": 0.002
+        },
+        "diagnostics_sha256": "e8b7e8162a7a575037518514956e887d3b7e2eb6ea4e3e1e3e965dc2285ef39a"
+      }
+    ],
+    "all_outputs_equal": true,
+    "medians": {
+      "car": {
+        "baseline": 57.90972009699908,
+        "candidate": 47.000923540996155,
+        "reduction_percent": 18.837591578288816
+      },
+      "wiki": {
+        "baseline": 33.52504817800218,
+        "candidate": 31.86506031400495,
+        "reduction_percent": 4.951485394393707
+      },
+      "boy": {
+        "baseline": 4.045019990997389,
+        "candidate": 3.9464788710029097,
+        "reduction_percent": 2.4361095918881137
+      },
+      "alpha": {
+        "baseline": 0.9113074659981066,
+        "candidate": 0.8633394530043006,
+        "reduction_percent": 5.263647537581539
+      }
+    },
+    "repeats": 3,
+    "measurement": "Serial wall-clock subprocess duration; alternating baseline/candidate order; no concurrent project conversions, builds or tests.",
+    "diagnostics_hash_format": "SHA-256 of canonical JSON: sorted keys, compact separators, elapsed_seconds and output removed."
+  }
+}

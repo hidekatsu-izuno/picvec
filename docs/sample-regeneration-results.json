@@ -1,0 +1,284 @@
+{
+  "source_tree_sha256": "eb61223abbc3c059be6503981d42a1e410ee4ff2b4357fe9736181a9e9812eba",
+  "source_tree_hash_definition": "sorted src/**/*.rs, then Cargo.toml and Cargo.lock; relative path, NUL, content, NUL for each file",
+  "configuration": "CLI defaults, 4 workers; --remove-chroma-key-background for cliparts-6x6.png only",
+  "generation": "scripts/generate_sample_svgs.sh; CARGO_NET_OFFLINE=true CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16",
+  "comparison_generation": "scripts/generate_sample_comparisons.sh; rsvg-convert, white background",
+  "verification": {
+    "successful_generations": 9,
+    "svg_xml_parsed": 9,
+    "comparison_files_present": 9
+  },
+  "samples": [
+    {
+      "input": "sample/input/boy_and_turtle.png",
+      "input_sha256": "91ec0385e31175a0192896bf84804541366da769773a3a0fa8b95fe9a74bd3b8",
+      "output": "sample/output/boy_and_turtle.svg",
+      "output_sha256": "85e7ef8ccb3e9ea87dcb7af93fd158add9f77f6732f6db785cf747404ec59701",
+      "svg_bytes": 133565,
+      "comparison": "sample/comparison/boy_and_turtle.png",
+      "comparison_sha256": "69104140a161c86890d21b4bb886abb3c69bd44f8cb68ff88f88b3db325a9c24",
+      "processing_dimensions": [
+        800,
+        744
+      ],
+      "adaptive_refinement": {
+        "enabled": true,
+        "source_scale": 1.0,
+        "proposed_regions": 0,
+        "candidate_regions": 0,
+        "prefiltered_for_complexity": 0,
+        "evaluated_regions": 0,
+        "parallel_jobs": 0,
+        "accepted_regions": 0,
+        "rejected_for_quality": 0,
+        "rejected_for_complexity": 0,
+        "rejected_for_budget": 0,
+        "baseline_mean_delta_e": 0.0,
+        "refined_mean_delta_e": 0.0,
+        "estimated_global_delta_e_reduction": 0.0,
+        "added_svg_bytes": 0
+      }
+    },
+    {
+      "input": "sample/input/car.png",
+      "input_sha256": "7bac8b1676a62a6ddfc4519d3e17f92c4b76f78cd4b947efddc1eb45baa20cf7",
+      "output": "sample/output/car.svg",
+      "output_sha256": "55ba19378953620d0de4caff014fbf6429ebd4c039b383d0ffdb9e1907517bf9",
+      "svg_bytes": 1877109,
+      "comparison": "sample/comparison/car.png",
+      "comparison_sha256": "285f7fc36ef3635dce0c970ff3f56319151eab5fc0a2cc89dd4a7c1eb0164290",
+      "processing_dimensions": [
+        1254,
+        1254
+      ],
+      "adaptive_refinement": {
+        "enabled": true,
+        "source_scale": 1.0,
+        "proposed_regions": 0,
+        "candidate_regions": 0,
+        "prefiltered_for_complexity": 0,
+        "evaluated_regions": 0,
+        "parallel_jobs": 0,
+        "accepted_regions": 0,
+        "rejected_for_quality": 0,
+        "rejected_for_complexity": 0,
+        "rejected_for_budget": 0,
+        "baseline_mean_delta_e": 0.0,
+        "refined_mean_delta_e": 0.0,
+        "estimated_global_delta_e_reduction": 0.0,
+        "added_svg_bytes": 0
+      }
+    },
+    {
+      "input": "sample/input/cliparts-6x6.png",
+      "input_sha256": "2d350c5f071d853c543da8ae1f51e4c38bbe908c2f5580b17fdaad6985c0d571",
+      "output": "sample/output/cliparts-6x6.svg",
+      "output_sha256": "a98dd7968bf2343d40ed260b60e3fbdd1acdf365629cc6807f361eaa653d24cc",
+      "svg_bytes": 39939571,
+      "comparison": "sample/comparison/cliparts-6x6.png",
+      "comparison_sha256": "3282a2ff60e283ba2cc0c2010adcdacffe500a9cd2a063f5eaa86cb3d92dd690",
+      "processing_dimensions": [
+        1414,
+        1414
+      ],
+      "adaptive_refinement": {
+        "enabled": true,
+        "source_scale": 3.5473833,
+        "proposed_regions": 36,
+        "candidate_regions": 36,
+        "prefiltered_for_complexity": 0,
+        "evaluated_regions": 36,
+        "parallel_jobs": 4,
+        "accepted_regions": 36,
+        "rejected_for_quality": 0,
+        "rejected_for_complexity": 0,
+        "rejected_for_budget": 0,
+        "baseline_mean_delta_e": 2.7959018,
+        "refined_mean_delta_e": 1.0481223,
+        "estimated_global_delta_e_reduction": 1.7477795,
+        "added_svg_bytes": 32298890
+      }
+    },
+    {
+      "input": "sample/input/cliparts.png",
+      "input_sha256": "4d0f99724396b3789dfd7fccd50a72b0a07f321fe87b1f8a032042140a14e756",
+      "output": "sample/output/cliparts.svg",
+      "output_sha256": "2b8d9d87d854c253ffec35b92848ec5901259c2a97f62450d019d088a2d31a23",
+      "svg_bytes": 2939694,
+      "comparison": "sample/comparison/cliparts.png",
+      "comparison_sha256": "d0dae25a765b8647a99f48fd62aa3ed47947635801f8ed42db5914defb6a2237",
+      "processing_dimensions": [
+        1600,
+        1200
+      ],
+      "adaptive_refinement": {
+        "enabled": true,
+        "source_scale": 1.0,
+        "proposed_regions": 0,
+        "candidate_regions": 0,
+        "prefiltered_for_complexity": 0,
+        "evaluated_regions": 0,
+        "parallel_jobs": 0,
+        "accepted_regions": 0,
+        "rejected_for_quality": 0,
+        "rejected_for_complexity": 0,
+        "rejected_for_budget": 0,
+        "baseline_mean_delta_e": 0.0,
+        "refined_mean_delta_e": 0.0,
+        "estimated_global_delta_e_reduction": 0.0,
+        "added_svg_bytes": 0
+      }
+    },
+    {
+      "input": "sample/input/remojii.png",
+      "input_sha256": "da4d7920c85ad3e8d86a3388d5ea7b47245a3a05bda122398c25423744830e87",
+      "output": "sample/output/remojii.svg",
+      "output_sha256": "44fab0a048ed585f57d48076b9188cd6105d2e1af2075a179269c9b0dd083d38",
+      "svg_bytes": 1545578,
+      "comparison": "sample/comparison/remojii.png",
+      "comparison_sha256": "d3f7bb7ba87c4716f7eacd35d035641207d51f778806bf7e8beadabffc9e8926",
+      "processing_dimensions": [
+        1254,
+        1254
+      ],
+      "adaptive_refinement": {
+        "enabled": true,
+        "source_scale": 1.0,
+        "proposed_regions": 0,
+        "candidate_regions": 0,
+        "prefiltered_for_complexity": 0,
+        "evaluated_regions": 0,
+        "parallel_jobs": 0,
+        "accepted_regions": 0,
+        "rejected_for_quality": 0,
+        "rejected_for_complexity": 0,
+        "rejected_for_budget": 0,
+        "baseline_mean_delta_e": 0.0,
+        "refined_mean_delta_e": 0.0,
+        "estimated_global_delta_e_reduction": 0.0,
+        "added_svg_bytes": 0
+      }
+    },
+    {
+      "input": "sample/input/vectorization-stress-still-life.png",
+      "input_sha256": "d40b79c629537827f24e2003c665a6c55f7a3e63f89896e5feaf6da91ba9b623",
+      "output": "sample/output/vectorization-stress-still-life.svg",
+      "output_sha256": "816723dd50cc071f23b6da7d632a14eb14d6c7e5b2abc702ce9caae2d73b7074",
+      "svg_bytes": 33306947,
+      "comparison": "sample/comparison/vectorization-stress-still-life.png",
+      "comparison_sha256": "1a6ebf9017afb167b35b4b20590b11add3c7412ac9f69fc158d36c347939ca03",
+      "processing_dimensions": [
+        1254,
+        1254
+      ],
+      "adaptive_refinement": {
+        "enabled": true,
+        "source_scale": 1.0,
+        "proposed_regions": 0,
+        "candidate_regions": 0,
+        "prefiltered_for_complexity": 0,
+        "evaluated_regions": 0,
+        "parallel_jobs": 0,
+        "accepted_regions": 0,
+        "rejected_for_quality": 0,
+        "rejected_for_complexity": 0,
+        "rejected_for_budget": 0,
+        "baseline_mean_delta_e": 0.0,
+        "refined_mean_delta_e": 0.0,
+        "estimated_global_delta_e_reduction": 0.0,
+        "added_svg_bytes": 0
+      }
+    },
+    {
+      "input": "sample/input/viewport1.jpg",
+      "input_sha256": "f1a817bbedf41a5ece55d4bac54a5d87497d94f5504a0fc391f182640edb6cd9",
+      "output": "sample/output/viewport1.svg",
+      "output_sha256": "280fabc1fc026619841593dfe8acd4e0e036e513fdfbfd38eaca5b52730462ee",
+      "svg_bytes": 7377731,
+      "comparison": "sample/comparison/viewport1.png",
+      "comparison_sha256": "c1885b856bca654aead9728d92447dd06ef86614d2c5bfb46b9e246d11ba719c",
+      "processing_dimensions": [
+        640,
+        426
+      ],
+      "adaptive_refinement": {
+        "enabled": true,
+        "source_scale": 1.0,
+        "proposed_regions": 0,
+        "candidate_regions": 0,
+        "prefiltered_for_complexity": 0,
+        "evaluated_regions": 0,
+        "parallel_jobs": 0,
+        "accepted_regions": 0,
+        "rejected_for_quality": 0,
+        "rejected_for_complexity": 0,
+        "rejected_for_budget": 0,
+        "baseline_mean_delta_e": 0.0,
+        "refined_mean_delta_e": 0.0,
+        "estimated_global_delta_e_reduction": 0.0,
+        "added_svg_bytes": 0
+      }
+    },
+    {
+      "input": "sample/input/viewport2.jpg",
+      "input_sha256": "21484ce6fc82059e1441d57852d27d77c19b7b90d11b885065326338d9ed74c5",
+      "output": "sample/output/viewport2.svg",
+      "output_sha256": "ddd79154c20e7210c18d082513b393ffa5431f919ef5961349619730bae50fc5",
+      "svg_bytes": 34421441,
+      "comparison": "sample/comparison/viewport2.png",
+      "comparison_sha256": "412c77a1c481afea7591206136cafb602a757fee6b926b1e31c9b2dabc573e82",
+      "processing_dimensions": [
+        1600,
+        1067
+      ],
+      "adaptive_refinement": {
+        "enabled": true,
+        "source_scale": 2.67,
+        "proposed_regions": 0,
+        "candidate_regions": 0,
+        "prefiltered_for_complexity": 0,
+        "evaluated_regions": 0,
+        "parallel_jobs": 0,
+        "accepted_regions": 0,
+        "rejected_for_quality": 0,
+        "rejected_for_complexity": 0,
+        "rejected_for_budget": 0,
+        "baseline_mean_delta_e": 4.0178456,
+        "refined_mean_delta_e": 4.0178456,
+        "estimated_global_delta_e_reduction": 0.0,
+        "added_svg_bytes": 0
+      }
+    },
+    {
+      "input": "sample/input/wikipedia_logo_1_0.png",
+      "input_sha256": "bd6be0ef6093fb9acbeadfd08096fa5b8842562e9f384a76e137a51a72d0ec98",
+      "output": "sample/output/wikipedia_logo_1_0.svg",
+      "output_sha256": "7a80dbb1bd63b384cd9a99e874b6176468ee4b256909ea9908282fa6e943b324",
+      "svg_bytes": 2210218,
+      "comparison": "sample/comparison/wikipedia_logo_1_0.png",
+      "comparison_sha256": "6e2d8dd9fb50dde0aec329370e24e7812d531bffd2906cb1130cfe7aacb86bdc",
+      "processing_dimensions": [
+        1058,
+        1058
+      ],
+      "adaptive_refinement": {
+        "enabled": true,
+        "source_scale": 1.0,
+        "proposed_regions": 0,
+        "candidate_regions": 0,
+        "prefiltered_for_complexity": 0,
+        "evaluated_regions": 0,
+        "parallel_jobs": 0,
+        "accepted_regions": 0,
+        "rejected_for_quality": 0,
+        "rejected_for_complexity": 0,
+        "rejected_for_budget": 0,
+        "baseline_mean_delta_e": 0.0,
+        "refined_mean_delta_e": 0.0,
+        "estimated_global_delta_e_reduction": 0.0,
+        "added_svg_bytes": 0
+      }
+    }
+  ]
+}

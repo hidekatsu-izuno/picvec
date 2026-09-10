@@ -300,7 +300,7 @@ struct AdaptiveBoundaryGeometry {
     optimal_polygons: usize,
     continuity_faired_master_ids: HashSet<usize>,
     closed_master_ids: HashSet<usize>,
-    bezier_vertices: HashSet<u64>,
+    closed_vertex_corridors: HashMap<u64, f32>,
     fitted_bezier_contours: usize,
     ellipse_contours: Vec<Vec<Point>>,
     closed_contours: Vec<ClosedContour>,
@@ -2697,51 +2697,72 @@ fn samples_within_corridor(query: &[Point], reference: &[Point], maximum: f32) -
     })
 }
 
+struct SampleIndex {
+    cell: f32,
+    maximum: f32,
+    buckets: HashMap<(i32, i32), Vec<Point>>,
+}
+
+impl SampleIndex {
+    fn new(reference: &[Point], maximum: f32) -> Self {
+        let cell = maximum.max(0.25);
+        let mut buckets = HashMap::<(i32, i32), Vec<Point>>::new();
+        for &point in reference {
+            buckets
+                .entry((
+                    (point.x / cell).floor() as i32,
+                    (point.y / cell).floor() as i32,
+                ))
+                .or_default()
+                .push(point);
+        }
+        Self {
+            cell,
+            maximum,
+            buckets,
+        }
+    }
+
+    fn distances(&self, query: &[Point]) -> Option<(f32, f32)> {
+        if query.is_empty() || self.buckets.is_empty() {
+            return None;
+        }
+        let mut largest = 0.0_f32;
+        let mut total = 0.0_f32;
+        for &point in query {
+            let key = (
+                (point.x / self.cell).floor() as i32,
+                (point.y / self.cell).floor() as i32,
+            );
+            let mut nearest = f32::INFINITY;
+            for dy in -1_i32..=1 {
+                for dx in -1_i32..=1 {
+                    if let Some(values) = self.buckets.get(&(key.0 + dx, key.1 + dy)) {
+                        for &candidate in values {
+                            nearest = nearest.min(
+                                (point.x - candidate.x).powi(2) + (point.y - candidate.y).powi(2),
+                            );
+                        }
+                    }
+                }
+            }
+            let nearest = nearest.sqrt();
+            if nearest > self.maximum {
+                return None;
+            }
+            largest = largest.max(nearest);
+            total += nearest;
+        }
+        Some((largest, total / query.len() as f32))
+    }
+}
+
 fn nearest_sample_distances(
     query: &[Point],
     reference: &[Point],
     maximum: f32,
 ) -> Option<(f32, f32)> {
-    if query.is_empty() || reference.is_empty() {
-        return None;
-    }
-    let cell = maximum.max(0.25);
-    let mut buckets = HashMap::<(i32, i32), Vec<Point>>::new();
-    for &point in reference {
-        buckets
-            .entry((
-                (point.x / cell).floor() as i32,
-                (point.y / cell).floor() as i32,
-            ))
-            .or_default()
-            .push(point);
-    }
-    let mut largest = 0.0_f32;
-    let mut total = 0.0_f32;
-    for &point in query {
-        let key = (
-            (point.x / cell).floor() as i32,
-            (point.y / cell).floor() as i32,
-        );
-        let mut nearest = f32::INFINITY;
-        for dy in -1_i32..=1 {
-            for dx in -1_i32..=1 {
-                if let Some(values) = buckets.get(&(key.0 + dx, key.1 + dy)) {
-                    for &candidate in values {
-                        nearest = nearest
-                            .min((point.x - candidate.x).powi(2) + (point.y - candidate.y).powi(2));
-                    }
-                }
-            }
-        }
-        let nearest = nearest.sqrt();
-        if nearest > maximum {
-            return None;
-        }
-        largest = largest.max(nearest);
-        total += nearest;
-    }
-    Some((largest, total / query.len() as f32))
+    SampleIndex::new(reference, maximum).distances(query)
 }
 
 /// Replace long raster staircases with the simplest source-supported fair
@@ -3709,6 +3730,7 @@ fn least_squares_fairing_shared_boundary(
     split_indices.dedup();
     let allowed_baseline = std::f32::consts::FRAC_1_SQRT_2 + 0.5;
     let allowed_source = std::f32::consts::SQRT_2.max(allowed_baseline);
+    let reference_index = SampleIndex::new(&reference_samples, allowed_baseline);
     let mut best = baseline.to_vec();
     let mut best_error = f32::INFINITY;
     for sigma in [
@@ -3770,7 +3792,7 @@ fn least_squares_fairing_shared_boundary(
                 continue;
             };
             let Some((_, candidate_to_reference)) =
-                nearest_sample_distances(&candidate_samples, &reference_samples, allowed_baseline)
+                reference_index.distances(&candidate_samples)
             else {
                 continue;
             };
@@ -3826,6 +3848,7 @@ fn bounded_fairing_shared_boundary(
     // occupies the adjoining pixel cells. Keep a quarter-pixel sampling
     // margin beyond the cell diagonal for a smooth replacement.
     let allowed_source = (tolerance + 0.75).max(fairing_raster_corridor());
+    let reference_index = SampleIndex::new(&reference_samples, allowed_baseline);
     let mut best = baseline.to_vec();
     let mut best_error = f32::INFINITY;
     for sigma in [
@@ -3863,7 +3886,7 @@ fn bounded_fairing_shared_boundary(
             continue;
         };
         let Some((_, candidate_to_reference)) =
-            nearest_sample_distances(&candidate_samples, &reference_samples, allowed_baseline)
+            reference_index.distances(&candidate_samples)
         else {
             continue;
         };
@@ -5424,6 +5447,38 @@ fn fit_adaptive_boundary_geometry(
             0,
         ));
     }
+    // A visible edge can separate two shades of the same material class.
+    // Keep its high-contrast interfaces connected across low-contrast tonal
+    // subdivisions, instead of pinning the edge at each colour-pair junction.
+    let mut tonal_edges = BTreeMap::<i32, HashSet<EdgeKey>>::new();
+    for (&pair, edges) in pair_edges {
+        if pair.0 < 0 || pair.1 < 0 {
+            continue;
+        }
+        let a = pair.0 as usize;
+        let b = pair.1 as usize;
+        let class = continuity_class_by_label[a];
+        if class == continuity_class_by_label[b]
+            && delta_e_ok(continuity_lab_by_label[a], continuity_lab_by_label[b]) >= 8.0
+        {
+            tonal_edges
+                .entry(class)
+                .or_default()
+                .extend(edges.iter().copied());
+        }
+    }
+    for (class, edges) in tonal_edges {
+        let mut degree = HashMap::<u64, usize>::new();
+        for edge in &edges {
+            *degree.entry(edge.0).or_default() += 1;
+            *degree.entry(edge.1).or_default() += 1;
+        }
+        let junctions = degree
+            .into_iter()
+            .filter_map(|(v, d)| (d != 2).then_some(v))
+            .collect();
+        jobs.push((RegionPair::new(class, -3), edges, Some(junctions), 0));
+    }
     // A material's boundary is one contour even when the material on its
     // other side changes. Pairwise tracks alone stop at every such T junction.
     // Trace each face against its complement, keeping only genuine graph
@@ -5944,7 +5999,7 @@ fn fit_adaptive_boundary_geometry(
     // contour and both incident faces reuse the same ordered master slices.
     ellipse_tracks.sort_by_key(|track| std::cmp::Reverse(track.len()));
     let mut ellipse_vertices = HashSet::new();
-    let mut bezier_vertices = HashSet::new();
+    let mut closed_vertex_corridors = HashMap::new();
     let mut fitted_bezier_contours = 0;
     for track in ellipse_tracks {
         if track.iter().any(|v| {
@@ -5961,7 +6016,13 @@ fn fit_adaptive_boundary_geometry(
         // An ellipse must not lose to a less constrained cubic solely because
         // it was tested with the tighter budget used for open edge fitting.
         let corridor = closed_contour_corridor(&source);
-        let fitted = geometry_ellipse::fit_closed(&source, corridor);
+        let cap = geometry_primitives::fit_closed_cap(&source, 1.25);
+        let is_cap = cap.is_some();
+        let fitted = if cap.is_none() {
+            geometry_ellipse::fit_closed(&source, corridor)
+        } else {
+            None
+        };
         #[cfg(feature = "diagnostics")]
         if continuity_diagnostics_enabled {
             continuity_diagnostics.push(serde_json::json!({
@@ -5972,16 +6033,20 @@ fn fit_adaptive_boundary_geometry(
             }));
         }
         let is_ellipse = fitted.is_some();
-        let corridor = if is_ellipse {
+        let corridor = if is_cap {
+            1.25
+        } else if is_ellipse {
             corridor
         } else {
             geometry_bezier::CLOSED_CORRIDOR
         };
-        let fitted = fitted.or_else(|| geometry_bezier::fit_closed(&source, corridor));
+        let fitted = cap
+            .or(fitted)
+            .or_else(|| geometry_bezier::fit_closed(&source, corridor));
         let Some(curves) = fitted else {
             continue;
         };
-        if !is_ellipse {
+        if !is_ellipse && !is_cap {
             // Count geometric masters, not their per-face slices. A whole
             // loop must actually reduce the existing representation.
             let masters: HashSet<_> = track
@@ -6034,9 +6099,9 @@ fn fit_adaptive_boundary_geometry(
             ellipse_contours.push(sample_curve_sequence(&curves, 0.5));
         } else {
             fitted_bezier_contours += 1;
-            bezier_vertices.extend(track.iter().copied());
         }
         for (&vertex, &point) in track.iter().zip(&mapping.positions) {
+            closed_vertex_corridors.insert(vertex, corridor);
             proposals.entry(vertex).or_default().push((weight, point));
             validated_proposals.insert((vertex, weight));
             ellipse_vertices.insert(vertex);
@@ -6135,7 +6200,7 @@ fn fit_adaptive_boundary_geometry(
         optimal_polygons,
         continuity_faired_master_ids,
         closed_master_ids,
-        bezier_vertices,
+        closed_vertex_corridors,
         fitted_bezier_contours,
         ellipse_contours,
         closed_contours,
@@ -6348,6 +6413,80 @@ fn shared_chain_diagnostic(
     })
 }
 
+// Tonal quantization contours may wander within a smooth source gradient.
+// Only move such a contour when both directions of the correspondence stay
+// within a perceptually small source-colour change, not just a spatial budget.
+fn source_supports_shading_fit(
+    image: &Raster,
+    before: &[CurveSegment],
+    after: &[CurveSegment],
+) -> bool {
+    let before = sample_curve_sequence(before, 1.0);
+    let after = sample_curve_sequence(after, 1.0);
+    let lab = |p: Point| crate::color::rgb_to_oklab(image.sample_bilinear(p.x - 0.5, p.y - 0.5));
+    let supported = [(&before, &after), (&after, &before)]
+        .into_iter()
+        .all(|(from, to)| {
+            from.iter().all(|&p| {
+                let nearest = to[nearest_point(to, p).0];
+                // Keep the usual one-pixel corridor at fixed junctions.
+                // Elsewhere even a subpixel move can break a thin grid line.
+                let fixed_junction =
+                    p.distance(before[0]) <= 2.0 || p.distance(*before.last().unwrap()) <= 2.0;
+                (fixed_junction && p.distance(nearest) <= 1.0)
+                    || delta_e_ok(lab(p), lab(nearest)) <= 1.5
+            })
+        });
+    supported
+}
+
+// A long tonal boundary can turn at its ends while its interior remains a
+// simple curve. Fit bounded intervals as well as the whole contour; preserve
+// every retained join's position and tangent and validate colour locally.
+fn fair_shading_contour(
+    image: &Raster,
+    source: &[Point],
+    baseline: &[CurveSegment],
+) -> Vec<CurveSegment> {
+    let mut knots = vec![0];
+    for curve in baseline.iter().take(baseline.len() - 1) {
+        let start = *knots.last().unwrap();
+        knots.push(start + nearest_point(&source[start..], curve.end()).0);
+    }
+    knots.push(source.len() - 1);
+    let mut result = Vec::new();
+    let mut index = 0;
+    while index < baseline.len() {
+        let mut accepted = None;
+        for count in (2..=(baseline.len() - index).min(12)).rev() {
+            let first = knots[index];
+            let last = knots[index + count];
+            if last <= first {
+                continue;
+            }
+            let pieces = &baseline[index..index + count];
+            let mut observations = source[first..=last].to_vec();
+            observations[0] = pieces[0].start();
+            *observations.last_mut().unwrap() = pieces.last().unwrap().end();
+            if let Some(candidate) = geometry_bezier::fit_shading(&observations, pieces, 6.0) {
+                if candidate.len() < count && source_supports_shading_fit(image, pieces, &candidate)
+                {
+                    accepted = Some((count, candidate));
+                    break;
+                }
+            }
+        }
+        if let Some((count, candidate)) = accepted {
+            result.extend(candidate);
+            index += count;
+        } else {
+            result.push(baseline[index]);
+            index += 1;
+        }
+    }
+    result
+}
+
 fn build_shared_chains(
     segmentation: &Segmentation,
     source: Option<&Raster>,
@@ -6369,6 +6508,7 @@ fn build_shared_chains(
         &junctions,
         pair_edges,
     );
+    let shading_source = source;
     let positions = adaptive.vertex_positions.clone();
     let mut chains = Vec::<SharedChain>::new();
     let mut lookup = HashMap::<EdgeKey, (usize, u64, u64)>::new();
@@ -6497,9 +6637,7 @@ fn build_shared_chains(
             // original pixel staircase along the neighbouring colour boundary.
             // Include incident internal chains: their shared endpoint moves
             // with the loop even when they contain no loop segment themselves.
-            let source_corridor = if track.iter().any(|v| adaptive.bezier_vertices.contains(v)) {
-                geometry_bezier::CLOSED_CORRIDOR
-            } else if fair_continuity_edges > 0
+            let mut source_corridor = if fair_continuity_edges > 0
                 || raw[0].distance(source[0]) > 1.0
                 || raw[raw.len() - 1].distance(source[source.len() - 1]) > 1.0
             {
@@ -6507,6 +6645,15 @@ fn build_shared_chains(
             } else {
                 1.0
             };
+            // Ellipse and cubic loop slices inherit the budget under which
+            // their complete master was accepted. Rechecking an ellipse with
+            // the tighter open-chain budget replaces valid slices by raster
+            // polygons while retaining moved endpoints, producing notches.
+            for vertex in &track {
+                if let Some(&corridor) = adaptive.closed_vertex_corridors.get(vertex) {
+                    source_corridor = source_corridor.max(corridor);
+                }
+            }
             if !raster_boundary_supported(
                 &source,
                 &sample_curve_sequence(&segments, 0.25),
@@ -6849,6 +6996,18 @@ fn build_shared_chains(
             }
             if !has_closed_master {
                 segments = geometry_primitives::regularize(&source, &segments, 1.0, None, None);
+            }
+            if !has_closed_master && !closed && segments.len() > 2 && pair.0 >= 0 && pair.1 >= 0 {
+                let first = &segmentation.regions[pair.0 as usize];
+                let second = &segmentation.regions[pair.1 as usize];
+                let broad = |region: &crate::segment::RegionStats| {
+                    region.max_x - region.min_x >= 5 && region.max_y - region.min_y >= 5
+                };
+                if broad(first) && broad(second) && delta_e_ok(first.mean_lab, second.mean_lab) <= 4.6 {
+                    if let Some(image) = shading_source {
+                        segments = fair_shading_contour(image, &source, &segments);
+                    }
+                }
             }
             let discontinuous = segments.windows(2).any(|pair| {
                 pair[0].end().distance(pair[1].start()) > 1e-3
@@ -7788,6 +7947,132 @@ mod tests {
     use super::*;
     use crate::color::rgb_to_oklab;
     use crate::segment::{RegionStats, Segmentation, SegmentationSummary};
+
+    #[test]
+    fn a_highlight_edge_stays_continuous_inside_one_material_class() {
+        let width = 64;
+        let colours = [[0.60; 3], [0.80; 3], [0.82; 3], [0.70; 3]];
+        let labels: Vec<u32> = (0..width * width)
+            .map(|i| {
+                let (x, y) = (i % width, i / width);
+                if y >= 54 {
+                    3
+                } else if x <= y + 4 {
+                    0
+                } else {
+                    1 + (y / 10 % 2) as u32
+                }
+            })
+            .collect();
+        let raster = Raster::new(
+            width,
+            width,
+            labels.iter().map(|&l| colours[l as usize]).collect(),
+        );
+        let segmentation = Segmentation {
+            width,
+            height: width,
+            labels: labels.clone(),
+            paint_keys: (0..4).collect(),
+            paint_samples: vec![true; width * width],
+            canonical: raster,
+            regions: colours
+                .iter()
+                .enumerate()
+                .map(|(id, &colour)| {
+                    let pixels: Vec<_> = labels
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, &l)| (l as usize == id).then_some(i))
+                        .collect();
+                    RegionStats {
+                        id: id as u32,
+                        area: pixels.len(),
+                        min_x: pixels.iter().map(|i| i % width).min().unwrap(),
+                        min_y: pixels.iter().map(|i| i / width).min().unwrap(),
+                        max_x: pixels.iter().map(|i| i % width + 1).max().unwrap(),
+                        max_y: pixels.iter().map(|i| i / width + 1).max().unwrap(),
+                        mean_rgb: colour,
+                        mean_lab: rgb_to_oklab(colour),
+                    }
+                })
+                .collect(),
+            summary: SegmentationSummary::default(),
+        };
+        let stride = width + 1;
+        let (edges, _) = region_boundary_edges(&segmentation, stride, None);
+        let pairs = pair_boundary_edges(&segmentation, stride, None);
+        let (chains, lookup, ..) = build_shared_chains(&segmentation, None, stride, &edges, &pairs);
+        let mut checked = HashSet::new();
+        let mut points = 0;
+        let mut maximum_error = 0.0_f32;
+        for (pair, edges) in &pairs {
+            if pair.0 != 0 || !(1..=2).contains(&pair.1) {
+                continue;
+            }
+            for edge in edges {
+                let chain = lookup[edge].0;
+                if !checked.insert(chain) {
+                    continue;
+                }
+                for p in sample_curve_sequence(&chains[chain].segments, 0.5) {
+                    if (8.0..48.0).contains(&p.y) {
+                        maximum_error = maximum_error.max((p.x - p.y - 4.5).abs());
+                        points += 1;
+                    }
+                }
+            }
+        }
+        assert!(points > 60);
+        assert!(
+            maximum_error < 0.3,
+            "junction displacement: {maximum_error}"
+        );
+    }
+
+    #[test]
+    fn shading_fairing_requires_source_colour_support() {
+        let points: Vec<_> = (4..60)
+            .map(|x| Point {
+                x: x as f32,
+                y: 24.0 + 2.0 * (x as f32 * 0.3).sin(),
+            })
+            .collect();
+        let before: Vec<_> = points
+            .windows(2)
+            .map(|p| CurveSegment::Line {
+                start: p[0],
+                end: p[1],
+            })
+            .collect();
+        let after = [CurveSegment::Line {
+            start: points[0],
+            end: *points.last().unwrap(),
+        }];
+        let smooth = Raster::new(
+            64,
+            48,
+            (0..64 * 48)
+                .map(|i| [0.3 + (i / 64) as f32 * 0.001; 3])
+                .collect(),
+        );
+        assert!(source_supports_shading_fit(&smooth, &before, &after));
+        let hard = Raster::new(
+            64,
+            48,
+            (0..64 * 48)
+                .map(|i| {
+                    let border = 24.0 + 2.0 * (((i % 64) as f32 + 0.5) * 0.3).sin();
+                    if (i / 64) as f32 + 0.5 < border {
+                        [0.1; 3]
+                    } else {
+                        [0.9; 3]
+                    }
+                })
+                .collect(),
+        );
+        assert!(!source_supports_shading_fit(&hard, &before, &after));
+    }
 
     #[test]
     fn offset_band_maps_the_displacement_at_the_window_corner() {
@@ -8731,6 +9016,123 @@ mod tests {
         let (_, summary) = build(&segmentation);
         assert_eq!(summary.shared_loop_fallbacks, 0);
         assert_eq!(summary.shared_curve_downgrades, 0);
+    }
+
+    #[test]
+    fn remojii_chain_cap_preserves_the_cut_across_paint_pairs() {
+        let coordinates: Vec<[f32; 2]> =
+            serde_json::from_str(include_str!("test-data/remojii-chain-contour.json")).unwrap();
+        let source: Vec<_> = coordinates.iter().map(|&[x, y]| Point { x, y }).collect();
+        let corridor = closed_contour_corridor(&source);
+        let ellipse = geometry_primitives::fit_closed_cap(&source, 1.25)
+            .expect("cut rim must have a cap model");
+        assert!(corridor > fairing_raster_corridor());
+        assert!(ellipse
+            .iter()
+            .any(|c| matches!(c, CurveSegment::Line { .. })));
+        assert!(ellipse
+            .iter()
+            .any(|c| matches!(c, CurveSegment::Cubic { .. })));
+        let width = 60;
+        let height = 52;
+        let colours = [[0.02; 3], [0.8, 0.5, 0.12], [0.025; 3]];
+        let labels: Vec<u32> = (0..width * height)
+            .map(|i| {
+                let x = (i % width) as f32 + 0.5;
+                let y = (i / width) as f32 + 0.5;
+                let inside = source
+                    .windows(2)
+                    .filter(|edge| {
+                        let [a, b] = [edge[0], edge[1]];
+                        (a.y > y) != (b.y > y) && x < (b.x - a.x) * (y - a.y) / (b.y - a.y) + a.x
+                    })
+                    .count()
+                    % 2
+                    == 1;
+                if inside {
+                    1
+                } else if y > 33.0 {
+                    2
+                } else {
+                    0
+                }
+            })
+            .collect();
+        let regions = colours
+            .iter()
+            .enumerate()
+            .map(|(label, &rgb)| {
+                let pixels: Vec<_> = labels
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, &v)| (v == label as u32).then_some(i))
+                    .collect();
+                RegionStats {
+                    id: label as u32,
+                    area: pixels.len(),
+                    min_x: pixels.iter().map(|i| i % width).min().unwrap(),
+                    min_y: pixels.iter().map(|i| i / width).min().unwrap(),
+                    max_x: pixels.iter().map(|i| i % width + 1).max().unwrap(),
+                    max_y: pixels.iter().map(|i| i / width + 1).max().unwrap(),
+                    mean_rgb: rgb,
+                    mean_lab: rgb_to_oklab(rgb),
+                }
+            })
+            .collect();
+        let segmentation = Segmentation {
+            width,
+            height,
+            canonical: Raster::new(
+                width,
+                height,
+                labels.iter().map(|&v| colours[v as usize]).collect(),
+            ),
+            labels,
+            paint_keys: vec![0, 1, 2],
+            paint_samples: vec![true; width * height],
+            regions,
+            summary: SegmentationSummary::default(),
+        };
+        let stride = width + 1;
+        let (edges, _) = region_boundary_edges(&segmentation, stride, None);
+        let pairs = pair_boundary_edges(&segmentation, stride, None);
+        let (_, _, strands, junctions) = boundary_topology(stride, &edges, &pairs);
+        let adaptive = fit_adaptive_boundary_geometry(
+            &segmentation,
+            None,
+            stride,
+            &strands,
+            &junctions,
+            &pairs,
+        );
+        let master = adaptive
+            .closed_contours
+            .iter()
+            .find(|c| !c.is_ellipse)
+            .unwrap();
+        let reference = sample_curve_sequence(&master.curves, 0.1);
+        let (chains, lookup, ..) = build_shared_chains(&segmentation, None, stride, &edges, &pairs);
+        let mut checked = HashSet::new();
+        for (pair, edges) in &pairs {
+            if pair.0 != 1 && pair.1 != 1 {
+                continue;
+            }
+            for edge in edges {
+                let id = lookup[edge].0;
+                if !checked.insert(id) {
+                    continue;
+                }
+                for point in sample_curve_sequence(&chains[id].segments, 0.25) {
+                    let distance = reference
+                        .windows(2)
+                        .map(|edge| point_segment_distance(point, edge[0], edge[1]))
+                        .fold(f32::INFINITY, f32::min);
+                    assert!(distance < 0.01,
+                        "accepted ellipse slice reverted at a paint junction: {point:?}, error {distance}");
+                }
+            }
+        }
+        assert!(checked.len() >= 2);
     }
 
     #[test]

@@ -203,6 +203,82 @@ fn circle(points: &[Point], tolerance: f32) -> Option<Vec<CurveSegment>> {
     Some(curves)
 }
 
+/// A circular cap has a supported straight cut as well as a curved rim.
+/// Prefer this mixed model to rounding the cut into a complete ellipse.
+pub(super) fn fit_closed_cap(source: &[Point], tolerance: f32) -> Option<Vec<CurveSegment>> {
+    if source.first() != source.last() || source.len() < 40 || source.len() > 512 {
+        return None;
+    }
+    let mut points = resample_open_polyline(source, 1.0);
+    points.pop();
+    let n = points.len();
+    let minimum = 16.max(n / 5);
+    let mut candidates = Vec::new();
+    for first in (0..n).step_by(2) {
+        for length in (minimum..=(n * 2 / 5)).rev() {
+            let run: Vec<_> = (0..=length).map(|j| points[(first + j) % n]).collect();
+            if let Some(line) = line(&run, 1.0) {
+                candidates.push((length, first, line[0]));
+                break;
+            }
+        }
+    }
+    candidates.sort_by_key(|&(length, first, _)| (std::cmp::Reverse(length), first));
+    for (length, first, cut) in candidates.into_iter().take(12) {
+        let arc: Vec<_> = (length..=n).map(|j| points[(first + j) % n]).collect();
+        let mut observations = arc.clone();
+        for i in 1..arc.len() - 1 {
+            let support = 2.min(i).min(arc.len() - 1 - i);
+            observations[i] = Point {
+                x: arc[i - support..=i + support]
+                    .iter()
+                    .map(|p| p.x)
+                    .sum::<f32>()
+                    / (2 * support + 1) as f32,
+                y: arc[i - support..=i + support]
+                    .iter()
+                    .map(|p| p.y)
+                    .sum::<f32>()
+                    / (2 * support + 1) as f32,
+            };
+        }
+        let Some(mut curves) = circle(&observations, tolerance.min(1.25))
+            .or_else(|| super::geometry_ellipse::fit_open(&observations, tolerance.min(1.25)))
+        else {
+            continue;
+        };
+        if !super::boundary_corridor_supported(&arc, &curves, tolerance.min(1.25)) {
+            continue;
+        }
+        curves.push(cut);
+        // Put the storage seam back near the first raster vertex. It is not
+        // one of the two physical corners where the rim meets the cut.
+        let (index, step, _) = curves
+            .iter()
+            .enumerate()
+            .flat_map(|(i, &curve)| {
+                (0..=256).map(move |j| {
+                    (
+                        i,
+                        j,
+                        super::cubic_point(curve, j as f32 / 256.0).distance(source[0]),
+                    )
+                })
+            })
+            .min_by(|a, b| a.2.total_cmp(&b.2))?;
+        let t = step as f64 / 256.0;
+        let mut rotated = vec![super::curve_interval(curves[index], t, 1.0)];
+        rotated.extend(curves[index + 1..].iter().copied());
+        rotated.extend(curves[..index].iter().copied());
+        rotated.push(super::curve_interval(curves[index], 0.0, t));
+        rotated.retain(|c| c.start().distance(c.end()) > 1e-5);
+        if super::boundary_corridor_supported(source, &rotated, tolerance.min(1.25)) {
+            return Some(rotated);
+        }
+    }
+    None
+}
+
 pub(super) fn fit(
     source: &[Point],
     tolerance: f32,
