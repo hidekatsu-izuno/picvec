@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
+use rayon::prelude::*;
 use serde::Serialize;
 
 use crate::color::{delta_e_ok, oklab_to_rgb, oklab_values_to_rgb, rgb_to_oklab, Oklab};
@@ -8,6 +9,10 @@ use crate::edge::{oklab_pixels, EdgeRoles};
 use crate::hierarchy::uniform_cells;
 use crate::raster::{percentile, Raster};
 use crate::union_find::UnionFind;
+
+#[path = "segment_micro.rs"]
+mod micro;
+pub(crate) use micro::absorb_micro_regions;
 
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct SegmentationSummary {
@@ -22,6 +27,8 @@ pub struct SegmentationSummary {
     pub regularized_regions: usize,
     pub merged_regions: usize,
     pub forced_small_region_merges: usize,
+    pub micro_region_merges: usize,
+    pub micro_pixels_reassigned: usize,
     pub compatible_region_merges: usize,
     pub paint_aware_region_merge_proposals: usize,
     pub paint_aware_region_merges: usize,
@@ -762,6 +769,7 @@ fn merge_small_components(
     local_area: &[usize],
     maximum_area: usize,
     config: &Config,
+    protected_lines: &[bool],
     #[cfg(test)] dense_reference: bool,
 ) -> (usize, usize, usize) {
     let mut reassigned = 0;
@@ -903,7 +911,16 @@ fn merge_small_components(
                 && core
                 && best.1 > 0.5 * threshold
                 && residual > (0.5 * threshold).max(1.5);
-            if (component.len() >= 3 && extremum && best.1 > threshold)
+            // A neutral outline against saturated paint need not be a
+            // lightness extremum. Keep source-confirmed fragments that cannot
+            // be explained by mixing their neighbours, even below three pixels.
+            let supported_ink = component
+                .iter()
+                .any(|&i| protected_lines.get(i) == Some(&true))
+                && best.1 > threshold
+                && residual > (0.75 * threshold).max(2.5);
+            if supported_ink
+                || (component.len() >= 3 && extremum && best.1 > threshold)
                 || independent
                 || local_material
             {
@@ -2901,6 +2918,15 @@ fn partition_canonical(quantized: &Raster, labels: &[u32], regions: &[RegionStat
 /// Absolute Oklab histogram quantization without transitive spatial chaining.
 /// Only equal-palette four-connected samples become one geometry owner.
 pub fn segment(image: &Raster, roles: &EdgeRoles, config: &Config) -> Segmentation {
+    segment_with_paint_owned_lines(image, roles, config, &[])
+}
+
+pub(crate) fn segment_with_paint_owned_lines(
+    image: &Raster,
+    roles: &EdgeRoles,
+    config: &Config,
+    protected_lines: &[bool],
+) -> Segmentation {
     let segment_started = std::time::Instant::now();
     let mut substage_started = segment_started;
     let source_lab = oklab_pixels(image);
@@ -2957,6 +2983,7 @@ pub fn segment(image: &Raster, roles: &EdgeRoles, config: &Config) -> Segmentati
         &local_area,
         maximum_area,
         config,
+        protected_lines,
         #[cfg(test)]
         false,
     );
@@ -3041,6 +3068,8 @@ pub fn segment(image: &Raster, roles: &EdgeRoles, config: &Config) -> Segmentati
             regularized_regions: count,
             merged_regions: count,
             forced_small_region_merges: reassigned,
+            micro_region_merges: 0,
+            micro_pixels_reassigned: 0,
             compatible_region_merges: merged_components,
             paint_aware_region_merge_proposals: 0,
             paint_aware_region_merges: 0,
@@ -3413,6 +3442,37 @@ pub(crate) fn split_adaptive_paint_patches_with_protected(
         });
         let _ = std::fs::write(path, serde_json::to_vec_pretty(&value).unwrap_or_default());
     }
+    // A local shadow can live inside one quantizer face without producing a
+    // large tone difference at its boundary. Test that face's source field
+    // directly rather than relying exclusively on neighbouring paint seams.
+    let unresolved: Vec<bool> = pixels
+        .par_iter()
+        .enumerate()
+        .map(|(label, indices)| {
+            let region = &segmentation.regions[label];
+            !protected.get(label).copied().unwrap_or(false)
+                && indices.len() >= 256
+                && indices.len() < segmentation.labels.len() / 4
+                && (region.max_x - region.min_x).max(region.max_y - region.min_y) >= 64
+                && crate::gradient::has_unresolved_local_shading(image, indices)
+        })
+        .collect();
+    for (label, &needs_local_fit) in unresolved.iter().enumerate() {
+        if needs_local_fit {
+            candidates.insert(label);
+        }
+    }
+    #[cfg(feature = "diagnostics")]
+    if let Ok(prefix) = std::env::var("PICVEC_PIPELINE_DIAGNOSTICS") {
+        let rows: Vec<_> = unresolved.iter().enumerate().filter(|(_, yes)| **yes).map(|(label, _)| {
+            let r = &segmentation.regions[label];
+            serde_json::json!({"label": label, "area": r.area, "bounds": [r.min_x, r.min_y, r.max_x, r.max_y]})
+        }).collect();
+        let _ = std::fs::write(
+            format!("{prefix}-unresolved-shading.json"),
+            serde_json::to_vec(&rows).unwrap(),
+        );
+    }
     let candidate_count = candidates.len();
     // A fifth of the canvas can still span several differently oriented
     // highlights. Limit each fit's reach while the shared paint key below
@@ -3461,7 +3521,12 @@ pub(crate) fn split_adaptive_paint_patches_with_protected(
             let y_span = maximum_y - minimum_y + 1;
             let split_x = x_span >= y_span;
             let span = x_span.max(y_span);
-            let part_count = span.div_ceil(patch_span).clamp(1, 8);
+            let local_span = if unresolved[label] {
+                patch_span.min(32)
+            } else {
+                patch_span
+            };
+            let part_count = span.div_ceil(local_span).clamp(1, 8);
             if part_count > 1 {
                 let mut axis: Vec<usize> = indices
                     .iter()
@@ -4551,8 +4616,82 @@ pub fn region_mean_raster(image: &Raster, segmentation: &Segmentation) -> Raster
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn neutral_outline_against_blue_paint_is_not_a_small_colour_island() {
+        let image = image::load_from_memory(include_bytes!("test-data/cliparts-woman-outline.png"))
+            .unwrap()
+            .to_rgb8();
+        let source = Raster::new(
+            image.width() as usize,
+            image.height() as usize,
+            image
+                .pixels()
+                .map(|p| p.0.map(|v| v as f32 / 255.0))
+                .collect(),
+        );
+        let roles = crate::edge::classify(&source);
+        let partition = segment_with_paint_owned_lines(
+            &source,
+            &roles,
+            &Config::default(),
+            &roles.dark_boundary,
+        );
+        for (x, y) in [(62, 20), (37, 25)] {
+            let rgb = partition.canonical.get(x, y);
+            assert!(
+                rgb[2] < 0.30 && (rgb[2] - rgb[0]).abs() < 0.12,
+                "neutral outline was absorbed into blue paint at {x},{y}: {rgb:?}"
+            );
+        }
+    }
     use super::*;
     use crate::edge::classify;
+
+    #[test]
+    fn car_bumper_shadow_is_refined_without_requiring_a_neighbouring_tone_seam() {
+        // Native underpaint/ownership crop at (104,800), keeping the original
+        // alignment of the eight-pixel source-validation cells.
+        let image = image::load_from_memory(include_bytes!("test-data/car-bumper-shadow.png"))
+            .unwrap()
+            .to_rgb8();
+        let source = Raster::new(
+            208,
+            80,
+            image
+                .pixels()
+                .map(|p| p.0.map(|v| v as f32 / 255.0))
+                .collect(),
+        );
+        let labels: Vec<_> = include_bytes!("test-data/car-bumper-shadow.labels")
+            .iter()
+            .map(|&v| v as u32)
+            .collect();
+        let pixels: Vec<_> = labels
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &label)| (label == 1).then_some(i))
+            .collect();
+        assert!(crate::gradient::has_unresolved_local_shading(
+            &source, &pixels
+        ));
+        let mut segmentation = Segmentation {
+            width: 208,
+            height: 80,
+            regions: region_stats(&source, &labels, 2),
+            labels,
+            paint_keys: vec![0, 1],
+            paint_samples: vec![true; 208 * 80],
+            canonical: source.clone(),
+            summary: SegmentationSummary::default(),
+        };
+        split_adaptive_paint_patches(&source, &source, &mut segmentation);
+        let owners: HashSet<_> = pixels.iter().map(|&i| segmentation.labels[i]).collect();
+        assert!((2..=8).contains(&owners.len()), "shadow owners: {owners:?}");
+        assert!(owners
+            .iter()
+            .all(|&owner| segmentation.paint_keys[owner as usize] == 1));
+    }
 
     #[test]
     fn ambiguous_headlight_coverage_does_not_become_dark_ink() {
@@ -4675,6 +4814,7 @@ mod tests {
                     &[8; 49],
                     8,
                     &config,
+                    &[],
                     false,
                 );
                 let middle = palette[labels[24] as usize].l;
@@ -4821,6 +4961,7 @@ mod tests {
                 &local_area,
                 12,
                 &config,
+                &[],
                 true,
             );
             let b = merge_small_components(
@@ -4832,6 +4973,7 @@ mod tests {
                 &local_area,
                 12,
                 &config,
+                &[],
                 false,
             );
             assert_eq!(a, b, "seed={seed}");

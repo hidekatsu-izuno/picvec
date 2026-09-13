@@ -16,12 +16,10 @@ use crate::chroma::{self, AlphaMatte, AlphaTransparencySummary, ChromaKeySummary
 use crate::color::{rgb_to_oklab, Oklab};
 use crate::config::Config;
 use crate::edge::{classify, dilate, dilate_square, perceptual_smooth, EdgeSummary};
-use crate::geometry::{
-    build_with_source as build_geometry, fitted_alpha_contour_path_data, GeometrySummary,
-};
+use crate::geometry::GeometrySummary;
 use crate::gradient::{
-    fit_all_without_topology, merge_partition, merge_source_supported_paints_with_evidence, refresh_summary,
-    GradientSummary, Paint,
+    fit_all_without_topology, merge_partition, merge_source_supported_paints_with_evidence,
+    refresh_summary, GradientSummary, Paint,
 };
 use crate::hierarchy::{HierarchicalTopology, HierarchicalTopologySummary};
 use crate::metrics::QualityMetrics;
@@ -29,12 +27,14 @@ use crate::optimize::{summarize as optimization_summary, OptimizationSummary};
 use crate::ownership::{resolve as resolve_boundary_ownership, BoundaryOwnershipSummary};
 use crate::raster::{Raster, RasterSource, SourceRaster};
 use crate::segment::{
-    refine_thin_paint_ownership, regularize_boundaries, replace_final_exact_paint_labels, segment,
-    split_partition_by_values, Segmentation, SegmentationSummary,
+    refine_thin_paint_ownership, regularize_boundaries, replace_final_exact_paint_labels,
+    Segmentation, SegmentationSummary,
 };
-use crate::structural::{analyse as analyse_structural, StructuralInk, StructuralSummary};
+use crate::structural::{
+    analyse_with_protection as analyse_structural, StructuralInk, StructuralSummary,
+};
 use crate::svg::{
-    serialize_filtered_with_alpha_cached as serialize_svg, AlphaMask, AlphaMaskLayer, GeometryCache, SvgSummary,
+    serialize_filtered_with_alpha_cached as serialize_svg, GeometryCache, SvgSummary,
 };
 use crate::union_find::UnionFind;
 use crate::{Error, Result};
@@ -74,6 +74,7 @@ pub struct Summary {
     pub segmentation: SegmentationSummary,
     pub structural: StructuralSummary,
     pub ownership: BoundaryOwnershipSummary,
+    pub paint_order: crate::paint_order::Summary,
     pub gradients: GradientSummary,
     pub geometry: GeometrySummary,
     pub optimization: OptimizationSummary,
@@ -132,6 +133,10 @@ fn merge_exact_final_paints(
     if count < 2 || paints.len() != count {
         return 0;
     }
+    // Decide equivalence in the representation we will actually serialize.
+    // Otherwise sub-byte fit noise creates separate contours and seam strokes
+    // even though both faces have exactly the same SVG paint.
+    let identities: Vec<_> = paints.iter().map(crate::svg::appearance_key).collect();
     let mut owners = UnionFind::new(count);
     let mut accepted = 0_usize;
     for y in 0..segmentation.height {
@@ -146,7 +151,12 @@ fn merge_exact_final_paints(
             .flatten()
             {
                 let following = segmentation.labels[neighbour] as usize;
-                if current == following || paints[current] != paints[following] {
+                if current == following
+                    || !(paints[current] == paints[following]
+                        || identities[current]
+                            .as_ref()
+                            .is_some_and(|key| Some(key) == identities[following].as_ref()))
+                {
                     continue;
                 }
                 let first = owners.find(current);
@@ -182,281 +192,6 @@ fn merge_exact_final_paints(
     *paints = merged_paints;
     accepted
 }
-
-fn build_gradient_alpha_mask(matte: &AlphaMatte, levels: &[u8]) -> Option<AlphaMask> {
-    let w = matte.width;
-    let h = matte.height;
-    let durable = (0..levels.len())
-        .map(|i| {
-            let x = i % w;
-            let y = i / w;
-            let alpha = matte.get(i);
-            x > 0
-                && x + 1 < w
-                && y > 0
-                && y + 1 < h
-                && alpha > 0.0
-                && alpha < 254.5 / 255.0
-                && [i - 1, i + 1, i - w, i + w].iter().all(|&j| {
-                    let neighbour = matte.get(j);
-                    neighbour > 0.0
-                        && neighbour < 254.5 / 255.0
-                        && (alpha - neighbour).abs() <= 8.0 / 255.0
-                })
-        })
-        .collect::<Vec<_>>();
-    let mut histogram = [0_usize; 256];
-    for (i, &yes) in durable.iter().enumerate() {
-        if yes {
-            histogram[(matte.get(i) * 255.0).round() as usize] += 1;
-        }
-    }
-    if histogram.iter().filter(|&&n| n >= 8).count() < 12 {
-        return None;
-    }
-    // The upper quantizer bin also contains authored alpha ramps. Separate
-    // exact opacity from that bin instead of turning 0.84..1.0 into opaque ink.
-    let levels = levels
-        .iter()
-        .enumerate()
-        .map(|(i, &level)| {
-            if level == 0 && durable[i] {
-                5
-            } else if level == 3
-                && (matte.get(i) >= 254.5 / 255.0
-                    || (matte.get(i) * 3.0).round() as u8 != level
-                    || (!durable[i]
-                        && [
-                            i.checked_sub(1).filter(|_| !i.is_multiple_of(w)),
-                            (i % w + 1 < w).then_some(i + 1),
-                            i.checked_sub(w),
-                            (i + w < levels.len()).then_some(i + w),
-                        ]
-                        .into_iter()
-                        .flatten()
-                        .any(|j| matte.get(j) >= 254.5 / 255.0)))
-            {
-                4
-            } else {
-                level
-            }
-        })
-        .collect::<Vec<_>>();
-    let raster = Raster::new(w, h, (0..levels.len()).map(|i| [matte.get(i); 3]).collect());
-    let mut seen = vec![false; levels.len()];
-    let mut layers = Vec::new();
-    for start in 0..levels.len() {
-        if seen[start] || levels[start] == 0 {
-            continue;
-        }
-        seen[start] = true;
-        let level = levels[start];
-        let mut pixels = vec![start];
-        let mut head = 0;
-        while head < pixels.len() {
-            let i = pixels[head];
-            head += 1;
-            let x = i % w;
-            let y = i / w;
-            for j in [
-                if x > 0 { i - 1 } else { i },
-                if x + 1 < w { i + 1 } else { i },
-                if y > 0 { i - w } else { i },
-                if y + 1 < h { i + w } else { i },
-            ] {
-                if !seen[j] && levels[j] == level {
-                    seen[j] = true;
-                    pixels.push(j);
-                }
-            }
-        }
-        let min_x = pixels.iter().map(|i| i % w).min().unwrap();
-        let max_x = pixels.iter().map(|i| i % w).max().unwrap();
-        let min_y = pixels.iter().map(|i| i / w).min().unwrap();
-        let max_y = pixels.iter().map(|i| i / w).max().unwrap();
-        let cw = max_x - min_x + 3;
-        let ch = max_y - min_y + 3;
-        let mut mask = vec![0; cw * ch];
-        for &i in &pixels {
-            mask[(i / w - min_y + 1) * cw + i % w - min_x + 1] = 255;
-        }
-        let local = AlphaMatte::from_u8(cw, ch, mask);
-        let path_data = local
-            .isocontours(0.5)
-            .into_iter()
-            .map(|mut contour| {
-                for p in &mut contour {
-                    p.x += min_x as f32 - 1.0;
-                    p.y += min_y as f32 - 1.0;
-                }
-                fitted_alpha_contour_path_data(&contour)
-            })
-            .collect::<String>();
-        let paint = if level == 4 {
-            Some(Paint::Solid { color: [1.0; 3] })
-        } else {
-            crate::gradient::fit_alpha_field(&raster, &pixels)
-        };
-        if let Some(paint) = paint {
-            layers.push(AlphaMaskLayer {
-                path_data,
-                opacity: 1.0,
-                paint: Some(paint),
-            });
-        } else {
-            // Local fallback for alpha that a single gradient cannot explain.
-            // Its contours cover only this component, not the whole canvas.
-            let minimum = pixels
-                .iter()
-                .map(|&i| (matte.get(i) * 63.0).round() as u8)
-                .min()
-                .unwrap();
-            let maximum = pixels
-                .iter()
-                .map(|&i| (matte.get(i) * 63.0).round() as u8)
-                .max()
-                .unwrap();
-            layers.push(AlphaMaskLayer {
-                path_data,
-                opacity: 1.0,
-                paint: Some(Paint::Solid {
-                    color: [minimum as f32 / 63.0; 3],
-                }),
-            });
-            let mut values = vec![0; cw * ch];
-            for &i in &pixels {
-                values[(i / w - min_y + 1) * cw + i % w - min_x + 1] =
-                    (matte.get(i) * 255.0).round() as u8;
-            }
-            let local = AlphaMatte::from_u8(cw, ch, values);
-            for value in minimum + 1..=maximum {
-                let path_data = local
-                    .isocontours((value as f32 - 0.5) / 63.0)
-                    .into_iter()
-                    .map(|mut contour| {
-                        for p in &mut contour {
-                            p.x += min_x as f32 - 1.0;
-                            p.y += min_y as f32 - 1.0;
-                        }
-                        fitted_alpha_contour_path_data(&contour)
-                    })
-                    .collect::<String>();
-                layers.push(AlphaMaskLayer {
-                    path_data,
-                    opacity: 1.0,
-                    paint: Some(Paint::Solid {
-                        color: [value as f32 / 63.0; 3],
-                    }),
-                });
-            }
-        }
-    }
-    Some(AlphaMask {
-        layers,
-        luminance: true,
-    })
-}
-
-fn build_source_alpha_mask(matte: &AlphaMatte) -> AlphaMask {
-    let (remaining, lines) = crate::alpha_lines::extract(matte);
-    let mut mask = build_source_alpha_mask_regions(&remaining);
-    if !lines.is_empty() {
-        for layer in &mut mask.layers {
-            if layer.paint.is_none() {
-                layer.paint = Some(Paint::Solid { color: [1.0; 3] });
-            }
-        }
-        mask.luminance = true;
-        mask.layers.extend(lines);
-    }
-    mask
-}
-
-fn build_source_alpha_mask_regions(matte: &AlphaMatte) -> AlphaMask {
-    let levels = matte.vectorized_levels();
-    if let Some(mask) = build_gradient_alpha_mask(matte, &levels) {
-        return mask;
-    }
-    let maximum_level = 3;
-    let only_extremes = levels
-        .iter()
-        .all(|&level| level == 0 || level == maximum_level);
-    if only_extremes {
-        // The discarded intermediate samples still provide the most accurate
-        // location of an opaque silhouette. Use their half-coverage crossing
-        // once, then let the SVG renderer antialias that vector curve at the
-        // display resolution. No translucent vector band remains.
-        let path_data = matte
-            .isocontours(0.5)
-            .iter()
-            .map(|contour| fitted_alpha_contour_path_data(contour))
-            .collect::<String>();
-        return AlphaMask {
-            layers: (!path_data.is_empty())
-                .then_some(AlphaMaskLayer {
-                    path_data,
-                    opacity: 1.0,
-                    paint: None,
-                })
-                .into_iter()
-                .collect(),
-            luminance: false,
-        };
-    }
-
-    // Intentional partial-alpha areas are represented as durable, flat vector
-    // regions. Build nested binary superlevel sets so every jump between two
-    // regions has one shared curve rather than a source-resolution opacity
-    // ramp. Different opacities accumulate to the existing 2-bit levels.
-    let mut cumulative = Vec::<(String, u8)>::new();
-    for threshold in 1_u8..=maximum_level {
-        let binary = AlphaMatte::from_u8(
-            matte.width,
-            matte.height,
-            levels
-                .iter()
-                .map(|&level| if level >= threshold { 255 } else { 0 })
-                .collect(),
-        );
-        let path_data = binary
-            .isocontours(0.5)
-            .iter()
-            .map(|contour| fitted_alpha_contour_path_data(contour))
-            .collect::<String>();
-        if path_data.is_empty() {
-            continue;
-        }
-        if let Some((previous_path, maximum_level)) = cumulative.last_mut() {
-            if *previous_path == path_data {
-                *maximum_level = threshold;
-                continue;
-            }
-        }
-        cumulative.push((path_data, threshold));
-    }
-
-    let mut previous_coverage = 0.0_f32;
-    let layers = cumulative
-        .into_iter()
-        .map(|(path_data, level)| {
-            let target_coverage = f32::from(level) / f32::from(maximum_level);
-            let opacity = ((target_coverage - previous_coverage)
-                / (1.0 - previous_coverage).max(1e-6))
-            .clamp(0.0, 1.0);
-            previous_coverage = target_coverage;
-            AlphaMaskLayer {
-                path_data,
-                opacity,
-                paint: None,
-            }
-        })
-        .collect();
-    AlphaMask {
-        layers,
-        luminance: false,
-    }
-}
-
 #[cfg(feature = "diagnostics")]
 fn save_label_diagnostic(name: &str, labels: &[u32], width: usize, height: usize) {
     let Ok(prefix) = std::env::var("PICVEC_PIPELINE_DIAGNOSTICS") else {
@@ -674,7 +409,7 @@ fn render_svg_preview(
     paint_overlap: f32,
     final_geometry: bool,
     excluded_regions: &[bool],
-    alpha_mask: Option<&AlphaMask>,
+    face_alpha: Option<&crate::face_alpha::FaceAlpha>,
     background: [f32; 3],
     geometry_cache: &mut GeometryCache,
 ) -> Result<Raster> {
@@ -689,7 +424,7 @@ fn render_svg_preview(
         paint_overlap,
         final_geometry,
         excluded_regions,
-        alpha_mask,
+        face_alpha,
         geometry_cache,
     );
     render_svg_document_on(&document, width, height, background)
@@ -974,7 +709,17 @@ fn adaptively_refine(
                 let crop_matte = source_matte.map(|matte| {
                     matte.crop(expanded.x, expanded.y, expanded.width, expanded.height)
                 });
-                let probe = if child_config.auto_dimension {
+                let probe = if expanded.width.max(expanded.height)
+                    > config.adaptive_tile_dimension as usize
+                {
+                    // A connected object cannot be tiled without cutting its
+                    // strokes/gradients. Evaluate its complete source model;
+                    // the usual measured quality and byte-cost gates apply.
+                    ComplexityProbe {
+                        selected_dimension: expanded.width.max(expanded.height) as u32,
+                        ..ComplexityProbe::default()
+                    }
+                } else if child_config.auto_dimension {
                     select_dimension(&crop, &child_config)
                 } else {
                     ComplexityProbe {
@@ -1144,7 +889,7 @@ fn adaptively_refine(
     if accepted.is_empty() {
         return Ok(summary);
     }
-    if source_matte.is_some() && refinements_cover_canvas(&accepted, input_dimensions) {
+    if refinements_cover_canvas(&accepted, input_dimensions) {
         core.svg = SvgSummary::default();
     }
     core.svg.add_elements_from(&refinement_svg);
@@ -1279,8 +1024,8 @@ fn vectorize_inner(
     let processing_height = processing.height;
     let source_scale = (input_width as f32 / processing_width.max(1) as f32)
         .max(input_height as f32 / processing_height.max(1) as f32);
-    let retain_adaptive_source =
-        config.adaptive_refinement && source_scale >= config.adaptive_min_source_scale;
+    let retain_adaptive_source = config.adaptive_refinement
+        && source_scale >= config.adaptive_min_source_scale;
     let adaptive_source = retain_adaptive_source.then_some(source);
     let adaptive_reference = retain_adaptive_source.then_some(source_reference);
     let adaptive_matte = if retain_adaptive_source {
@@ -1351,6 +1096,7 @@ fn vectorize_inner(
             enabled: config.remove_chroma_key_background,
             ..ChromaKeySummary::default()
         });
+    (core.svg.objects, core.svg.path_subpaths) = crate::svg::document_counts(&core.document)?;
     let temporary = temporary_svg(output, "output")?;
     fs::write(temporary.path(), core.document.as_bytes())?;
     temporary
@@ -1373,6 +1119,7 @@ fn vectorize_inner(
         segmentation: core.segmentation,
         structural: core.structural,
         ownership: core.ownership,
+        paint_order: core.paint_order,
         gradients: core.gradients,
         geometry: core.geometry,
         optimization: core.optimization,
@@ -1393,6 +1140,7 @@ struct CoreVectorization {
     segmentation: SegmentationSummary,
     structural: StructuralSummary,
     ownership: BoundaryOwnershipSummary,
+    paint_order: crate::paint_order::Summary,
     gradients: GradientSummary,
     geometry: GeometrySummary,
     optimization: OptimizationSummary,
@@ -1421,6 +1169,31 @@ fn vectorize_processing(
         chroma::composite_over(&processing, matte, preview_background)
     } else {
         processing.clone()
+    };
+    // Extract coupled neutral fields before RGB segmentation and alpha-code
+    // partitioning. Keep the original composite above for quality validation.
+    let mut processing = processing;
+    let (colour_matte, source_fields) = chroma_matte
+        .filter(|_| source_alpha)
+        .map(|m| crate::colour_fields::extract(&mut processing, m, preview_background))
+        .map(|(m, p)| (Some(m), p))
+        .unwrap_or_default();
+    let chroma_matte = colour_matte.as_ref().or(chroma_matte);
+    let (remaining_matte, composite_layers) = chroma_matte
+        .filter(|_| source_alpha)
+        .map(|matte| crate::neutral_fields::extract(&mut processing, matte, preview_background))
+        .map(|(matte, layers)| (Some(matte), layers))
+        .unwrap_or_default();
+    let chroma_matte = remaining_matte.as_ref().or(chroma_matte);
+    let coverage = chroma_matte
+        .filter(|_| source_alpha)
+        .and_then(crate::alpha_coverage::detect);
+    let local_coverage = chroma_matte
+        .filter(|_| source_alpha && coverage.is_none())
+        .and_then(crate::alpha_coverage::detect_components);
+    let processing = match (&coverage, chroma_matte) {
+        (Some(coverage), Some(matte)) => coverage.extend_colour(&processing, matte),
+        _ => processing,
     };
     save_pipeline_diagnostic("source-reference", &processing_reference);
     report_progress(config, "load-resize", started, &mut checkpoint);
@@ -1462,22 +1235,86 @@ fn vectorize_processing(
         processing.height,
     );
     report_progress(config, "edge-roles", started, &mut checkpoint);
-    let (mut paint_reference, mut structural_candidates) =
-        analyse_structural(&processing, &mut roles);
-    if source_alpha {
-        let matte = chroma_matte.expect("source alpha requires a matte");
-        // The alpha mask already owns thin silhouettes and coverage edges.
-        // Removing their ink into the invisible backing would expose that
-        // backing through the same mask alongside the fitted stroke.
+    let variable_opacity = source_alpha
+        && crate::face_alpha::uniform_opacity(chroma_matte.unwrap(), coverage.as_ref()).is_none();
+    // Keep chromatic filled features in RGBA Paint. Only opaque,
+    // low-chroma ink may enter RGB stroke fitting in a mixed-opacity scene;
+    // otherwise a lip or iris can be reduced to an unrelated centreline.
+    let mut rgba_ink_centres = vec![false; processing.pixels.len()];
+    if variable_opacity {
+        for graph in [
+            &roles.visible_ridge_graph,
+            &roles.dark_boundary_graph,
+            &roles.band_boundary_graph,
+        ] {
+            for edge in graph {
+                let indices: Vec<_> = edge
+                    .points
+                    .iter()
+                    .map(|p| {
+                        let x = (p[0] - 0.5)
+                            .round()
+                            .clamp(0.0, (processing.width - 1) as f64)
+                            as usize;
+                        let y = (p[1] - 0.5)
+                            .round()
+                            .clamp(0.0, (processing.height - 1) as f64)
+                            as usize;
+                        y * processing.width + x
+                    })
+                    .collect();
+                let core: Vec<_> = indices
+                    .iter()
+                    .filter(|&&i| chroma_matte.unwrap().get(i) >= 1.0)
+                    .map(|&i| rgb_to_oklab(processing.pixels[i]))
+                    .collect();
+                if core.len() < 3 {
+                    continue;
+                }
+                let lightness = crate::raster::percentile(core.iter().map(|c| c.l).collect(), 0.5);
+                let chroma =
+                    crate::raster::percentile(core.iter().map(|c| c.a.hypot(c.b)).collect(), 0.75);
+                if lightness <= 75.0 && chroma <= 10.0 {
+                    // AA endpoints may pick up chroma from adjacent paint.
+                    // Classify the supported graph as a whole, not each endpoint.
+                    for i in indices {
+                        rgba_ink_centres[i] = true;
+                    }
+                }
+            }
+        }
+    }
+    let paint_owned_alpha = chroma_matte.filter(|_| source_alpha).map(|matte| {
         let clear: Vec<_> = (0..matte.len()).map(|i| matte.get(i) <= 0.0).collect();
-        let mask_edge = dilate_square(&clear, processing.width, processing.height, 2);
-        for (i, &edge) in mask_edge.iter().enumerate() {
-            let alpha = matte.get(i);
-            if alpha > 0.0 && (edge || alpha < 1.0) {
+        let edge = dilate_square(&clear, processing.width, processing.height, 2);
+        (0..matte.len())
+            .map(|i| {
+                if edge[i] || matte.get(i) < 1.0 {
+                    return true;
+                }
+                if !variable_opacity || rgba_ink_centres[i] {
+                    return false;
+                }
+                let colour = rgb_to_oklab(processing.pixels[i]);
+                colour.a.hypot(colour.b) > 10.0
+            })
+            .collect::<Vec<_>>()
+    });
+    let paint_ridge_coverage = roles.visible_ridge_coverage.clone();
+    let paint_ridge_centres = roles.visible_ridge_centres.clone();
+    let paint_dark_boundary = roles.dark_boundary.clone();
+    let (mut paint_reference, mut structural_candidates) =
+        analyse_structural(&processing, &mut roles, paint_owned_alpha.as_deref());
+    if let Some(protected) = &paint_owned_alpha {
+        structural_candidates.release_to_paint(protected, processing.width);
+        for (i, &paint_owned) in protected.iter().enumerate() {
+            if paint_owned {
                 paint_reference.pixels[i] = processing.pixels[i];
-                structural_candidates.paint_ownership_mask[i] = false;
-                roles.visible_ridge_coverage[i] = false;
-                roles.visible_ridge_centres[i] = false;
+                // Paint-owned ink still needs its source evidence during
+                // segmentation, even though no structural graph owns it.
+                roles.visible_ridge_coverage[i] = paint_ridge_coverage[i];
+                roles.visible_ridge_centres[i] = paint_ridge_centres[i];
+                structural_candidates.source_line_mask[i] |= paint_ridge_coverage[i];
             }
         }
     }
@@ -1509,7 +1346,25 @@ fn vectorize_processing(
         save_pipeline_diagnostic("smoothed-lab", &smoothed_lab);
     }
     report_progress(config, "perceptual-smoothing", started, &mut checkpoint);
-    let mut segmentation = segment(&smoothed, &roles, config);
+    let paint_owned_lines: Vec<_> = (0..processing.pixels.len())
+        .map(|i| {
+            variable_opacity
+                && !structural_candidates.paint_ownership_mask[i]
+                && paint_dark_boundary[i]
+        })
+        .collect();
+    let mut segmentation = crate::segment::segment_with_paint_owned_lines(
+        &smoothed,
+        &roles,
+        config,
+        &paint_owned_lines,
+    );
+    // Once alpha is classified as coverage of a uniform-opacity material,
+    // 253/254/255 edge samples are not distinct paint opacities. Testing
+    // their raw alpha here blocks RGB material merging at those edges.
+    // Native support is split explicitly by face_alpha::prepare below.
+    let material_matte = chroma_matte.filter(|_| source_alpha && coverage.is_none());
+    crate::segment::absorb_micro_regions(&paint_reference, &mut segmentation, material_matte);
     save_mask_diagnostic(
         "paint-samples",
         &segmentation.paint_samples,
@@ -1567,12 +1422,19 @@ fn vectorize_processing(
         processing.height,
     );
     report_progress(config, "paint-aware-merge", started, &mut checkpoint);
+    let thin_protection: Vec<_> = structural_candidates
+        .paint_ownership_mask
+        .iter()
+        .zip(&paint_owned_lines)
+        .map(|(&structural, &paint)| structural || paint)
+        .collect();
     let refined_structural_ownership = refine_thin_paint_ownership(
         &paint_reference,
         &mut segmentation,
-        &structural_candidates.paint_ownership_mask,
+        &thin_protection,
         &structural_candidates.residual_source_line_mask(),
     );
+    crate::segment::absorb_micro_regions(&paint_reference, &mut segmentation, material_matte);
     save_label_diagnostic(
         "thin-labels",
         &segmentation.labels,
@@ -1668,80 +1530,192 @@ fn vectorize_processing(
         started,
         &mut checkpoint,
     );
-    let exact_paint_merges =
+    let mut exact_paint_merges =
         merge_exact_final_paints(&paint_reference, &mut segmentation, &mut paints);
     report_progress(config, "exact-paint-merge", started, &mut checkpoint);
     let simplified_layers =
         crate::gradient::simplify_layered_paints(&paint_reference, &segmentation, &mut paints);
-    report_progress(config, "layered-paint-simplification", started, &mut checkpoint);
+    report_progress(
+        config,
+        "layered-paint-simplification",
+        started,
+        &mut checkpoint,
+    );
     // Simplification validates its replacement against the source above.
     // Check the slope support of any remaining layered fields here.
     let refined_shapes =
         crate::gradient::refine_residual_shapes(&paint_reference, &segmentation, &mut paints);
-    report_progress(config, "residual-shape-refinement", started, &mut checkpoint);
+    report_progress(
+        config,
+        "residual-shape-refinement",
+        started,
+        &mut checkpoint,
+    );
+    let restored_shading =
+        crate::gradient::restore_interior_shading(&paint_reference, &segmentation, &mut paints);
+    report_progress(config, "interior-shading", started, &mut checkpoint);
+    // Refit fields can become identical only after residual simplification.
+    // Merge their ownership before generating any new shared contours.
+    if simplified_layers > 0 || refined_shapes > 0 || restored_shading > 0 {
+        exact_paint_merges +=
+            merge_exact_final_paints(&paint_reference, &mut segmentation, &mut paints);
+    }
     if supported_paint_merges.merges > 0
         || exact_paint_merges > 0
         || simplified_layers > 0
         || refined_shapes > 0
+        || restored_shading > 0
     {
         refresh_summary(&mut gradient_report, &paints);
     }
 
-    // Split visible and zero-coverage ownership only after Paint merging.
-    // Both children keep the fitted straight RGB, while the output can omit
-    // the fully hidden child. Nonzero samples remain underpaint beneath the
-    // interpolated alpha contour.
-    let source_alpha_region_classes = if source_alpha {
-        let matte = chroma_matte.expect("source alpha requires an alpha matte");
-        let support = (0..matte.len())
-            .map(|index| matte.get(index) > 0.0)
-            .collect::<Vec<_>>();
-        let (parents, classes) =
-            split_partition_by_values(&paint_reference, &mut segmentation, &support);
-        paints = parents
-            .iter()
-            .map(|&parent| paints[parent].clone())
-            .collect();
+    if source_alpha
+        && crate::alpha_paint::consolidate(
+            chroma_matte.unwrap(),
+            &processing,
+            &segmentation.labels,
+            &mut paints,
+        ) > 0
+    {
+        merge_exact_final_paints(&paint_reference, &mut segmentation, &mut paints);
         refresh_summary(&mut gradient_report, &paints);
-        Some(classes)
-    } else {
-        None
-    };
+    }
+
+    let mut face_alpha = source_alpha.then(|| {
+        crate::face_alpha::prepare(
+            &processing,
+            chroma_matte.unwrap(),
+            coverage.as_ref(),
+            local_coverage.as_ref(),
+            &mut segmentation,
+            &mut paints,
+        )
+    });
+    if let Some(alpha) = &mut face_alpha {
+        alpha.composite_layers = composite_layers;
+        alpha.source_fields = source_fields;
+    }
+    refresh_summary(&mut gradient_report, &paints);
     save_label_diagnostic(
         "paint-merged-labels",
         &segmentation.labels,
         processing.width,
         processing.height,
     );
+    #[cfg(feature = "diagnostics")]
+    if let Ok(prefix) = std::env::var("PICVEC_PIPELINE_DIAGNOSTICS") {
+        save_pipeline_diagnostic(
+            "fitted-paint-fields",
+            &Raster::new(
+                segmentation.width,
+                segmentation.height,
+                segmentation
+                    .labels
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &label)| {
+                        crate::gradient::paint_at(&paints[label as usize], i, segmentation.width)
+                    })
+                    .collect(),
+            ),
+        );
+        let _ = fs::write(
+            format!("{prefix}-fitted-paints.txt"),
+            format!("{paints:#?}"),
+        );
+    }
     gradient_report.source_supported_paint_merges = supported_paint_merges.merges;
     gradient_report.source_supported_boundary_edges_removed =
         supported_paint_merges.boundary_edges_removed;
-    // Exact source alpha uses an independent vector mask. Exactly zero-alpha
-    // owners can still be omitted; all nonzero straight RGB remains available
-    // as underpaint beneath the interpolated mask boundary.
-    // Inferred chroma keys retain their existing binary region exclusion.
-    let excluded_regions = if let Some(classes) = source_alpha_region_classes {
-        classes.into_iter().map(|class| !class).collect()
+    let mut excluded_regions = if let Some(alpha) = &face_alpha {
+        alpha
+            .fields
+            .iter()
+            .map(|p| matches!(p, Paint::Solid { color } if color[0] <= 0.0))
+            .collect()
     } else {
         chroma_matte
             .map(|matte| chroma::background_regions(&segmentation.labels, paints.len(), matte))
             .unwrap_or_default()
     };
     let removed_background_regions = excluded_regions.iter().filter(|&&removed| removed).count();
-    let alpha_mask = if source_alpha {
-        chroma_matte.map(build_source_alpha_mask)
-    } else {
-        None
-    };
-    report_progress(config, "source-alpha-mask", started, &mut checkpoint);
+    report_progress(config, "face-alpha", started, &mut checkpoint);
     let topology = HierarchicalTopology::build(&segmentation);
     report_progress(config, "hierarchical-topology", started, &mut checkpoint);
-    let (geometry, geometry_report) =
-        build_geometry(&segmentation, &topology, &geometry_edge_reference);
+    let overlap_opaque: Vec<bool> = (0..paints.len())
+        .map(|i| {
+            !excluded_regions.get(i).copied().unwrap_or(false)
+                && face_alpha.as_ref().is_none_or(
+                    |alpha| matches!(&alpha.fields[i], Paint::Solid { color } if color[0] >= 0.99),
+                )
+        })
+        .collect();
+    let baseline_order = crate::geometry::paint_order_ranks(&segmentation);
+    let mut order_proposal = crate::paint_order::propose(
+        &processing,
+        &segmentation,
+        &structural_candidates.source_line_mask,
+        &overlap_opaque,
+        &baseline_order,
+    );
+    // Finalize ordering before deciding and fitting hidden overlap.
+    let (mut geometry, mut geometry_report) = crate::geometry::build_with_paint_overlap(
+        &segmentation,
+        &topology,
+        &geometry_edge_reference,
+        if source_alpha { chroma_matte } else { None },
+        config.shared_boundary_overlap,
+        &overlap_opaque,
+        (order_proposal.summary.changed_ranks > 0).then_some(order_proposal.ranks.as_slice()),
+        if variable_opacity {
+            &excluded_regions
+        } else {
+            &[]
+        },
+    );
+    if let Some(alpha) = &mut face_alpha {
+        for (band, colour) in std::mem::take(&mut alpha.bands) {
+            let region = paints.len() as u32;
+            paints.push(Paint::Solid { color: colour });
+            alpha.fields.push(Paint::Solid {
+                color: [band.opacity; 3],
+            });
+            excluded_regions.push(false);
+            geometry.push(crate::geometry::RegionGeometry {
+                region,
+                loops: vec![],
+                path_data: band.path_data,
+                occlusion_path_data: None,
+                covered_hole_paths: Vec::new(),
+                primitive: None,
+            });
+        }
+    }
     report_progress(config, "shared-geometry", started, &mut checkpoint);
+    #[cfg(feature = "diagnostics")]
+    if let Ok(prefix) = std::env::var("PICVEC_PIPELINE_DIAGNOSTICS") {
+        for (name, overlap) in [
+            ("paint-no-overlap", 0.0),
+            ("paint-overlap", config.shared_boundary_overlap),
+        ] {
+            let (document, _) = serialize_svg(
+                processing.width,
+                processing.height,
+                &geometry,
+                &paints,
+                &StructuralInk::empty(),
+                overlap,
+                false,
+                &excluded_regions,
+                face_alpha.as_ref(),
+                &mut GeometryCache::default(),
+            );
+            let _ = fs::write(format!("{prefix}-{name}.svg"), document);
+        }
+    }
     // Resolve source ownership against the exact shared Paint partition.
-    // Overlap is deliberately absent here: it is a seam underpaint, not an
-    // authored Paint or structural owner. Native alpha is absent from this
+    // Overlap is deliberately absent here: it seals seams in the final fill
+    // contours and is not an authored Paint or structural owner. Native alpha is absent from this
     // comparison: both references must describe straight RGB. A preview
     // backdrop or alpha contour must not become a candidate ink colour.
     let mut geometry_cache = GeometryCache::default();
@@ -1755,7 +1729,7 @@ fn vectorize_processing(
         if source_alpha {
             None
         } else {
-            alpha_mask.as_ref()
+            face_alpha.as_ref()
         },
         if source_alpha {
             [1.0; 3]
@@ -1787,10 +1761,23 @@ fn vectorize_processing(
             &processing,
             chroma_matte.expect("source alpha requires a matte"),
         );
-        ownership.structural.recover_alpha_boundary(
-            &processing,
-            chroma_matte.expect("source alpha requires a matte"),
-        );
+        if crate::face_alpha::uniform_opacity(chroma_matte.unwrap(), coverage.as_ref()).is_some()
+            && coverage
+                .as_ref()
+                .and_then(|c| c.exterior_colour(&processing, chroma_matte.unwrap()))
+                .is_none()
+        {
+            ownership.structural.recover_alpha_boundary(
+                &processing,
+                chroma_matte.expect("source alpha requires a matte"),
+            );
+        } else if let Some(local) = &local_coverage {
+            ownership.structural.recover_local_coverage_boundary(
+                &processing,
+                chroma_matte.unwrap(),
+                local,
+            );
+        }
     }
     if let Some(matte) = chroma_matte.filter(|_| !source_alpha) {
         ownership
@@ -1800,12 +1787,16 @@ fn vectorize_processing(
     ownership
         .structural
         .refine_interrupted_strokes(&processing, chroma_matte.filter(|_| source_alpha));
-    let outlines = crate::outline::propose(
-        &processing,
-        chroma_matte.filter(|_| source_alpha),
-        &segmentation,
-        &geometry_report.paint_closed_contours,
-    );
+    let outlines = if source_alpha {
+        Vec::new()
+    } else {
+        crate::outline::propose(
+            &processing,
+            chroma_matte.filter(|_| source_alpha),
+            &segmentation,
+            &geometry_report.paint_closed_contours,
+        )
+    };
     if !outlines.is_empty() {
         let before = render_svg_preview(
             (processing.width, processing.height),
@@ -1814,7 +1805,7 @@ fn vectorize_processing(
             ownership.paint_overlap,
             excluded_regions.iter().all(|&excluded| !excluded),
             &excluded_regions,
-            alpha_mask.as_ref(),
+            face_alpha.as_ref(),
             preview_background,
             &mut geometry_cache,
         )?;
@@ -1826,7 +1817,7 @@ fn vectorize_processing(
             ownership.paint_overlap,
             excluded_regions.iter().all(|&excluded| !excluded),
             &excluded_regions,
-            alpha_mask.as_ref(),
+            face_alpha.as_ref(),
             preview_background,
             &mut geometry_cache,
         )?;
@@ -1835,7 +1826,7 @@ fn vectorize_processing(
             .outlines
             .retain(|band| band.supported_by_render(&processing_reference, &before, &after));
     }
-    if !ownership.structural.strokes.is_empty() {
+    if !source_alpha && !ownership.structural.strokes.is_empty() {
         let mut preview = |ink: &StructuralInk| {
             render_svg_preview(
                 (processing.width, processing.height),
@@ -1844,7 +1835,7 @@ fn vectorize_processing(
                 ownership.paint_overlap,
                 excluded_regions.iter().all(|&excluded| !excluded),
                 &excluded_regions,
-                alpha_mask.as_ref(),
+                face_alpha.as_ref(),
                 preview_background,
                 &mut geometry_cache,
             )
@@ -1874,12 +1865,19 @@ fn vectorize_processing(
                 .retain(|patch| patch.improves(&processing_reference, &before, &after));
         }
     }
+    if source_alpha {
+        ownership.structural.outlines.clear();
+        ownership.structural.color_patches.clear();
+        if face_alpha.as_ref().is_some_and(|a| a.ink_opacity <= 0.0) {
+            ownership.structural.strokes.clear();
+        }
+    }
     ownership.summary.structural_strokes = ownership.structural.strokes.len();
     report_progress(config, "structural-selection", started, &mut checkpoint);
     let ownership_summary = ownership.summary.clone();
     let paint_overlap = ownership.paint_overlap;
     let structural = ownership.structural;
-    let (document, mut svg_report) = serialize_svg(
+    let (mut document, mut svg_report) = serialize_svg(
         processing.width,
         processing.height,
         &geometry,
@@ -1888,9 +1886,131 @@ fn vectorize_processing(
         paint_overlap,
         excluded_regions.iter().all(|&excluded| !excluded),
         &excluded_regions,
-        alpha_mask.as_ref(),
+        face_alpha.as_ref(),
         &mut geometry_cache,
     );
+    if order_proposal.summary.changed_ranks > 0 {
+        // The old ordering is only a validation reference, never an input to
+        // the ordered geometry's expansion decisions.
+        let (mut reference_geometry, reference_geometry_report) =
+            crate::geometry::build_with_paint_overlap(
+                &segmentation,
+                &topology,
+                &geometry_edge_reference,
+                if source_alpha { chroma_matte } else { None },
+                config.shared_boundary_overlap,
+                &overlap_opaque,
+                None,
+                if variable_opacity {
+                    &excluded_regions
+                } else {
+                    &[]
+                },
+            );
+        reference_geometry.extend(
+            geometry
+                .iter()
+                .filter(|g| g.region as usize >= segmentation.regions.len())
+                .cloned(),
+        );
+        let (reference, report) = serialize_svg(
+            processing.width,
+            processing.height,
+            &reference_geometry,
+            &paints,
+            &structural,
+            paint_overlap,
+            excluded_regions.iter().all(|&excluded| !excluded),
+            &excluded_regions,
+            face_alpha.as_ref(),
+            &mut geometry_cache,
+        );
+        #[cfg(feature = "diagnostics")]
+        if let Ok(prefix) = std::env::var("PICVEC_PIPELINE_DIAGNOSTICS") {
+            let _ = fs::write(format!("{prefix}-order-candidate.svg"), &document);
+            let _ = fs::write(format!("{prefix}-order-baseline.svg"), &reference);
+        }
+        if !crate::paint_order::validate(
+            &reference,
+            &document,
+            &processing,
+            chroma_matte,
+            &segmentation.labels,
+            &mut order_proposal.summary,
+        ) {
+            document = reference;
+            svg_report = report;
+            geometry = reference_geometry;
+            geometry_report = reference_geometry_report;
+        }
+        report_progress(config, "paint-order-validation", started, &mut checkpoint);
+    }
+    #[cfg(feature = "diagnostics")]
+    if let Ok(prefix) = std::env::var("PICVEC_PIPELINE_DIAGNOSTICS") {
+        let _ = fs::write(
+            format!("{prefix}-paint-order.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "baseline_ranks": baseline_order, "proposed_ranks": order_proposal.ranks,
+                "line_regions": order_proposal.lines, "evidence": order_proposal.evidence, "summary": order_proposal.summary
+            }))
+            .unwrap(),
+        );
+    }
+    if paint_overlap > 0.0 && geometry.iter().any(|g| !g.covered_hole_paths.is_empty()) {
+        // Use the same authored-opacity field as SVG fills. The coverage model
+        // has already classified isolated 253/254 samples as raster coverage,
+        // so reusing raw alpha here would contradict that earlier decision.
+        let material_alpha = face_alpha.as_ref().map(|alpha| {
+            AlphaMatte::from_u8(
+                processing.width,
+                processing.height,
+                segmentation
+                    .labels
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &label)| {
+                        (crate::gradient::paint_at(
+                            &alpha.fields[label as usize],
+                            i,
+                            processing.width,
+                        )[0] * 255.0)
+                            .round()
+                            .clamp(0.0, 255.0) as u8
+                    })
+                    .collect(),
+            )
+        });
+        let (filled, report, removed) = crate::occlusion::simplify(
+            &mut geometry,
+            (document, svg_report),
+            &segmentation.labels,
+            processing.width,
+            material_alpha.as_ref().or(chroma_matte),
+            |geometry| {
+                serialize_svg(
+                    processing.width,
+                    processing.height,
+                    geometry,
+                    &paints,
+                    &structural,
+                    paint_overlap,
+                    excluded_regions.iter().all(|&excluded| !excluded),
+                    &excluded_regions,
+                    face_alpha.as_ref(),
+                    &mut geometry_cache,
+                )
+            },
+        );
+        document = filled;
+        svg_report = report;
+        geometry_report.covered_holes_removed += removed;
+        report_progress(
+            config,
+            "covered-hole-simplification",
+            started,
+            &mut checkpoint,
+        );
+    }
     drop(geometry_cache);
     // Use a neutral comparison backing; the chroma diagnostic backing is
     // deliberately saturated and must not veto grayscale source evidence.
@@ -1905,6 +2025,16 @@ fn vectorize_processing(
         chroma_matte.filter(|_| source_alpha),
         |document| render_svg_document_on(document, processing.width, processing.height, [1.0; 3]),
     )?;
+    let (document, removed) =
+        crate::visibility::prune(&document, processing.width, processing.height);
+    svg_report.path_elements = svg_report.path_elements.saturating_sub(removed.paths);
+    svg_report.rect_elements = svg_report.rect_elements.saturating_sub(removed.rects);
+    svg_report.circle_elements = svg_report.circle_elements.saturating_sub(removed.circles);
+    svg_report.ellipse_elements = svg_report.ellipse_elements.saturating_sub(removed.ellipses);
+    svg_report.line_elements = svg_report.line_elements.saturating_sub(removed.lines);
+    svg_report.invisible_elements_removed = removed.shapes;
+    svg_report.invisible_strokes_removed = removed.strokes;
+    svg_report.structural_strokes = svg_report.structural_strokes.saturating_sub(removed.ink);
     svg_report.bytes = document.len();
     #[cfg(feature = "diagnostics")]
     let quality = if config.compute_quality_metrics {
@@ -1925,9 +2055,13 @@ fn vectorize_processing(
     #[cfg(not(feature = "diagnostics"))]
     let quality = None;
 
+    #[cfg(feature = "diagnostics")]
+    if let Ok(prefix) = std::env::var("PICVEC_PIPELINE_DIAGNOSTICS") {
+        let _ = fs::write(format!("{prefix}-final.svg"), &document);
+    }
     report_progress(config, "final-svg", started, &mut checkpoint);
     Ok(CoreVectorization {
-        source_alpha_bits: if alpha_mask.as_ref().is_some_and(|mask| mask.luminance) {
+        source_alpha_bits: if source_alpha {
             8
         } else {
             chroma::SOURCE_ALPHA_QUANTIZATION_BITS
@@ -1942,6 +2076,7 @@ fn vectorize_processing(
         segmentation: segmentation.summary,
         structural: structural.summary,
         ownership: ownership_summary,
+        paint_order: order_proposal.summary,
         gradients: gradient_report,
         geometry: geometry_report,
         optimization,
@@ -1953,9 +2088,398 @@ fn vectorize_processing(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::geometry::fitted_alpha_contour_path_data;
     use std::collections::HashSet;
     use std::sync::{Arc, Barrier};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    #[ignore = "source-resolution scanned drawing regression; run explicitly"]
+    fn scanned_annotations_retain_ink_through_the_common_pipeline() {
+        let image = image::load_from_memory(include_bytes!("test-data/booster-annotations.png"))
+            .unwrap()
+            .to_rgb8();
+        let source = Raster::new(
+            image.width() as usize,
+            image.height() as usize,
+            image
+                .pixels()
+                .map(|p| p.0.map(|c| c as f32 / 255.0))
+                .collect(),
+        );
+        let config = Config {
+            adaptive_refinement: false,
+            ..Config::default()
+        };
+        let core = vectorize_processing(source.clone(), None, false, [1.0; 3], &config).unwrap();
+        assert!(!core.labels.is_empty());
+        let rendered =
+            render_svg_document_on(&core.document, source.width, source.height, [1.0; 3]).unwrap();
+        let (mut ink_error, mut ink, mut dark, mut missing) = (0.0, 0usize, 0usize, 0usize);
+        for (a, b) in source.pixels.iter().zip(&rendered.pixels) {
+            if a[0] < 240.0 / 255.0 {
+                ink += 1;
+                ink_error += (a[0] - b[0]).abs();
+            }
+            if a[0] < 128.0 / 255.0 {
+                dark += 1;
+                missing += usize::from(b[0] > 192.0 / 255.0);
+            }
+        }
+        assert!(
+            ink_error / (ink.max(1) as f32) < 0.2,
+            "ink error {}",
+            ink_error / ink.max(1) as f32
+        );
+        assert!(
+            (missing as f32) / (dark.max(1) as f32) < 0.12,
+            "missing {missing}/{dark}"
+        );
+    }
+
+    #[test]
+    fn neutral_and_coloured_parallel_lines_use_normal_region_geometry() {
+        let config = Config {
+            adaptive_refinement: false,
+            ..Config::default()
+        };
+        for ink in [[0.0; 3], [0.6, 0.0, 0.0]] {
+            let mut source = Raster::blank(128, 64, [1.0; 3]);
+            for y in [20, 28] {
+                for yy in y..y + 3 {
+                    for x in 12..116 {
+                        source.pixels[yy * 128 + x] = ink;
+                    }
+                }
+            }
+            let core = vectorize_processing(source, None, false, [1.0; 3], &config).unwrap();
+            assert!(!core.labels.is_empty());
+            assert!(!core.document.contains("<mask") && !core.document.contains("<image"));
+            let rendered = render_svg_document_on(&core.document, 128, 64, [1.0; 3]).unwrap();
+            for x in 20..108 {
+                assert!(rendered.pixels[21 * 128 + x][1] < 0.3);
+                assert!(rendered.pixels[29 * 128 + x][1] < 0.3);
+                assert!(rendered.pixels[25 * 128 + x][1] > 0.9);
+            }
+        }
+    }
+
+    #[test]
+    fn variable_opacity_elsewhere_does_not_erase_opaque_ink() {
+        let (w, h) = (88, 64);
+        let mut source = Raster::blank(w, h, [1.0; 3]);
+        let mut opacity = vec![1.0; w * h];
+        for y in 8..56 {
+            for x in 6..30 {
+                source.pixels[y * w + x] = [0.1, 0.4, 0.8];
+                opacity[y * w + x] = 0.3 + 0.4 * (x - 6) as f32 / 23.0;
+            }
+        }
+        for y in 10..54 {
+            for x in 63..65 {
+                source.pixels[y * w + x] = [0.0; 3];
+            }
+        }
+        let matte = AlphaMatte::new(w, h, opacity);
+        let result = rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .build()
+            .unwrap()
+            .install(|| {
+                vectorize_processing(
+                    source,
+                    Some(&matte),
+                    true,
+                    [1.0; 3],
+                    &Config {
+                        adaptive_refinement: false,
+                        ..Config::default()
+                    },
+                )
+                .unwrap()
+            });
+        assert!(!result.document.contains("<mask"));
+        let tree = parse_svg_document(&result.document).unwrap();
+        let mut image = resvg::tiny_skia::Pixmap::new(w as u32, h as u32).unwrap();
+        resvg::render(
+            &tree,
+            resvg::tiny_skia::Transform::identity(),
+            &mut image.as_mut(),
+        );
+        for y in 14..50 {
+            assert!(
+                (62..66).any(|x| image.pixels()[y * w + x].red() < 50),
+                "opaque ink lost at row {y}"
+            );
+        }
+        for y in 12..52 {
+            for x in 10..26 {
+                let actual = image.pixels()[y * w + x];
+                assert!(
+                    (actual.alpha() as f32 / 255.0 - matte.get(y * w + x)).abs() < 4.0 / 255.0,
+                    "authored opacity changed at {x},{y}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn reported_remojii_top_objects_join_adjacent_faces_in_the_complete_pipeline() {
+        // These are the native support pixels of objects 2..=50, top down,
+        // from the user's 665770-byte SVG. Full-frame context is necessary:
+        // cropping splits the incident paint owners and changes their sizes.
+        #[derive(serde::Deserialize)]
+        struct ReportedObject {
+            rank: usize,
+            pixels: Vec<usize>,
+        }
+        let objects: Vec<ReportedObject> =
+            serde_json::from_str(include_str!("test-data/remojii-top-objects.json")).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("remojii.png");
+        fs::write(
+            &input,
+            include_bytes!("test-data/remojii-top-objects-source.png"),
+        )
+        .unwrap();
+        let config = Config {
+            adaptive_refinement: false,
+            rayon_threads: 2,
+            ..Config::default()
+        };
+        let (decoded, alpha) = SourceRaster::load_with_alpha(
+            &input,
+            config.maximum_input_dimension,
+            config.maximum_input_pixels,
+            config.maximum_decode_bytes,
+        )
+        .unwrap();
+        let matte = AlphaMatte::from_u8(decoded.width, decoded.height, alpha.unwrap());
+        let backing = chroma::select_alpha_backing(&decoded, &matte);
+        let source = chroma::prepare_compact_source_alpha(&decoded, &matte);
+        let (processing, alpha) = resize_processing(&source, Some(&matte), true, 1254);
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .build()
+            .unwrap();
+        let result = pool
+            .install(|| vectorize_processing(processing, alpha.as_ref(), true, backing, &config))
+            .unwrap();
+        assert!(result.paint_order.line_regions > 0);
+        assert!(result.paint_order.changed_ranks > 0);
+        assert!(result.paint_order.accepted, "{:?}", result.paint_order);
+        #[derive(serde::Deserialize)]
+        struct ReportedInk {
+            pixels: Vec<usize>,
+            neighbor_pixel: usize,
+        }
+        let reported: Vec<ReportedInk> = serde_json::from_str(include_str!(
+            "test-data/remojii-reported-material-regions.json"
+        ))
+        .unwrap();
+        for (case, ink) in reported.iter().enumerate() {
+            let ink_owner = result.labels[ink.neighbor_pixel];
+            assert!(
+                ink.pixels.iter().all(|&i| result.labels[i] == ink_owner),
+                "reported material case {case} must join its adjacent face"
+            );
+        }
+        let mut areas = std::collections::HashMap::<u32, usize>::new();
+        for &label in &result.labels {
+            *areas.entry(label).or_default() += 1;
+        }
+        // These two reported faces formerly emitted the same outline four
+        // and six times for weak residual colour corrections.
+        fn count_face_paths(group: &resvg::usvg::Group, x: f32, y: f32) -> usize {
+            group
+                .children()
+                .iter()
+                .map(|node| match node {
+                    resvg::usvg::Node::Group(group) => count_face_paths(group, x, y),
+                    resvg::usvg::Node::Path(path) if path.fill().is_some() => {
+                        let b = path.abs_bounding_box();
+                        usize::from(
+                            (b.x() - x).abs() < 2.0
+                                && (b.y() - y).abs() < 2.0
+                                && b.width() < 45.0
+                                && b.height() < 45.0,
+                        )
+                    }
+                    _ => 0,
+                })
+                .sum()
+        }
+        let tree = parse_svg_document(&result.document).unwrap();
+        fn shell_contours(group: &resvg::usvg::Group) -> usize {
+            group
+                .children()
+                .iter()
+                .map(|node| match node {
+                    resvg::usvg::Node::Group(group) => shell_contours(group),
+                    resvg::usvg::Node::Path(path) if path.fill().is_some() => {
+                        let b = path.abs_bounding_box();
+                        if (b.x() - 155.977).abs() < 2.0 && (b.y() - 63.639).abs() < 2.0 {
+                            assert_eq!(
+                                path.data()
+                                    .segments()
+                                    .filter(|s| matches!(
+                                        s,
+                                        resvg::tiny_skia::PathSegment::MoveTo(_)
+                                    ))
+                                    .count(),
+                                1,
+                                "covered shell pattern must not remain as holes in the lower paint"
+                            );
+                            1
+                        } else {
+                            0
+                        }
+                    }
+                    _ => 0,
+                })
+                .sum()
+        }
+        assert_eq!(shell_contours(tree.root()), 1);
+        assert!(result.geometry.covered_holes_removed > 0);
+
+        fn shadow_copies(
+            group: &resvg::usvg::Group,
+            x: f32,
+            y: f32,
+            width: f32,
+            height: f32,
+        ) -> usize {
+            group
+                .children()
+                .iter()
+                .map(|node| match node {
+                    resvg::usvg::Node::Group(group) => shadow_copies(group, x, y, width, height),
+                    resvg::usvg::Node::Path(path) if path.fill().is_some() => {
+                        let b = path.abs_bounding_box();
+                        usize::from(
+                            (b.x() - x).abs() < 2.0
+                                && (b.y() - y).abs() < 2.0
+                                && b.width() < width
+                                && b.height() < height,
+                        )
+                    }
+                    _ => 0,
+                })
+                .sum()
+        }
+        assert_eq!(
+            shadow_copies(tree.root(), 368.57, 994.89, 65.0, 80.0),
+            1,
+            "the book shadow must have one paint, not repeated residual geometry"
+        );
+
+        assert_eq!(
+            shadow_copies(tree.root(), 733.65, 639.28, 120.0, 60.0),
+            1,
+            "the image-right eyelid shadow must have one paint"
+        );
+
+        fn assert_paint_has_no_auxiliary_strokes(group: &resvg::usvg::Group) {
+            for node in group.children() {
+                match node {
+                    resvg::usvg::Node::Group(group) => assert_paint_has_no_auxiliary_strokes(group),
+                    resvg::usvg::Node::Path(path) => assert!(
+                        path.stroke().is_none(),
+                        "paint face emitted an auxiliary seam stroke"
+                    ),
+                    _ => {}
+                }
+            }
+        }
+        let paint_group = tree
+            .root()
+            .children()
+            .iter()
+            .find_map(|n| match n {
+                resvg::usvg::Node::Group(g) if g.id() == "paint-layer" => Some(g),
+                _ => None,
+            })
+            .unwrap();
+        assert_paint_has_no_auxiliary_strokes(paint_group);
+        for (x, y) in [(863.93, 407.78), (925.97, 825.06)] {
+            assert_eq!(
+                count_face_paths(tree.root(), x, y),
+                1,
+                "reported face at {x},{y} retained duplicate correction layers"
+            );
+        }
+        let fragments: Vec<Vec<usize>> =
+            serde_json::from_str(include_str!("test-data/remojii-third-ninth-regions.json"))
+                .unwrap();
+        for pixels in fragments {
+            let owner = result.labels[pixels[0]];
+            assert!(
+                pixels.iter().all(|&i| result.labels[i] == owner) && areas[&owner] > pixels.len(),
+                "reported third/ninth fragment retained an independent owner"
+            );
+        }
+        let sixth: Vec<usize> =
+            serde_json::from_str(include_str!("test-data/remojii-sixth-black-region.json"))
+                .unwrap();
+        assert!(
+            sixth
+                .iter()
+                .all(|&i| areas[&result.labels[i]] > sixth.len()),
+            "sixth black face still has an independent owner"
+        );
+        for object in objects {
+            assert!(
+                object
+                    .pixels
+                    .iter()
+                    .all(|&i| areas[&result.labels[i]] > object.pixels.len()),
+                "reported object {} still has its own small owner",
+                object.rank
+            );
+        }
+        assert!(!result.document.contains("<mask"));
+        assert!(!result.document.contains("fill-opacity=\"0\""));
+    }
+
+    #[test]
+    fn remojii_alpha_boundary_has_few_nodes_along_the_upper_left_rim() {
+        let input = image::load_from_memory(include_bytes!("test-data/remojii-rim-alpha.png"))
+            .unwrap()
+            .to_luma8();
+        let matte = AlphaMatte::from_u8(
+            input.width() as usize,
+            input.height() as usize,
+            input.into_raw(),
+        );
+        let path = matte
+            .isocontours(0.5)
+            .iter()
+            .map(|contour| fitted_alpha_contour_path_data(contour))
+            .collect::<String>();
+        let mut tokens = path.split_whitespace();
+        let mut rim_nodes = 0;
+        while let Some(command) = tokens.next() {
+            let count = match command {
+                "M" | "L" => 2,
+                "C" => 6,
+                "Z" => 0,
+                _ => panic!("unexpected {command}"),
+            };
+            let values: Vec<f32> = tokens
+                .by_ref()
+                .take(count)
+                .map(|s| s.parse().unwrap())
+                .collect();
+            if count > 0 {
+                let (x, y) = (values[count - 2], values[count - 1]);
+                rim_nodes += usize::from((80.0..420.0).contains(&x) && (50.0..350.0).contains(&y));
+            }
+        }
+        assert!(
+            rim_nodes <= 24,
+            "smooth upper-left rim retained {rim_nodes} nodes"
+        );
+    }
 
     #[test]
     fn alpha_weighted_resize_preserves_visible_colour_in_base_and_crops() {
@@ -2114,8 +2638,9 @@ mod tests {
             Paint::Solid {
                 color: [0.25, 0.5, 0.75],
             },
+            // Different fitting values, identical serialized #4080bf.
             Paint::Solid {
-                color: [0.25, 0.5, 0.75],
+                color: [0.2501, 0.5001, 0.7501],
             },
         ];
         assert_eq!(
@@ -2398,14 +2923,15 @@ mod tests {
         .unwrap();
         assert!(summary.source_alpha.detected);
         assert!(summary.source_alpha.temporary_backing_color.is_some());
-        assert_eq!(summary.source_alpha.quantization_bits, 2);
-        assert!(summary.source_alpha.mask_paths >= 1);
+        assert_eq!(summary.source_alpha.quantization_bits, 8);
+        assert_eq!(summary.source_alpha.mask_paths, 0);
         assert!(summary.source_alpha.removed_regions >= 2);
         assert!(!summary.chroma_key.enabled);
 
         let document = fs::read_to_string(&output).unwrap();
-        assert!(document.contains("id=\"source-alpha-mask\""));
-        assert!(document.contains("mask=\"url(#source-alpha-mask)\""));
+        assert!(!document.contains("source-alpha-clip"));
+        assert!(!document.contains("source-alpha-mask"));
+        assert!(!document.contains("<mask"));
         let tree = parse_svg_document(&document).unwrap();
         let mut pixmap = resvg::tiny_skia::Pixmap::new(64, 64).unwrap();
         resvg::render(
@@ -3597,7 +4123,7 @@ mod tests {
     }
 
     #[test]
-    fn two_bit_source_alpha_preserves_foreground_equal_to_temporary_backing() {
+    fn face_alpha_preserves_foreground_equal_to_temporary_backing() {
         use image::{ImageBuffer, Rgba};
 
         let directory = tempfile::tempdir().unwrap();
@@ -3651,12 +4177,12 @@ mod tests {
             summary.source_alpha.temporary_backing_color,
             Some([255, 0, 0])
         );
-        assert_eq!(summary.source_alpha.quantization_bits, 2);
-        assert_eq!(summary.source_alpha.mask_paths, 3);
+        assert_eq!(summary.source_alpha.quantization_bits, 8);
+        assert_eq!(summary.source_alpha.mask_paths, 0);
 
         let document = fs::read_to_string(&output).unwrap();
-        assert!(document.contains("fill-opacity=\"0.333\""));
-        assert!(document.contains("fill-opacity=\"0.5\""));
+        assert!(document.contains("fill-opacity=\"0.314\""));
+        assert!(document.contains("fill-opacity=\"0.706\""));
         let tree = parse_svg_document(&document).unwrap();
         let mut pixmap = resvg::tiny_skia::Pixmap::new(64, 64).unwrap();
         resvg::render(
@@ -3741,10 +4267,12 @@ mod tests {
                 .take(15)
                 .collect(),
         );
-        let mask = build_source_alpha_mask(&matte);
-        assert_eq!(mask.layers.len(), 1);
-        assert_eq!(mask.layers[0].opacity, 1.0);
-        assert!(!mask.layers[0].path_data.is_empty());
+        let path = matte
+            .isocontours(0.5)
+            .iter()
+            .map(|contour| fitted_alpha_contour_path_data(contour))
+            .collect::<String>();
+        assert!(!path.is_empty());
     }
 
     #[cfg(feature = "diagnostics")]

@@ -1,117 +1,167 @@
 # picvec
 
-Native Rust implementation of the perceptual, structure-aware raster-to-SVG
-pipeline. It creates editable SVG Paint faces, Office-compatible solid/linear/
-elliptical-radial fills (at most five stops), raster-derived shared topology,
-analytic primitives, and source-supported structural centre-lines.
+picvec converts raster images into editable SVG using Rust. Output consists of
+painted paths, geometric primitives and supported structural lines, with solid
+colours or linear/radial gradients. The converter uses the original image as
+its reference; it does not embed the source bitmap in the SVG.
 
-## Build
+## Build and convert
 
-```bash
+```sh
 mise exec -- cargo build --release --locked
-```
-
-Diagnostic CLI options and JSON diagnostic output are available in builds
-that enable the optional `diagnostics` feature:
-
-```bash
-mise exec -- cargo build --release --locked --features diagnostics
-```
-
-The converter uses the portable [`wide`](https://crates.io/crates/wide) SIMD
-library across supported CPU architectures. It contains no vendored or
-hand-written assembly and requires no assembly-specific build step.
-
-## Run
-
-```bash
-./target/release/picvec input.png output.svg [OPTIONS]
+./target/release/picvec input.png output.svg
 ./target/release/picvec --help
 ```
 
-The first argument is the input raster; the second is the SVG file to create.
+The second argument is the exact SVG file to write. The converter writes it
+atomically and does not create PNG or JSON sidecars. It embeds `resvg` for
+internal rendering and uses portable `wide` SIMD; librsvg, ImageMagick and an
+external upscaler are not converter runtime dependencies.
 
-| Option | Description (default) |
+Completion reports the dimensions, **final SVG object count**, **path contour
+count** (`subpaths`) and elapsed time. Groups and definitions are excluded from
+the object count. A compound path is one object even when it contains many
+`M`/`m` contours; the contour count makes that distinction visible. These counts
+come from the final SVG, including accepted source refinements, rather than
+from the initial raster segmentation.
+
+| Option | Purpose and default |
 | --- | --- |
-| `--max-dimension <PX>` | Upper bound for automatic processing size (1600). |
+| `--max-dimension <PX>` | Maximum automatic **base** processing dimension (1600). Source refinements may be larger. |
+| `--no-adaptive-refinement` | Disable source-resolution refinement. |
+| `--adaptive-svg-budget-mib <MIB>` | Additional SVG byte budget for refinement (0: unlimited). Quality and efficiency checks still apply. |
+| `--remove-chroma-key-background` | Detect and remove a saturated red, green, blue, cyan, magenta or yellow backing. |
+| `--paint-merge-passes <N>` | Paint merge passes, 1–8 (1). |
+| `--oklab-palette-threshold-scale <FACTOR>` | Palette tolerance multiplier in 100-scaled OKLab units (1.0). |
+| `--threads <N>` | Worker count (0: half the detected CPUs, at least 1 and capped at 4). |
 | `--max-input-dimension <PX>` | Maximum source width or height (32768). |
 | `--max-input-megapixels <MP>` | Maximum source area (32). |
-| `--max-decode-mib <MIB>` | Best-effort decoder memory limit (512). |
-| `--remove-chroma-key-background` | Remove a detected red, green, blue, cyan, magenta, or yellow background. |
-| `--paint-merge-passes <N>` | Region-merge passes, from 1 to 8 (1). |
-| `--no-adaptive-refinement` | Disable source-resolution detail refinement. |
-| `--adaptive-svg-budget-mib <MIB>` | Maximum additional SVG size for refinement (0: unlimited, default). |
-| `--oklab-palette-threshold-scale <FACTOR>` | Scale palette tolerances into 100 × OKLab distance (1.0). |
-| `--threads <N>` | Worker count; 0 selects half the detected CPUs, capped at 4 and at least 1 (0). |
-| `--quality-metrics` | Report full-SVG 100-scaled OKLab distance/SSIM to stderr; requires `diagnostics`. |
-| `--verbose` | Print a JSON diagnostic report to stderr; requires `diagnostics`. |
+| `--max-decode-mib <MIB>` | Best-effort decoder allocation limit (512 MiB). |
 
-Perceptual colour processing uses OKLab throughout, including smoothing,
-palette selection, region merging, gradient fitting and quality evaluation.
-All three coordinates and distances are scaled by 100 (white has L=100).
-Diagnostics report `delta_e_ok_mean`, `delta_e_ok_p90` and `delta_e_ok_p99`.
-See [the migration report](docs/oklab.md) for thresholds and validation.
+Enable the optional diagnostic build for `--verbose` (stage timings and JSON
+summary) or `--quality-metrics` (completed-SVG OKLab/SSIM measurements):
 
-## Examples
-
-Each comparison shows the source raster on the left and the corresponding SVG
-rendering on the right. Regenerate SVGs with
-`scripts/generate_sample_svgs.sh` (optionally followed by input file names).
-The script preserves the sample settings, including `--remove-chroma-key-background`
-for `cliparts-6x6.png`; omitting that flag also changes refinement grouping.
-
-The committed comparison assets can be regenerated by
-the optional `scripts/generate_sample_comparisons.sh` maintenance script. That
-script currently uses librsvg and ImageMagick, but neither is a converter
-runtime dependency.
-
-![Boy and turtle raster input and rendered SVG output](sample/comparison/boy_and_turtle.png)
-
-![Car raster input and rendered SVG output](sample/comparison/car.png)
-
-![Clip art raster input and rendered SVG output](sample/comparison/cliparts.png)
-
-![Mountain raster input and rendered SVG output](sample/comparison/viewport1.png)
-
-![Coast raster input and rendered SVG output](sample/comparison/viewport2.png)
-
-## x4 evaluation
-
-`scripts/evaluate.py` evaluates a completed SVG against a Real-ESRGAN x4
-reference without feeding that image back into vectorization. A standalone x4
-PNG can be created with SVGDeck's migrated PyTorch/Spandrel generator:
-
-```bash
-timeout 600s nice -n 10 mise x -- uv run scripts/generate_realesrgan_x4.py \
-  input.png reference-x4.png \
-  --model /path/to/RealESRGAN_x4plus_anime_6B.pth
+```sh
+mise exec -- cargo build --release --locked --features diagnostics
+./target/release/picvec input.png output.svg --verbose
 ```
 
-Transparent inputs are composited onto white for evaluation. Use the same
-`--background` colour with the standalone generator and the evaluator when
-evaluating against another background.
+Diagnostic output goes to stderr. Segmentation and geometry diagnostics describe
+the base processing stages; the final object/contour counts describe the complete
+emitted document.
 
-See `scripts/picvec_eval/README.md` for NCNN and PyTorch evaluator usage,
-content-addressed caching, and reproducibility controls. The evaluator's
-separate SVG rasterization step currently uses `rsvg-convert`.
+## Processing order
 
-## Pipeline
+All images and adaptive source refinements use the same vectorization core.
+There is no separate sparse-drawing SVG generator for `booster-layout`.
 
-1. Check the input size, choose a suitable base resolution, and resize the
-   raster when needed.
-2. Detect colour regions, boundaries, shading, and thin structural lines.
-   Recover complete, isolated uniform-width bands and their two incident fills.
-   Correct antialias pixels and merge only neighbouring regions that can share
-   one fill without losing a visible boundary.
-3. Fit each region with a solid colour or a linear/radial gradient. Neighbouring
-   gradients are adjusted when doing so produces a smoother result.
-4. Convert region boundaries into shared vector curves. Adjacent regions reuse
-   the same curve, and simple regions become rectangles, circles, or ellipses
-   when it is safe to do so.
-5. Render the Paint layer once with embedded `resvg`, then add structural lines
-   that are still missing from that preview.
-6. For a downscaled input, compare the base render with source-resolution
-   regions. Refit only regions that improve the common perceptual-error/SVG-rate
-   objective, using original pixels and a clipped overlap halo.
-7. Add a small overlap between Paint regions to hide renderer seams and write
-   the final editable SVG atomically to the requested path.
+1. Decode and validate the source, distinguish paint opacity from edge coverage,
+   and select the base resolution.
+2. Analyse boundaries, shading and thin lines. Build material ownership and
+   absorb locally supported antialias fragments into their incident regions.
+   Preserve source-supported dots, highlights, colour and opacity boundaries.
+3. Fit solid/gradient paints and merge compatible ownership before tracing.
+   Narrow chromatic-rim recovery supplies ordinary ownership labels before
+   alpha partitioning; it does not append independently fitted tip overlays.
+4. Construct shared boundaries and fit curves or geometric primitives. Adjacent
+   faces reuse their common boundary. Authored transparency stays in paint.
+5. Determine paint order from line width, elongation and source contrast, then
+   construct overlap beneath later faces to prevent seams. Validate ordering
+   and covered-hole simplification against rendered source evidence. Retain
+   structural lines only when they contribute to the painted result.
+6. Remove invisible contributions and serialize the core result. For downscaled
+   inputs, evaluate finer source candidates through this same core. Accept only
+   candidates that pass the common quality-gain, missing-edge and SVG-cost checks.
+7. Compose accepted refinements, discard superseded base geometry when the whole
+   canvas is replaced, count the final drawing elements and write the SVG.
+
+Connected drawings are not split arbitrarily across a rectangular grid. When no
+safe local refinement core exists, the complete source can be evaluated as a
+candidate. This preserves one model for connected strokes and gradients, but can
+be much slower than the base conversion. A configured SVG budget limits accepted
+additional output bytes, **not** evaluation time or peak memory.
+
+### Transparency and visible geometry
+
+- Alpha is expressed by fill/stroke opacity or gradient-stop opacity. SVG alpha
+  masks and group opacity are not used; zero-alpha paint faces are omitted.
+- Edge coverage informs the fitted visible contour. It must not merely hide a
+  stair-stepped RGB contour behind a smoothed mask.
+- Geometric clipping may delimit adaptive source replacements or stroke outlines.
+  Local colour reconstructions explicitly composite each RGBA paint and the
+  completed patch before clipping, using a neutral sRGB filter and opaque boundary
+  support. This prevents the black rectangles reproduced in VS Code/Chromium;
+  CSS isolation alone was insufficient. Boundary colour matching preserves source
+  alpha instead of copying coverage errors from the coarse preview.
+- Redundant regions should be merged before fitting. Final visibility checks
+  remove contributions only when the rendered RGBA result permits it. Useful
+  partial overlaps and authored translucent details remain.
+
+## Samples and regeneration
+
+Regenerate all current inputs, then rebuild their comparisons:
+
+```sh
+mise exec -- bash scripts/generate_sample_svgs.sh
+bash scripts/generate_sample_comparisons.sh
+```
+
+The SVG script builds with diagnostics enabled and uses four workers. It also
+accepts input file names to regenerate a subset, for example:
+
+```sh
+mise exec -- bash scripts/generate_sample_svgs.sh car.png cliparts.png
+```
+
+`cliparts-6x6.png` uses the sample's explicit
+`--remove-chroma-key-background` setting. Other samples use the normal defaults.
+The comparison script discovers the current `sample/input` files and requires
+the corresponding SVGs. It uses `rsvg-convert` and ImageMagick, with the raster
+on the left and SVG rendering on the right, both on white.
+
+| Input | Editable output | Comparison | Objects | Path contours |
+| --- | --- | --- | ---: | ---: |
+| [Booster layout](sample/input/booster-layout.jpg) | [SVG](sample/output/booster-layout.svg) | [PNG](sample/comparison/booster-layout.png) | 16,445 | 24,614 |
+| [Boy and turtle](sample/input/boy_and_turtle.png) | [SVG](sample/output/boy_and_turtle.svg) | [PNG](sample/comparison/boy_and_turtle.png) | 80 | 128 |
+| [Car](sample/input/car.png) | [SVG](sample/output/car.svg) | [PNG](sample/comparison/car.png) | 853 | 952 |
+| [Cliparts](sample/input/cliparts.png) | [SVG](sample/output/cliparts.svg) | [PNG](sample/comparison/cliparts.png) | 4,692 | 14,060 |
+| [Cliparts 6×6](sample/input/cliparts-6x6.png) | [SVG](sample/output/cliparts-6x6.svg) | [PNG](sample/comparison/cliparts-6x6.png) | 29,282 | 30,722 |
+| [Still life](sample/input/vectorization-stress-still-life.png) | [SVG](sample/output/vectorization-stress-still-life.svg) | [PNG](sample/comparison/vectorization-stress-still-life.png) | 13,897 | 18,877 |
+| [Viewport 1](sample/input/viewport1.jpg) | [SVG](sample/output/viewport1.svg) | [PNG](sample/comparison/viewport1.png) | 5,652 | 6,258 |
+| [Viewport 2](sample/input/viewport2.jpg) | [SVG](sample/output/viewport2.svg) | [PNG](sample/comparison/viewport2.png) | 30,500 | 35,501 |
+| [Wikipedia logo](sample/input/wikipedia_logo_1_0.png) | [SVG](sample/output/wikipedia_logo_1_0.svg) | [PNG](sample/comparison/wikipedia_logo_1_0.png) | 1,917 | 2,623 |
+
+## Validation and current limitations
+
+```sh
+mise exec -- cargo test --release --locked --features diagnostics
+mise exec -- cargo test --release --locked --features diagnostics \
+  scanned_annotations_retain_ink_through_the_common_pipeline -- --ignored
+```
+
+Tests cover shared topology, paint merging, ordering, visible thin lines,
+transparency and refinement composition. Enlarged source comparisons remain
+necessary: a lower raster error alone does not prove a sharper or more faithful
+editable contour.
+
+The common source-resolution model improves `booster-layout` over the earlier
+coarse normal conversion, but **does not yet match the removed dedicated
+coverage generator in quality, output size or speed**. The measured native-core
+experiment took about 14 minutes; the complete base-plus-refinement evaluation
+took about 16 minutes. Display-scale grayscale MAE was 4.36, versus 6.06 for the
+old coarse result and 2.85 for the removed shortcut. These figures describe this
+sample and test environment, not general performance guarantees.
+
+- [Common pipeline changes and measurements](docs/common-refinement.md)
+- [Cactus material ownership, enlarged comparisons and RGBA checks](docs/cliparts-spines.md)
+- [Rectangular seam correction and enlarged comparisons](docs/cliparts-patch-boundaries.md)
+
+## Optional x4 evaluation
+
+The Python evaluator compares a completed SVG with a Real-ESRGAN x4 reference.
+It does not feed the upscaled image back into vectorization. Models are supplied
+separately; the scripts do not download them. Transparent inputs use a white
+evaluation background by default.
+
+See [the evaluator guide](scripts/picvec_eval/README.md) for NCNN/PyTorch setup,
+model paths, source/reference matching, caching and reproducibility controls.

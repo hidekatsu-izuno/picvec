@@ -1744,6 +1744,154 @@ fn fitted_radial_geometry(source: &Raster, samples: &[usize]) -> Option<(Point, 
     Some((center, radius))
 }
 
+// Fit a positive-definite quadratic from source gradient directions. A
+// diagonal quadratic cannot recover tilted ellipses; quantizer bands then
+// look almost constant even though they belong to one curved highlight.
+fn fitted_rotated_radial_geometry(
+    source: &Raster,
+    samples: &[usize],
+) -> Option<(Point, Point, f32)> {
+    let b = bounds(samples, source.width);
+    let (sx, sy) = (
+        (b.max_x - b.min_x).max(1.0) as f64,
+        (b.max_y - b.min_y).max(1.0) as f64,
+    );
+    let mut normal = vec![vec![0.0; 4]; 4];
+    let mut target = vec![0.0; 4];
+    let mut count = 0;
+    let w = source.width;
+    for i in sampled_indices(samples, 1024) {
+        let (x, y) = (i % w, i / w);
+        if x < 2 || x + 2 >= w || y < 2 || y + 2 >= source.height {
+            continue;
+        }
+        for c in 0..3 {
+            let (p, l, r, t, d) = (
+                source.pixels[i][c],
+                source.pixels[i - 2][c],
+                source.pixels[i + 2][c],
+                source.pixels[i - 2 * w][c],
+                source.pixels[i + 2 * w][c],
+            );
+            if (l + r - 2.0 * p).abs().max((t + d - 2.0 * p).abs()) > 6.0 / 255.0
+                || (r - l).abs().max((d - t).abs()) > 32.0 / 255.0
+            {
+                continue;
+            }
+            let (gx, gy) = ((r - l) as f64 * sx, (d - t) as f64 * sy);
+            let (nx, ny) = (
+                (x as f64 - b.min_x as f64) / sx,
+                (y as f64 - b.min_y as f64) / sy,
+            );
+            let row = [gy * nx + gx * ny, gy * ny - gx * nx, gy, -gx];
+            for j in 0..4 {
+                target[j] += row[j] * gx * ny;
+                for k in 0..4 {
+                    normal[j][k] += row[j] * row[k];
+                }
+            }
+            count += 1;
+        }
+    }
+    if count < 48 {
+        return None;
+    }
+    let v = solve_system(normal, target);
+    quadratic_radial_geometry(source, samples, b, [v[0], v[1], 1.0 - v[0], v[2], v[3]])
+}
+
+// Quantized, shallow gradients have noisy finite differences. Fit their
+// colour values as a quadratic too, then test the resulting ellipse against
+// the same source samples. This is a model candidate, never an unconditional
+// replacement of the source field.
+fn fitted_value_radial_geometry(source: &Raster, samples: &[usize]) -> Option<(Point, Point, f32)> {
+    if samples.len() < 48 {
+        return None;
+    }
+    let b = bounds(samples, source.width);
+    let sx = (b.max_x - b.min_x).max(1.0) as f64;
+    let sy = (b.max_y - b.min_y).max(1.0) as f64;
+    let mean = mean_color(source, samples);
+    let channel = (0..3).max_by(|&a, &b| {
+        let variance = |c: usize| {
+            samples
+                .iter()
+                .map(|&i| (source.pixels[i][c] - mean[c]).powi(2))
+                .sum::<f32>()
+        };
+        variance(a).total_cmp(&variance(b))
+    })?;
+    let mut normal = vec![vec![0.0; 6]; 6];
+    let mut target = vec![0.0; 6];
+    for &i in samples {
+        let x = ((i % source.width) as f64 - b.min_x as f64) / sx;
+        let y = ((i / source.width) as f64 - b.min_y as f64) / sy;
+        let row = [x * x, 2.0 * x * y, y * y, 2.0 * x, 2.0 * y, 1.0];
+        for j in 0..6 {
+            target[j] += row[j] * source.pixels[i][channel] as f64;
+            for k in 0..6 {
+                normal[j][k] += row[j] * row[k];
+            }
+        }
+    }
+    let v = solve_system(normal, target);
+    let sign = if v[0] < 0.0 { -1.0 } else { 1.0 };
+    let scale = (v[0] + v[2]).abs();
+    if scale < 1e-6 {
+        return None;
+    }
+    quadratic_radial_geometry(
+        source,
+        samples,
+        b,
+        std::array::from_fn(|i| v[i] * sign / scale),
+    )
+}
+
+fn quadratic_radial_geometry(
+    source: &Raster,
+    samples: &[usize],
+    b: Bounds,
+    v: [f64; 5],
+) -> Option<(Point, Point, f32)> {
+    let (sx, sy) = (
+        (b.max_x - b.min_x).max(1.0) as f64,
+        (b.max_y - b.min_y).max(1.0) as f64,
+    );
+    let w = source.width;
+    let (a, q, c) = (v[0], v[1], v[2]);
+    let det = a * c - q * q;
+    if a <= 0.0 || c <= 0.0 || det <= 1e-6 {
+        return None;
+    }
+    let (cx, cy) = ((q * v[4] - c * v[3]) / det, (q * v[3] - a * v[4]) / det);
+    if !(-8.0..=9.0).contains(&cx) || !(-8.0..=9.0).contains(&cy) {
+        return None;
+    }
+    let (a, q, c) = (a / (sx * sx), q / (sx * sy), c / (sy * sy));
+    let disc = ((a - c) * (a - c) + 4.0 * q * q).sqrt();
+    let (hi, lo) = ((a + c + disc) * 0.5, (a + c - disc) * 0.5);
+    if lo <= 0.0 || hi / lo > 10000.0 {
+        return None;
+    }
+    let rotation = (0.5 * (2.0 * q).atan2(a - c)) as f32;
+    let center = Point {
+        x: b.min_x + (cx * sx) as f32,
+        y: b.min_y + (cy * sy) as f32,
+    };
+    let mut radius = Point {
+        x: (1.0 / hi.sqrt()) as f32,
+        y: (1.0 / lo.sqrt()) as f32,
+    };
+    let scale = samples
+        .iter()
+        .map(|&i| rotated_radial_parameter(i, w, center, radius, rotation))
+        .fold(0.01_f32, f32::max);
+    radius.x *= scale;
+    radius.y *= scale;
+    Some((center, radius, rotation))
+}
+
 // Gradient normals supply an initial geometry, not the final colour fit.
 // Refine the focus and aspect on this face's samples: a halo can put the
 // focus inside a highlight that is still brightening towards its boundary.
@@ -1868,6 +2016,101 @@ fn refine_radial_paint(
     best
 }
 
+/// Fit opacity on the colour gradient's coordinate. SVG can then express
+/// both fields with colour and opacity stops on one continuous gradient.
+pub(crate) fn fit_alpha_on_paint(
+    source: &Raster,
+    pixels: &[usize],
+    paint: &Paint,
+) -> Option<Paint> {
+    if !matches!(paint, Paint::Linear { .. } | Paint::Radial { .. }) {
+        return None;
+    }
+    let samples = sampled_indices(pixels, 2048);
+    let parameters: Vec<_> = samples
+        .iter()
+        .map(|&i| coupled_parameter(paint, i, source.width))
+        .collect();
+    for count in [2usize, 3, 5, 9, 17] {
+        let offsets: Vec<_> = (0..count).map(|i| i as f64 / (count - 1) as f64).collect();
+        let fitted = fitted_stops(source, &samples, &parameters, &offsets);
+        let mut field = paint.clone();
+        match &mut field {
+            Paint::Linear { stops, .. } | Paint::Radial { stops, .. } => *stops = fitted,
+            _ => unreachable!(),
+        }
+        let errors: Vec<_> = samples
+            .iter()
+            .map(|&i| (source.pixels[i][0] - paint_at(&field, i, source.width)[0]).abs())
+            .collect();
+        let mean = errors.iter().sum::<f32>() / errors.len().max(1) as f32;
+        if mean <= 2.0 / 255.0 && percentile(errors, 0.90) <= 4.0 / 255.0 {
+            return Some(field);
+        }
+    }
+    None
+}
+
+/// Try the opacity coordinate when the independently fitted colour axis
+/// cannot explain alpha. Keep the refit only within the original RGB error.
+pub(crate) fn fit_colour_on_alpha(
+    source: &Raster,
+    pixels: &[usize],
+    original: &Paint,
+    alpha: &Paint,
+) -> Option<Paint> {
+    if !matches!(alpha, Paint::Linear { .. } | Paint::Radial { .. }) {
+        return None;
+    }
+    let samples = sampled_indices(pixels, 2048);
+    let parameters: Vec<_> = samples
+        .iter()
+        .map(|&i| coupled_parameter(alpha, i, source.width))
+        .collect();
+    let original_rms = paint_rgb_mse(source, &samples, original).sqrt();
+    for count in [3usize, 5, 9, 17] {
+        let offsets: Vec<_> = (0..count).map(|i| i as f64 / (count - 1) as f64).collect();
+        let fitted = fitted_stops(source, &samples, &parameters, &offsets);
+        let mut colour = alpha.clone();
+        match &mut colour {
+            Paint::Linear { stops, .. } | Paint::Radial { stops, .. } => *stops = fitted,
+            _ => unreachable!(),
+        }
+        let rms = paint_rgb_mse(source, &samples, &colour).sqrt();
+        if rms <= (original_rms + 1.0 / 255.0).min(5.0 / 255.0) {
+            return Some(colour);
+        }
+    }
+    None
+}
+
+pub(crate) fn same_gradient_geometry(a: &Paint, b: &Paint) -> bool {
+    match (a, b) {
+        (
+            Paint::Linear {
+                start: a0, end: a1, ..
+            },
+            Paint::Linear {
+                start: b0, end: b1, ..
+            },
+        ) => a0 == b0 && a1 == b1,
+        (
+            Paint::Radial {
+                center: ac,
+                radius: ar,
+                rotation: at,
+                ..
+            },
+            Paint::Radial {
+                center: bc,
+                radius: br,
+                rotation: bt,
+                ..
+            },
+        ) => ac == bc && ar == br && at == bt,
+        _ => false,
+    }
+}
 pub(crate) fn fit_alpha_field(source: &Raster, pixels: &[usize]) -> Option<Paint> {
     let mut samples = sampled_indices(pixels, 2048);
     samples.sort_unstable();
@@ -1994,14 +2237,24 @@ fn office_gradient_candidate_with_labs(
     if let Some((center, radius)) = fitted_radial_geometry(source, samples) {
         radial_models.push((RadialOrigin::Fitted, center, radius));
     }
-    for (origin, center, radius) in radial_models {
+    let mut radial_models: Vec<_> = radial_models
+        .into_iter()
+        .map(|(origin, center, radius)| (origin, center, radius, 0.0))
+        .collect();
+    if let Some((center, radius, rotation)) = fitted_rotated_radial_geometry(source, samples) {
+        radial_models.push((RadialOrigin::Fitted, center, radius, rotation));
+    }
+    if let Some((center, radius, rotation)) = fitted_value_radial_geometry(source, samples) {
+        radial_models.push((RadialOrigin::Fitted, center, radius, rotation));
+    }
+    for (origin, center, radius, rotation) in radial_models {
         let parameters: Vec<f32> = samples
             .iter()
-            .map(|&index| radial_parameter(index, source.width, center, radius))
+            .map(|&index| rotated_radial_parameter(index, source.width, center, radius, rotation))
             .collect();
         let stops = fitted_stops(source, samples, &parameters, &[0.0, 1.0]);
         let paint = Paint::Radial {
-            rotation: 0.0,
+            rotation,
             origin,
             center,
             radius,
@@ -2039,6 +2292,38 @@ fn office_gradient_candidate_with_labs(
         candidates[selected].3.expect("selected stats"),
         maximum_stops,
     );
+
+    // Compare curved fields with their stop profiles fitted. Ranking only
+    // two-stop candidates can discard an ellipse whose highlight rises and
+    // falls, even when its final multi-stop fit is much more accurate.
+    for candidate in &mut candidates {
+        if !matches!(
+            candidate.1,
+            Paint::Radial {
+                origin: RadialOrigin::Fitted,
+                ..
+            }
+        ) || candidate.1 == selected_two_stop
+        {
+            continue;
+        }
+        let stats = *candidate.3.get_or_insert_with(|| {
+            paint_stats_against_sample_labs(reference_labs, samples, source.width, &candidate.1)
+        });
+        let expanded = add_office_stops(
+            source,
+            reference_labs,
+            samples,
+            &candidate.2,
+            &candidate.1,
+            stats,
+            maximum_stops,
+        );
+        if objective(expanded.1) < objective(gradient_stats) {
+            gradient = expanded.0;
+            gradient_stats = expanded.1;
+        }
+    }
 
     let mean = mean_color(source, samples);
     let solid = Paint::Solid { color: mean };
@@ -2570,7 +2855,7 @@ fn fitted_stops_direct(
         .collect()
 }
 
-fn paint_at(paint: &Paint, index: usize, width: usize) -> [f32; 3] {
+pub(crate) fn paint_at(paint: &Paint, index: usize, width: usize) -> [f32; 3] {
     match paint {
         Paint::Solid { color } => *color,
         Paint::Linear {
@@ -3390,19 +3675,16 @@ fn fit_residual_paint(
                             opacity_stops,
                         };
                         let mut candidate_at = |i| {
-                            let under = *current_pixels.entry(i).or_insert_with(|| {
-                                paint_at(&current, i, source.width)
-                            });
+                            let under = *current_pixels
+                                .entry(i)
+                                .or_insert_with(|| paint_at(&current, i, source.width));
                             let (over, alpha) = sample_overlay(&overlay, i, source.width);
                             [0, 1, 2].map(|c| under[c] * (1.0 - alpha) + over[c] * alpha)
                         };
                         let mse = paint_rgb_mse_with(source, samples, &mut candidate_at);
                         if best.as_ref().is_none_or(|(best_mse, _)| mse < *best_mse)
                             && supported.iter().all(|&(i, target, error)| {
-                                delta_e_ok(
-                                    target,
-                                    rgb_to_oklab(candidate_at(i)),
-                                ) <= error + 1.0
+                                delta_e_ok(target, rgb_to_oklab(candidate_at(i))) <= error + 1.0
                             })
                             && slopes.iter().all(|&(i, j, target, original)| {
                                 let predicted = difference(
@@ -3427,6 +3709,49 @@ fn fit_residual_paint(
             || current_mse - candidate_mse < 1e-7
         {
             break;
+        }
+        // Relative MSE gains can reward tiny colour corrections indefinitely.
+        // Bound their perceptual effect over both fitting and held-out samples
+        // before adding another copy of the face geometry.
+        let mut maximum_change = 0.0_f32;
+        let mut maximum_rgb_change = 0.0_f32;
+        let mut improvement = 0.0_f32;
+        let mut observations = 0;
+        for &i in samples.iter().chain(validation_samples) {
+            let under = paint_at(&current, i, source.width);
+            let (over, alpha) = sample_overlay(&overlay, i, source.width);
+            let after = [0, 1, 2].map(|c| under[c] * (1.0 - alpha) + over[c] * alpha);
+            maximum_rgb_change = maximum_rgb_change.max(
+                (0..3)
+                    .map(|c| (under[c] - after[c]).abs())
+                    .fold(0.0_f32, f32::max),
+            );
+            let before_lab = rgb_to_oklab(under);
+            let after_lab = rgb_to_oklab(after);
+            let target = rgb_to_oklab(source.pixels[i]);
+            maximum_change = maximum_change.max(delta_e_ok(before_lab, after_lab));
+            improvement += delta_e_ok(target, before_lab) - delta_e_ok(target, after_lab);
+            observations += 1;
+        }
+        // Near black, a few native code values can exceed the perceptual
+        // threshold. Require useful average evidence before copying a whole
+        // face for such a bounded RGB correction.
+        if (maximum_change <= 4.0 || maximum_rgb_change <= 4.01 / 255.0)
+            && improvement / observations as f32 <= 0.25
+        {
+            break;
+        }
+        let proposed = Paint::Layered {
+            base: Box::new(current.clone()),
+            overlays: vec![overlay.clone()],
+        };
+        if let Some(single) =
+            refit_single_residual_field(source, samples, validation_samples, &proposed)
+        {
+            let stats = paint_stats(source, samples, &single);
+            if objective(stats) <= objective(paint_stats(source, samples, &proposed)) + 0.25 {
+                return (single, stats);
+            }
         }
         current = Paint::Layered {
             base: Box::new(current),
@@ -3754,9 +4079,8 @@ fn merge_proposal(
     );
     let mut quick_samples = first_samples.clone();
     quick_samples.extend_from_slice(&second_samples);
-    let reference_labs = preprocess_color_values(
-        quick_samples.iter().map(|&i| source.pixels[i]).collect(),
-    );
+    let reference_labs =
+        preprocess_color_values(quick_samples.iter().map(|&i| source.pixels[i]).collect());
     let stats = |samples: &[usize], labs: &[Oklab], paint: &Paint| {
         paint_stats_against_sample_labs(labs, samples, source.width, paint)
     };
@@ -3969,6 +4293,62 @@ fn python_int_set_order(values: &[usize]) -> Vec<usize> {
     table.into_iter().flatten().collect()
 }
 
+pub(crate) fn has_unresolved_local_shading(source: &Raster, pixels: &[usize]) -> bool {
+    let core: Vec<_> = pixels
+        .iter()
+        .copied()
+        .filter(|&i| smooth_native_paint_sample(source, source, i))
+        .collect();
+    if core.len() < 48 {
+        return false;
+    }
+    // Low-amplitude shading should stay in one fitted paint. Introducing
+    // spatial owners for a few colour codes would recreate the redundant
+    // book/eyelid fragments that paint simplification already removes.
+    let resolved_range = (0..3).any(|c| {
+        let (low, high) = core
+            .iter()
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |(low, high), &i| {
+                (low.min(source.pixels[i][c]), high.max(source.pixels[i][c]))
+            });
+        high - low > 24.0 / 255.0
+    });
+    if !resolved_range {
+        return false;
+    }
+    let samples = sampled_indices(&core, 1024);
+    let Some(paint) = fit_outline_field(source, &samples, 1.0) else {
+        return true;
+    };
+    !merge_preserves_local_shading(source, &core, &paint, 1.5)
+}
+
+fn merge_preserves_local_shading(
+    source: &Raster,
+    pixels: &[usize],
+    paint: &Paint,
+    limit: f32,
+) -> bool {
+    let mut tiles = HashMap::<(usize, usize), (f32, usize)>::new();
+    for &i in pixels.iter().step_by(2) {
+        if !smooth_native_paint_sample(source, source, i) {
+            continue;
+        }
+        let error = delta_e_ok(
+            rgb_to_oklab(source.pixels[i]),
+            rgb_to_oklab(paint_at(paint, i, source.width)),
+        );
+        let entry = tiles
+            .entry((i % source.width / 8, i / source.width / 8))
+            .or_default();
+        entry.0 += error;
+        entry.1 += 1;
+    }
+    tiles
+        .values()
+        .all(|&(sum, count)| count < 4 || sum / count as f32 <= limit)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn merge_candidate_proposal(
     source: &Raster,
@@ -3995,6 +4375,20 @@ fn merge_candidate_proposal(
     // No later boundary check can rescue a rejected colour fit.
     if !proposal.score.is_finite() {
         return None;
+    }
+    // Insets and repeated resampling can omit a narrow shadow inside a
+    // growing owner. Check spatially distributed native material samples
+    // before discarding either child's boundary. A good global mean must not
+    // hide a locally bright patch in an otherwise dark strip.
+    for child in [first, second] {
+        if !merge_preserves_local_shading(
+            source,
+            &child.pixels,
+            &proposal.paint,
+            config.gradient_merge_error * 1.5,
+        ) {
+            return None;
+        }
     }
     let union_labels: HashSet<usize> = first.labels.union(&second.labels).copied().collect();
     let mut checked_boundaries = HashSet::<usize>::new();
@@ -6239,8 +6633,16 @@ pub(crate) fn merge_source_supported_paints(
     let boundary_labs = oklab_pixels(boundary_source);
     let boundaries = smooth_paint_boundaries(&boundary_labs, segmentation, 2, true);
     merge_source_supported_paints_with_evidence(
-        source, boundary_source, segmentation, paints, config,
-        PaintEvidence { source_labs, boundary_labs, boundaries },
+        source,
+        boundary_source,
+        segmentation,
+        paints,
+        config,
+        PaintEvidence {
+            source_labs,
+            boundary_labs,
+            boundaries,
+        },
     )
 }
 
@@ -6528,6 +6930,18 @@ fn merge_source_supported_paints_round(
                 rejected.insert(cache_key);
                 continue;
             }
+        }
+        if [left, right].iter().any(|&owner| {
+            !merge_preserves_local_shading(
+                source,
+                &region_pixels[owner],
+                &proposal.paint,
+                config.gradient_merge_error * 1.5,
+            )
+        }) {
+            rejected_face += 1;
+            rejected.insert(cache_key);
+            continue;
         }
         used[left] = true;
         used[right] = true;
@@ -6960,7 +7374,15 @@ fn fit_all_internal(
         ..GradientSummary::default()
     };
     refresh_summary(&mut summary, &paints);
-    (paints, summary, PaintEvidence { source_labs, boundary_labs, boundaries })
+    (
+        paints,
+        summary,
+        PaintEvidence {
+            source_labs,
+            boundary_labs,
+            boundaries,
+        },
+    )
 }
 
 #[cfg(feature = "diagnostics")]
@@ -7177,6 +7599,113 @@ fn blend_cross_axis_field(under: &Paint, fitted: &Paint, amount: f64) -> Paint {
     }
 }
 
+// Prefer replacing the colour field to stacking residual copies of its path.
+// Judge against native pixels, including held-out support, rather than trying
+// to reproduce noise already introduced by the composite.
+fn refit_single_residual_field(
+    source: &Raster,
+    samples: &[usize],
+    validation: &[usize],
+    original: &Paint,
+) -> Option<Paint> {
+    if samples.len() < 6 {
+        return None;
+    }
+    let observations: Vec<_> = samples
+        .iter()
+        .chain(validation)
+        .map(|&i| {
+            let target = rgb_to_oklab(source.pixels[i]);
+            (
+                i,
+                target,
+                delta_e_ok(target, rgb_to_oklab(paint_at(original, i, source.width))),
+            )
+        })
+        .collect();
+    let acceptable = |candidate: &Paint| {
+        let mut increase = 0.0;
+        for &(i, target, before) in &observations {
+            let after = delta_e_ok(target, rgb_to_oklab(paint_at(candidate, i, source.width)));
+            if after > before + 1.5 {
+                return false;
+            }
+            increase += after - before;
+        }
+        increase / observations.len() as f32 <= 0.25
+    };
+    if let Some(candidate) = fit_outline_field(source, samples, 2.0) {
+        if acceptable(&candidate) {
+            return Some(candidate);
+        }
+    }
+    // A nonlinear colour profile can have almost no overall slope. Selecting
+    // its axis from a two-stop/plane fit misses single fields that need more
+    // stops. Search profiles on the existing axes and rotated axes directly.
+    let mut geometries = Vec::new();
+    fn collect(paint: &Paint, out: &mut Vec<Paint>) {
+        match paint {
+            Paint::Layered { base, overlays } => {
+                collect(base, out);
+                for overlay in overlays {
+                    collect(&overlay.paint, out);
+                }
+            }
+            Paint::Linear { .. } | Paint::Radial { .. } => out.push(paint.clone()),
+            Paint::Solid { .. } => {}
+        }
+    }
+    collect(original, &mut geometries);
+    for angle in (0..180).step_by(5) {
+        let angle = (angle as f32).to_radians();
+        let (start, end) =
+            fitted_linear_geometry(samples, source.width, (angle.cos(), angle.sin()));
+        geometries.push(Paint::Linear {
+            preset: LinearPreset::Fitted,
+            start,
+            end,
+            stops: Vec::new(),
+        });
+    }
+    let mut best = None;
+    let mut best_score = f32::INFINITY;
+    for geometry in geometries {
+        let has_stops = match &geometry {
+            Paint::Linear { stops, .. } | Paint::Radial { stops, .. } => !stops.is_empty(),
+            _ => false,
+        };
+        if has_stops {
+            let stats = paint_stats(source, samples, &geometry);
+            let score = objective(stats);
+            if stats.mean <= 2.0
+                && stats.percentile <= 4.0
+                && score < best_score
+                && acceptable(&geometry)
+            {
+                best_score = score;
+                best = Some(geometry.clone());
+            }
+        }
+        let parameters: Vec<_> = samples
+            .iter()
+            .map(|&i| coupled_parameter(&geometry, i, source.width))
+            .collect();
+        let stops = fitted_stops(source, samples, &parameters, &[0.0, 0.25, 0.5, 0.75, 1.0]);
+        let candidate = paint_with_stops(&geometry, stops);
+        let stats = paint_stats(source, samples, &candidate);
+        let score = objective(stats);
+        if stats.mean <= 2.0
+            && stats.percentile <= 4.0
+            && score < best_score
+            && acceptable(&candidate)
+        {
+            best_score = score;
+            best = Some(candidate);
+        }
+    }
+    best
+}
+
 // Run after owner merging: rejecting a residual layer must not split a
 // continuous highlight back into its quantized colour bands.
 pub(crate) fn refine_residual_shapes(
@@ -7204,6 +7733,13 @@ pub(crate) fn refine_residual_shapes(
             }
             let support = residual::SlopeSupport::new(source, base, pixels);
             let supported = |candidate: &Paint| support.accepts(candidate);
+            let samples = sampled_indices(pixels, 2048);
+            if let Some(candidate) = refit_single_residual_field(source, &samples, pixels, paint) {
+                if supported(&candidate) {
+                    *paint = candidate;
+                    return 1;
+                }
+            }
             if supported(paint) {
                 return 0;
             }
@@ -7287,6 +7823,9 @@ pub(crate) fn refine_residual_shapes(
             } else {
                 retained
             };
+            let candidate = refit_single_residual_field(source, &samples, pixels, &candidate)
+                .filter(|single| supported(single))
+                .unwrap_or(candidate);
             if candidate == *paint {
                 return 0;
             }
@@ -7294,6 +7833,138 @@ pub(crate) fn refine_residual_shapes(
             1
         })
         .sum()
+}
+
+/// Recheck continuous interior shading after ownership changes. Sample masks
+/// belong to the old partition: they must not erase a newly merged material's
+/// colour field. Keep boundary mixtures out of fitting and validate every core
+/// sample, rather than promoting a gradient merely because it is available.
+pub(crate) fn restore_interior_shading(
+    source: &Raster,
+    segmentation: &Segmentation,
+    paints: &mut [Paint],
+) -> usize {
+    let (w, h) = (source.width, source.height);
+    let mut cores = vec![Vec::new(); paints.len()];
+    for y in 1..h.saturating_sub(1) {
+        for x in 1..w.saturating_sub(1) {
+            let i = y * w + x;
+            if smooth_native_paint_sample(source, source, i) {
+                cores[segmentation.labels[i] as usize].push(i);
+            }
+        }
+    }
+    let mut changed: usize = paints
+        .par_iter_mut()
+        .zip(cores.par_iter())
+        .map(|(paint, pixels)| {
+            if pixels.len() < 48 {
+                return 0;
+            }
+            let samples = sampled_indices(pixels, 2048);
+            let old = paint_stats(source, &samples, paint);
+            if old.mean < 0.15 {
+                return 0;
+            }
+            let Some(candidate) = fit_outline_field(source, &samples, old.mean) else {
+                return 0;
+            };
+            if matches!(candidate, Paint::Solid { .. }) {
+                return 0;
+            }
+            let new = paint_stats(source, &samples, &candidate);
+            if new.mean + 0.1 >= old.mean || new.percentile > old.percentile {
+                return 0;
+            }
+            let mut gain = 0.0;
+            for &i in pixels {
+                let target = rgb_to_oklab(source.pixels[i]);
+                let before = delta_e_ok(target, rgb_to_oklab(paint_at(paint, i, w)));
+                let after = delta_e_ok(target, rgb_to_oklab(paint_at(&candidate, i, w)));
+                if after > before + 0.75 {
+                    return 0;
+                }
+                gain += before - after;
+            }
+            if gain / pixels.len() as f32 <= 0.1 {
+                return 0;
+            }
+            *paint = candidate;
+            1
+        })
+        .sum();
+    // Fit across quantizer bands as well as inside them. Individually narrow
+    // bands do not constrain an ellipse's focus and may select flat paints.
+    // A common source-supported field removes that artificial discontinuity.
+    let labs = oklab_pixels(source);
+    let mut neighbours = vec![Vec::new(); paints.len()];
+    for b in smooth_paint_boundaries(&labs, segmentation, 2, true) {
+        if boundary_is_smooth(&b) && !boundary_has_material_step(&b) && b.median_delta_e <= 3.0 {
+            neighbours[b.left].push(b.right);
+            neighbours[b.right].push(b.left);
+        }
+    }
+    let mut used = vec![false; paints.len()];
+    let mut seeds: Vec<_> = (0..paints.len()).collect();
+    seeds.sort_by_key(|&i| std::cmp::Reverse(cores[i].len()));
+    for seed in seeds {
+        if used[seed] || cores[seed].len() < 48 || cores[seed].len() > 24000 {
+            continue;
+        }
+        let mut members = vec![seed];
+        let mut area = cores[seed].len();
+        for _ in 0..2 {
+            let previous = members.clone();
+            for owner in previous {
+                for &other in &neighbours[owner] {
+                    if !used[other]
+                        && !members.contains(&other)
+                        && cores[other].len() >= 16
+                        && members.len() < 12
+                        && area + cores[other].len() <= 24000
+                    {
+                        area += cores[other].len();
+                        members.push(other);
+                    }
+                }
+            }
+        }
+        if members.len() < 3 {
+            continue;
+        }
+        let mut samples = Vec::new();
+        for &owner in &members {
+            samples.extend(sampled_indices(&cores[owner], 256));
+        }
+        let Some(candidate) = fit_outline_field(source, &samples, 1.0) else {
+            continue;
+        };
+        if matches!(candidate, Paint::Solid { .. }) {
+            continue;
+        }
+        let mut gain = 0.0;
+        let accepted = members.iter().all(|&owner| {
+            let mut local_gain = 0.0;
+            for &i in &cores[owner] {
+                let before = delta_e_ok(labs[i], rgb_to_oklab(paint_at(&paints[owner], i, w)));
+                let after = delta_e_ok(labs[i], rgb_to_oklab(paint_at(&candidate, i, w)));
+                if after > before + 1.5 {
+                    return false;
+                }
+                local_gain += before - after;
+            }
+            gain += local_gain;
+            local_gain / cores[owner].len() as f32 >= -0.1
+        });
+        if accepted && gain / area as f32 > 0.05 {
+            for owner in members {
+                paints[owner] = candidate.clone();
+                used[owner] = true;
+                changed += 1;
+            }
+        }
+    }
+    changed
 }
 
 /// Replace repeated shaded geometry only when a single field reproduces the
@@ -7313,6 +7984,31 @@ pub(crate) fn simplify_layered_paints(
     let mut changed = 0;
     for (paint, pixels) in paints.iter_mut().zip(owners) {
         if pixels.len() < 6 {
+            continue;
+        }
+        if let Some(candidate) = refit_single_residual_field(source, &pixels, &[], paint) {
+            *paint = candidate;
+            changed += 1;
+            continue;
+        }
+        // Try the existing base first: refitting the composite can reproduce
+        // its weak residual bumps and therefore miss a simpler supported paint.
+        let mut base = &*paint;
+        while let Paint::Layered { base: inner, .. } = base {
+            base = inner;
+        }
+        let mut maximum_change = 0.0_f32;
+        let mut loss = 0.0_f32;
+        for &i in &pixels {
+            let original = rgb_to_oklab(paint_at(paint, i, source.width));
+            let replacement = rgb_to_oklab(paint_at(base, i, source.width));
+            let target = rgb_to_oklab(source.pixels[i]);
+            maximum_change = maximum_change.max(delta_e_ok(original, replacement));
+            loss += delta_e_ok(target, replacement) - delta_e_ok(target, original);
+        }
+        if maximum_change <= 4.0 && loss / pixels.len() as f32 <= 0.25 {
+            *paint = base.clone();
+            changed += 1;
             continue;
         }
         for &i in &pixels {
@@ -7386,6 +8082,316 @@ pub(crate) fn fit_outline_field(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn orthogonal_colour_and_opacity_are_not_forced_onto_one_axis() {
+        let (w, h) = (32, 32);
+        let source = Raster::new(
+            w,
+            h,
+            (0..w * h)
+                .map(|i| [0.2 + 0.6 * (i % w) as f32 / 31.0; 3])
+                .collect(),
+        );
+        let alpha = Raster::new(
+            w,
+            h,
+            (0..w * h)
+                .map(|i| [0.2 + 0.6 * (i / w) as f32 / 31.0; 3])
+                .collect(),
+        );
+        let pixels: Vec<_> = (0..w * h).collect();
+        let colour = fit_alpha_field(&source, &pixels).unwrap();
+        let field = fit_alpha_field(&alpha, &pixels).unwrap();
+        assert!(fit_alpha_on_paint(&alpha, &pixels, &colour).is_none());
+        assert!(fit_colour_on_alpha(&source, &pixels, &colour, &field).is_none());
+    }
+
+    #[test]
+    fn penguin_highlight_can_share_an_rgba_coordinate() {
+        let data: serde_json::Value =
+            serde_json::from_str(include_str!("test-data/cliparts-highlight-field.json")).unwrap();
+        let image =
+            image::load_from_memory(include_bytes!("test-data/cliparts-highlight-field.png"))
+                .unwrap()
+                .to_rgba8();
+        let (w, h) = image.dimensions();
+        let source = Raster::new(
+            w as usize,
+            h as usize,
+            image
+                .pixels()
+                .map(|p| [p[0], p[1], p[2]].map(|v| v as f32 / 255.0))
+                .collect(),
+        );
+        let alpha = Raster::new(
+            w as usize,
+            h as usize,
+            image.pixels().map(|p| [p[3] as f32 / 255.0; 3]).collect(),
+        );
+        let point = |name: &str| Point {
+            x: data[name][0].as_f64().unwrap() as f32,
+            y: data[name][1].as_f64().unwrap() as f32,
+        };
+        let original = Paint::Radial {
+            origin: RadialOrigin::Fitted,
+            center: point("center"),
+            radius: point("radius"),
+            rotation: data["rotation"].as_f64().unwrap() as f32,
+            stops: data["stops"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|s| ColorStop {
+                    offset: s["offset"].as_f64().unwrap(),
+                    color: std::array::from_fn(|c| s["color"][c].as_f64().unwrap()),
+                })
+                .collect(),
+        };
+        let pixels: Vec<_> = data["pixels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i.as_u64().unwrap() as usize)
+            .collect();
+        assert!(fit_alpha_on_paint(&alpha, &pixels, &original).is_none());
+        let field = fit_alpha_field(&alpha, &pixels).expect("continuous highlight opacity");
+        let colour = fit_colour_on_alpha(&source, &pixels, &original, &field)
+            .expect("continuous highlight colour on opacity coordinate");
+        assert!(fit_alpha_on_paint(&alpha, &pixels, &colour).is_some());
+        assert!(
+            paint_rgb_mse(&source, &pixels, &colour).sqrt()
+                <= paint_rgb_mse(&source, &pixels, &original).sqrt() + 1.0 / 255.0
+        );
+    }
+
+    #[test]
+    fn merge_keeps_a_local_shadow_even_when_global_error_is_small() {
+        let (w, h) = (96, 64);
+        let source = Raster::new(
+            w,
+            h,
+            (0..w * h)
+                .map(|i| {
+                    let x = (i % w) as f32;
+                    let y = (i / w) as f32;
+                    let shadow = 0.16 * (-((x - 48.0).powi(2) + (y - 32.0).powi(2)) / 100.0).exp();
+                    [0.65 - shadow, 0.08, 0.09]
+                })
+                .collect(),
+        );
+        let pixels: Vec<_> = (0..w * h).collect();
+        let flattened = Paint::Solid {
+            color: [0.65, 0.08, 0.09],
+        };
+        assert!(paint_stats(&source, &pixels, &flattened).mean < 1.0);
+        assert!(!merge_preserves_local_shading(
+            &source, &pixels, &flattened, 2.7
+        ));
+        let uniform = Raster::new(w, h, vec![[0.65, 0.08, 0.09]; w * h]);
+        assert!(merge_preserves_local_shading(
+            &uniform, &pixels, &flattened, 2.7
+        ));
+    }
+
+    #[test]
+    fn tilted_highlight_band_keeps_its_radial_gradient() {
+        let (w, h) = (100, 80);
+        let (center, radius, rotation) =
+            (Point { x: 52.0, y: 68.0 }, Point { x: 90.0, y: 25.0 }, -0.6);
+        let source = Raster::new(
+            w,
+            h,
+            (0..w * h)
+                .map(|i| {
+                    let t = rotated_radial_parameter(i, w, center, radius, rotation);
+                    [0.85 - 0.08 * t, 0.55 - 0.12 * t, 0.5 - 0.1 * t]
+                })
+                .collect(),
+        );
+        let samples: Vec<_> = (0..w * h)
+            .filter(|&i| {
+                (0.9..1.2).contains(&rotated_radial_parameter(i, w, center, radius, rotation))
+            })
+            .collect();
+        let (paint, stats) = office_gradient_candidate_with_labs(
+            &source,
+            &samples
+                .iter()
+                .map(|&i| rgb_to_oklab(source.pixels[i]))
+                .collect::<Vec<_>>(),
+            &samples,
+            bounds(&samples, w),
+            5,
+        )
+        .unwrap();
+        assert!(
+            stats.mean < 0.1,
+            "tilted band flattened: {stats:?} {paint:?}"
+        );
+        assert!(matches!(paint, Paint::Radial { .. }));
+    }
+
+    #[test]
+    fn merged_material_recovers_shading_without_reintroducing_overlay_faces() {
+        let (w, h) = (64, 48);
+        let source = Raster::new(
+            w,
+            h,
+            (0..w * h)
+                .map(|i| {
+                    let v = 0.2 + 0.3 * (i / w) as f32 / (h - 1) as f32;
+                    [0.7 + v * 0.3, v, v * 0.8]
+                })
+                .collect(),
+        );
+        let mut seg = two_face_segmentation(&source);
+        seg.paint_samples.fill(false);
+        let mut paints = vec![
+            Paint::Solid {
+                color: [0.8, 0.35, 0.28]
+            };
+            2
+        ];
+        assert_eq!(restore_interior_shading(&source, &seg, &mut paints), 2);
+        for x in [16, 48] {
+            for y in [8, 24, 40] {
+                let i = y * w + x;
+                assert!(
+                    delta_e_ok(
+                        rgb_to_oklab(source.pixels[i]),
+                        rgb_to_oklab(paint_at(&paints[seg.labels[i] as usize], i, w))
+                    ) < 0.5
+                );
+            }
+        }
+        assert!(paints
+            .iter()
+            .all(|p| matches!(p, Paint::Linear { .. } | Paint::Radial { .. })));
+    }
+
+    #[test]
+    fn residual_layers_require_more_than_a_small_local_colour_correction() {
+        let samples: Vec<_> = (0..48 * 32).collect();
+        for contrast in [0.015_f32, 0.25] {
+            let base = Paint::Solid { color: [0.5; 3] };
+            let source = Raster::new(
+                48,
+                32,
+                samples
+                    .iter()
+                    .map(|&i| {
+                        let radius = (((i % 48) as f32 - 24.0).powi(2)
+                            + ((i / 48) as f32 - 16.0).powi(2))
+                        .sqrt()
+                            / 8.0;
+                        [0.5 + contrast * (1.0 - radius).max(0.0); 3]
+                    })
+                    .collect(),
+            );
+            let (paint, _) =
+                fit_layered_residual_paint(&source, &samples, bounds(&samples, 48), base, 3);
+            if contrast < 0.02 {
+                assert!(
+                    !matches!(paint, Paint::Layered { .. }),
+                    "minor colour correction created duplicate geometry"
+                );
+            } else {
+                assert!(
+                    paint_at(&paint, 16 * 48 + 24, 48)[0] > 0.7
+                        && paint_at(&paint, 0, 48)[0] < 0.55,
+                    "a visible local highlight must remain"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn nonlinear_residual_profile_reuses_one_gradient_instead_of_layering() {
+        let (w, h) = (48, 40);
+        let samples: Vec<_> = (0..w * h).collect();
+        for degrees in [23.0_f32, 73.0] {
+            let angle = degrees.to_radians();
+            let (start, end) = fitted_linear_geometry(&samples, w, (angle.cos(), angle.sin()));
+            let field = Paint::Linear {
+                preset: LinearPreset::Fitted,
+                start,
+                end,
+                stops: [0.78, 0.68, 0.83, 0.68, 0.78]
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &value)| ColorStop {
+                        offset: i as f64 / 4.0,
+                        color: [value; 3],
+                    })
+                    .collect(),
+            };
+            let source = Raster::new(
+                w,
+                h,
+                samples.iter().map(|&i| paint_at(&field, i, w)).collect(),
+            );
+            let layered = Paint::Layered {
+                base: Box::new(Paint::Solid { color: [0.75; 3] }),
+                overlays: vec![PaintOverlay {
+                    paint: Box::new(field),
+                    opacity_stops: vec![
+                        OpacityStop {
+                            offset: 0.0,
+                            opacity: 1.0,
+                        },
+                        OpacityStop {
+                            offset: 1.0,
+                            opacity: 1.0,
+                        },
+                    ],
+                }],
+            };
+            let single = refit_single_residual_field(&source, &samples, &samples, &layered)
+                .expect("nonlinear profile needs a better axis fit, not another path");
+            assert!(!matches!(single, Paint::Layered { .. }));
+            assert!(samples.iter().all(|&i| delta_e_ok(
+                rgb_to_oklab(source.pixels[i]),
+                rgb_to_oklab(paint_at(&single, i, w))
+            ) <= 1.5));
+        }
+    }
+
+    #[test]
+    fn weak_dark_teal_residual_does_not_start_an_overlay_chain() {
+        let (w, h) = (48, 48);
+        let samples: Vec<_> = (0..w * h).collect();
+        let colour = [1.0 / 255.0, 68.0 / 255.0, 54.0 / 255.0];
+        let source = Raster::new(
+            w,
+            h,
+            samples
+                .iter()
+                .map(|&i| {
+                    let radius =
+                        (((i % w) as f32 - 24.0).powi(2) + ((i / w) as f32 - 24.0).powi(2)).sqrt()
+                            / 6.0;
+                    let t = (1.0 - radius).max(0.0);
+                    [
+                        colour[0],
+                        colour[1] + t * 10.0 / 255.0,
+                        colour[2] + t * 8.0 / 255.0,
+                    ]
+                })
+                .collect(),
+        );
+        let (paint, _) = fit_layered_residual_paint(
+            &source,
+            &samples,
+            bounds(&samples, w),
+            Paint::Solid { color: colour },
+            3,
+        );
+        assert!(
+            !matches!(paint, Paint::Layered { .. }),
+            "weak residual must be rejected before creating a layered paint"
+        );
+    }
+
     #[test]
     fn dark_edge_outliers_do_not_cast_a_shadow_into_supported_paint() {
         let blue = [0.65, 0.83, 0.91];

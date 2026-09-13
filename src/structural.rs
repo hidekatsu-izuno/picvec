@@ -296,6 +296,47 @@ impl StructuralInk {
         self.summary.stroke_count = self.strokes.len();
     }
 
+    pub(crate) fn recover_local_coverage_boundary(
+        &mut self,
+        source: &Raster,
+        matte: &crate::chroma::AlphaMatte,
+        local: &crate::alpha_coverage::LocalCoverage,
+    ) {
+        self.strokes
+            .extend(stroke_model::recover_local_coverage_boundary(
+                source, matte, local,
+            ));
+        self.summary.stroke_count = self.strokes.len();
+    }
+
+    /// Release every source of structural ownership together. Merely restoring
+    /// RGB pixels leaves private ridge/legacy masks able to retrace the face.
+    pub(crate) fn release_to_paint(&mut self, protected: &[bool], width: usize) {
+        for mask in [
+            &mut self.paint_ownership_mask,
+            &mut self.source_line_mask,
+            &mut self.legacy_line_mask,
+            &mut self.role_line_mask,
+            &mut self.visible_ridge_coverage,
+            &mut self.dark_boundary_coverage,
+            &mut self.boundary_stroke_mask,
+        ] {
+            for (value, &paint_owned) in mask.iter_mut().zip(protected) {
+                *value &= !paint_owned;
+            }
+        }
+        self.retain_strokes(|stroke| {
+            stroke.points.iter().all(|p| {
+                let x = (p.x - 0.5).round().max(0.0) as usize;
+                let y = (p.y - 0.5).round().max(0.0) as usize;
+                !protected
+                    .get(y * width + x.min(width - 1))
+                    .copied()
+                    .unwrap_or(true)
+            })
+        });
+    }
+
     pub fn empty() -> Self {
         Self {
             color_patches: Vec::new(),
@@ -1464,6 +1505,38 @@ fn extend_structural_silhouette_antialias(source: &Raster, structural: &[bool]) 
 /// faces remain Paint-owned; there is intentionally no median-colour
 /// silhouette overlay that could flatten tyre or shadow gradients.
 pub fn analyse(source: &Raster, roles: &mut EdgeRoles) -> (Raster, StructuralInk) {
+    analyse_with_protection(source, roles, None)
+}
+
+/// Exclude paint-owned transparency before recovering or fitting line graphs.
+pub(crate) fn analyse_with_protection(
+    source: &Raster,
+    roles: &mut EdgeRoles,
+    protected: Option<&[bool]>,
+) -> (Raster, StructuralInk) {
+    if let Some(protected) = protected {
+        for mask in [
+            &mut roles.visible_ridge_coverage,
+            &mut roles.visible_ridge_centres,
+        ] {
+            for (value, &paint_owned) in mask.iter_mut().zip(protected) {
+                *value &= !paint_owned;
+            }
+        }
+        for graph in [
+            &mut roles.visible_ridge_graph,
+            &mut roles.dark_boundary_graph,
+            &mut roles.band_boundary_graph,
+        ] {
+            graph.retain(|edge| {
+                edge.points.iter().all(|p| {
+                    let x = (p[0] - 0.5).round().clamp(0.0, (source.width - 1) as f64) as usize;
+                    let y = (p[1] - 0.5).round().clamp(0.0, (source.height - 1) as f64) as usize;
+                    !protected[y * source.width + x]
+                })
+            });
+        }
+    }
     let recovered = stroke_model::recover(
         source,
         &roles.dark_boundary_graph,
@@ -1474,6 +1547,11 @@ pub fn analyse(source: &Raster, roles: &mut EdgeRoles) -> (Raster, StructuralInk
         extend_structural_silhouette_antialias(source, &classified_silhouettes);
     for (line, &silhouette) in classified_lines.iter_mut().zip(&classified_silhouettes) {
         *line &= !silhouette;
+    }
+    if let Some(protected) = protected {
+        for (line, &paint_owned) in classified_lines.iter_mut().zip(protected) {
+            *line &= !paint_owned;
+        }
     }
     let legacy_line_mask = classified_lines.clone();
     // A ridge detector can find a short interval inside a Paint-owned
@@ -1511,6 +1589,14 @@ pub fn analyse(source: &Raster, roles: &mut EdgeRoles) -> (Raster, StructuralInk
         if silhouette {
             paint_reference.pixels[index] = source.pixels[index];
             antialias_ownership[index] = false;
+        }
+    }
+    if let Some(protected) = protected {
+        for (index, &paint_owned) in protected.iter().enumerate() {
+            if paint_owned {
+                paint_reference.pixels[index] = source.pixels[index];
+                antialias_ownership[index] = false;
+            }
         }
     }
     let antialias_unmixed_pixels = antialias_ownership.iter().filter(|&&value| value).count();
@@ -2342,6 +2428,133 @@ fn extend_graph_to_dark_paint(
                 } else {
                     stroke.points.push(target);
                 }
+            }
+        }
+    }
+}
+
+/// A medial ridge's two-sided profile disappears near a wider crossing
+/// stroke. Join its tangent to that stroke only while the source retains
+/// continuous dark ink. Paint-only endpoint extension cannot see this receiver
+/// because its own ink is also drawn after Paint.
+fn extend_graph_to_crossing_ink(
+    strokes: &mut [StructuralStroke],
+    source: &[Oklab],
+    width: usize,
+    height: usize,
+) {
+    let original = strokes.to_vec();
+    let mut endpoints = HashMap::new();
+    for stroke in &original {
+        if let (Some(first), Some(last)) = (stroke.points.first(), stroke.points.last()) {
+            for &p in [first, last] {
+                *endpoints.entry(point_key(p)).or_insert(0usize) += 1;
+            }
+        }
+    }
+    for (index, stroke) in strokes.iter_mut().enumerate() {
+        if stroke.role != "ridge" || stroke.points.len() < 2 {
+            continue;
+        }
+        let length: f32 = stroke.points.windows(2).map(|p| p[0].distance(p[1])).sum();
+        if length < 8.0 {
+            continue;
+        }
+        let ink = rgb_to_oklab(stroke.color);
+        let radius = (stroke.width * 0.75 + 0.5).max(1.5);
+        for at_start in [true, false] {
+            let (endpoint, tangent) = graph_endpoint(&original[index], at_start);
+            if endpoints[&point_key(endpoint)] != 1 {
+                continue;
+            }
+            let sample = |p: Point, offset: f32| {
+                bilinear_lab_precise(
+                    source,
+                    width,
+                    height,
+                    [
+                        (p.x - tangent.1 * offset) as f64,
+                        (p.y + tangent.0 * offset) as f64,
+                    ],
+                )
+                .l
+            };
+            let anchor = Point {
+                x: endpoint.x - tangent.0 * 2.0 * radius,
+                y: endpoint.y - tangent.1 * 2.0 * radius,
+            };
+            if sample(anchor, 0.0) + 4.0 > sample(anchor, -radius).min(sample(anchor, radius))
+                || sample(endpoint, 0.0) + 4.0
+                    > sample(endpoint, -radius).min(sample(endpoint, radius))
+            {
+                continue;
+            }
+            let mut candidates = Vec::new();
+            for (other_index, other) in original.iter().enumerate() {
+                if other_index == index
+                    || other.width < stroke.width * 1.5
+                    || !matches!(
+                        other.role,
+                        "ridge" | "ridge-on-boundary" | "dark-boundary" | "boundary-stroke"
+                    )
+                    || ink.distance(rgb_to_oklab(other.color)) > 10.0
+                {
+                    continue;
+                }
+                // The lost profile interval grows with the receiver's width,
+                // not just the much thinner incoming ridge's width.
+                let limit = (2.0 * (stroke.width + other.width) + 1.0)
+                    .min(24.0)
+                    .min(length);
+                for pair in other.points.windows(2) {
+                    let dx = pair[1].x - pair[0].x;
+                    let dy = pair[1].y - pair[0].y;
+                    let denominator = tangent.0 * dy - tangent.1 * dx;
+                    if denominator.abs() < 0.25 * dx.hypot(dy).max(1e-6) {
+                        continue;
+                    }
+                    let ax = pair[0].x - endpoint.x;
+                    let ay = pair[0].y - endpoint.y;
+                    let distance = (ax * dy - ay * dx) / denominator;
+                    let fraction = (ax * tangent.1 - ay * tangent.0) / denominator;
+                    if distance > 0.5 && distance <= limit && (0.0..=1.0).contains(&fraction) {
+                        candidates.push(distance);
+                    }
+                }
+            }
+            candidates.sort_by(f32::total_cmp);
+            // Antialiased or shaded terminals need not have the colour of the
+            // ridge's darkest core. Use the measured terminal, but cap its
+            // departure from ink; a genuine source gap still stops the bridge.
+            let terminal = sample(endpoint, 0.0).min(ink.l + 10.0);
+            for distance in candidates {
+                let steps = (distance * 2.0).ceil() as usize;
+                let supported = (1..=steps).all(|step| {
+                    let d = distance * step as f32 / steps as f32;
+                    let p = Point {
+                        x: endpoint.x + tangent.0 * d,
+                        y: endpoint.y + tangent.1 * d,
+                    };
+                    p.x >= radius
+                        && p.y >= radius
+                        && p.x < width as f32 - radius
+                        && p.y < height as f32 - radius
+                        && (sample(p, 0.0) <= terminal + 6.9
+                            || sample(p, 0.0) + 4.0 <= sample(p, -radius).min(sample(p, radius)))
+                });
+                if !supported {
+                    continue;
+                }
+                let target = Point {
+                    x: endpoint.x + tangent.0 * distance,
+                    y: endpoint.y + tangent.1 * distance,
+                };
+                if at_start {
+                    stroke.points.insert(0, target);
+                } else {
+                    stroke.points.push(target);
+                }
+                break;
             }
         }
     }
@@ -4256,6 +4469,14 @@ pub fn select_missing_with_junctions(
     if source.width != rendered.width || source.height != rendered.height {
         return structural.clone();
     }
+    if structural.strokes.is_empty()
+        && !structural.role_line_mask.iter().any(|&v| v)
+        && !structural.visible_ridge_coverage.iter().any(|&v| v)
+        && !structural.legacy_line_mask.iter().any(|&v| v)
+    {
+        return structural.clone();
+    }
+
     #[cfg(feature = "diagnostics")]
     diagnose_strokes("input-strokes", &structural.strokes);
     let width = source.width;
@@ -4691,6 +4912,7 @@ pub fn select_missing_with_junctions(
             .filter(|stroke| stroke.role == "boundary-stroke")
             .cloned(),
     );
+    extend_graph_to_crossing_ink(&mut selected_graph, &source_lab, width, height);
     extend_graph_to_dark_paint(
         &mut selected_graph,
         &source_lab,
@@ -4840,6 +5062,27 @@ pub fn select_missing_with_junctions(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn paint_owned_transparency_never_enters_residual_line_fitting() {
+        let mut source = super::Raster::blank(64, 48, [0.8; 3]);
+        for x in 8..56 {
+            source.pixels[24 * 64 + x] = [0.02; 3];
+        }
+        let mut roles = crate::edge::classify(&source);
+        let protected = vec![true; source.pixels.len()];
+        let (paint, mut candidates) =
+            super::analyse_with_protection(&source, &mut roles, Some(&protected));
+        assert!(roles.visible_ridge_graph.is_empty());
+        assert!(roles.dark_boundary_graph.is_empty());
+        assert!(candidates.strokes.is_empty());
+        candidates.release_to_paint(&protected, source.width);
+        assert!(candidates.role_line_mask.iter().all(|&v| !v));
+        assert!(candidates.legacy_line_mask.iter().all(|&v| !v));
+        assert!(candidates.visible_ridge_coverage.iter().all(|&v| !v));
+        assert_eq!(paint.pixels, source.pixels);
+        let selected = super::select_missing(&source, &paint, &candidates);
+        assert!(selected.strokes.is_empty());
+    }
     use super::*;
 
     #[test]
@@ -5107,6 +5350,85 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn car_mirror_terminal_joins_crossing_ink_but_not_an_authored_gap() {
+        let image = image::load_from_memory(include_bytes!("test-data/car-mirror-junction.png"))
+            .unwrap()
+            .to_rgb8();
+        let source = Raster::new(
+            128,
+            128,
+            image
+                .pixels()
+                .map(|p| p.0.map(|v| v as f32 / 255.0))
+                .collect(),
+        );
+        let data: serde_json::Value =
+            serde_json::from_str(include_str!("test-data/car-mirror-junction.json")).unwrap();
+        let strokes: Vec<_> = data
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| StructuralStroke {
+                points: s["points"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|p| Point {
+                        x: p[0].as_f64().unwrap() as f32,
+                        y: p[1].as_f64().unwrap() as f32,
+                    })
+                    .collect(),
+                path_data: None,
+                precise_points: None,
+                color: std::array::from_fn(|i| s["color"][i].as_f64().unwrap() as f32),
+                width: s["width"].as_f64().unwrap() as f32,
+                role: if s["role"] == "ridge" {
+                    "ridge"
+                } else {
+                    "ridge-on-boundary"
+                },
+                width_samples: Vec::new(),
+            })
+            .collect();
+        let before = strokes[0].points[0];
+        for gap in [false, true] {
+            let mut source = source.clone();
+            if gap {
+                for y in 62..66 {
+                    for x in 50..63 {
+                        source.pixels[y * 128 + x] = [0.22; 3];
+                    }
+                }
+            }
+            let mut candidate = strokes.clone();
+            extend_graph_to_crossing_ink(&mut candidate, &oklab_pixels(&source), 128, 128);
+            if gap {
+                assert_eq!(
+                    candidate[0].points[0], before,
+                    "must not bridge a real source gap"
+                );
+            } else {
+                let target = candidate[0].points[0];
+                assert!(
+                    target.y < 59.0 && target.y > 56.0,
+                    "missed the mirror rim: {target:?}"
+                );
+                assert!((target.x - 56.2).abs() < 0.5);
+                assert_eq!(
+                    candidate[1].points, strokes[1].points,
+                    "receiving rim must stay fixed"
+                );
+            }
+        }
+        let mut isolated = vec![strokes[0].clone()];
+        extend_graph_to_crossing_ink(&mut isolated, &oklab_pixels(&source), 128, 128);
+        assert_eq!(
+            isolated[0].points, strokes[0].points,
+            "source evidence alone is not a crossing stroke"
+        );
     }
 
     #[test]

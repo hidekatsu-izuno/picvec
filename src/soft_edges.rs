@@ -144,14 +144,10 @@ fn document_with_patches(document: &str, patches: &[Patch]) -> String {
         if group.is_empty() {
             continue;
         }
-        let x0 = group.iter().map(|p| p.x).min().unwrap();
-        let y0 = group.iter().map(|p| p.y).min().unwrap();
-        let x1 = group.iter().map(|p| p.x + p.size).max().unwrap();
-        let y1 = group.iter().map(|p| p.y + p.size).max().unwrap();
         // One reused vector instance per blur scale, not per patch. This
         // keeps the renderer's expanded instance tree bounded.
-        let _ = write!(result, "<filter id=\"soft-filter-{i}\" x=\"-2%\" y=\"-2%\" width=\"104%\" height=\"104%\" color-interpolation-filters=\"sRGB\"><feGaussianBlur stdDeviation=\"{sigma}\"/></filter><mask id=\"soft-mask-{i}\" maskUnits=\"userSpaceOnUse\" x=\"{x0}\" y=\"{y0}\" width=\"{}\" height=\"{}\" style=\"mask-type:luminance\">", x1-x0,y1-y0);
-        // Join adjacent equal-scale patches before feathering. An internal
+        let _ = write!(result, "<filter id=\"soft-filter-{i}\" x=\"-2%\" y=\"-2%\" width=\"104%\" height=\"104%\" color-interpolation-filters=\"sRGB\"><feGaussianBlur stdDeviation=\"{sigma}\"/></filter><clipPath id=\"soft-clip-{i}\" clipPathUnits=\"userSpaceOnUse\">");
+        // Join adjacent equal-scale patches before cropping. An internal
         // tile edge must not leave a stripe of the original hard geometry.
         let mut rows: Vec<(usize, usize, usize, usize)> = Vec::new();
         let mut sorted = group;
@@ -177,12 +173,16 @@ fn document_with_patches(document: &str, patches: &[Patch]) -> String {
             rectangles.push(row);
         }
         for (x, y, w, h) in rectangles {
-            for d in 1..=4 {
-                let grey = (255 * d / 4) as u8;
-                let _ = write!(result, "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" fill=\"#{grey:02x}{grey:02x}{grey:02x}\"/>",x+d,y+d,w-2*d,h-2*d);
-            }
+            let _ = write!(
+                result,
+                "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\"/>",
+                x + 4,
+                y + 4,
+                w - 8,
+                h - 8
+            );
         }
-        result.push_str("</mask>");
+        result.push_str("</clipPath>");
     }
     result.push_str("</defs><g id=\"soft-source\">");
     result.push_str(&document[body_start..body_end]);
@@ -191,18 +191,7 @@ fn document_with_patches(document: &str, patches: &[Patch]) -> String {
         if !patches.iter().any(|p| p.sigma == sigma) {
             continue;
         }
-        let _ = write!(result, "<g mask=\"url(#soft-mask-{i})\">");
-        let source_mask = document.contains("id=\"source-alpha-mask\"");
-        if source_mask {
-            result.push_str("<g mask=\"url(#source-alpha-mask)\">");
-        }
-        let _ = write!(
-            result,
-            "<use href=\"#soft-source\" filter=\"url(#soft-filter-{i})\"/>"
-        );
-        if source_mask {
-            result.push_str("</g>");
-        }
+        let _ = write!(result, "<g clip-path=\"url(#soft-clip-{i})\"><use href=\"#soft-source\" filter=\"url(#soft-filter-{i})\"/>");
         result.push_str("</g>");
     }
     result.push_str("</svg>");
@@ -215,6 +204,10 @@ pub(crate) fn refine(
     matte: Option<&AlphaMatte>,
     render: impl Fn(&str) -> Result<Raster>,
 ) -> Result<String> {
+    // Repainting a blurred copy would accumulate intrinsic face opacity.
+    if matte.is_some() {
+        return Ok(document.into());
+    }
     // Coloured illustrations cannot supply neutral shading evidence here.
     if source
         .pixels

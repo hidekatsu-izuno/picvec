@@ -3127,7 +3127,15 @@ pub fn perceptual_smooth(image: &Raster, config: &Config) -> Raster {
                 crate::elementary::exp_f64(-0.5_f64 * (dx * dx + dy * dy) as f64 / (sigma * sigma));
             let shifted = dx != 0 || dy != 0;
             if shifted {
-                bilateral_range_weights(&lab, image.width, image.height, dx, dy, config, &mut range_weights);
+                bilateral_range_weights(
+                    &lab,
+                    image.width,
+                    image.height,
+                    dx,
+                    dy,
+                    config,
+                    &mut range_weights,
+                );
             }
             numerator
                 .par_iter_mut()

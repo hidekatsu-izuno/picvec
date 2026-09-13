@@ -410,21 +410,31 @@ mod tests {
                 let low = position.floor() as usize;
                 let high = position.ceil() as usize;
                 let amount = position - low as f32;
-                let expected = if low == high { sorted[low] } else {
+                let expected = if low == high {
+                    sorted[low]
+                } else {
                     sorted[low] * (1.0 - amount) + sorted[high] * amount
                 };
                 assert_eq!(percentile(values.clone(), q).to_bits(), expected.to_bits());
             }
         }
-        for values in [vec![], vec![-0.0, 0.0], vec![f32::NEG_INFINITY, 1.0, f32::INFINITY]] {
+        for values in [
+            vec![],
+            vec![-0.0, 0.0],
+            vec![f32::NEG_INFINITY, 1.0, f32::INFINITY],
+        ] {
             let mut sorted = values.clone();
             sorted.sort_by(f32::total_cmp);
             for q in [0.0, 0.5, 1.0] {
-                let expected = if sorted.is_empty() { 0.0 } else {
+                let expected = if sorted.is_empty() {
+                    0.0
+                } else {
                     let position = q * (sorted.len() - 1) as f32;
                     let low = position.floor() as usize;
                     let high = position.ceil() as usize;
-                    if low == high { sorted[low] } else {
+                    if low == high {
+                        sorted[low]
+                    } else {
                         let amount = position - low as f32;
                         sorted[low] * (1.0 - amount) + sorted[high] * amount
                     }

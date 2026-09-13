@@ -544,7 +544,11 @@ fn reconstruct_domains(
                 })
                 .take(12)
                 .count();
-            let accepted = !crosses_interface && internal_steps < 12 && mean <= 1.8 && p90 <= 4.0;
+            let accepted = !crosses_interface
+                && internal_steps < 12
+                && mean <= 1.8
+                && p90 <= 4.0
+                && merge_preserves_local_shading(source, &members, &best, 2.7);
 
             (
                 accepted.then_some(best),

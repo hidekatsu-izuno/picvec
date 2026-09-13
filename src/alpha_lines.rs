@@ -1,7 +1,11 @@
 //! Recover long, isolated thin bands from alpha coverage before contour fitting.
 use crate::chroma::AlphaMatte;
-use crate::gradient::Paint;
-use crate::svg::AlphaMaskLayer;
+#[derive(Clone, Debug)]
+pub(crate) struct AlphaBand {
+    pub path_data: String,
+    pub opacity: f32,
+    pub pixels: Vec<usize>,
+}
 
 #[derive(Clone)]
 struct Section {
@@ -13,7 +17,7 @@ struct Section {
     peak: f32,
 }
 
-pub(crate) fn extract(matte: &AlphaMatte) -> (AlphaMatte, Vec<AlphaMaskLayer>) {
+pub(crate) fn extract(matte: &AlphaMatte) -> (AlphaMatte, Vec<AlphaBand>) {
     let mut cleared = Vec::new();
     let mut layers = Vec::new();
     for vertical in [true, false] {
@@ -77,7 +81,9 @@ pub(crate) fn extract(matte: &AlphaMatte) -> (AlphaMatte, Vec<AlphaMaskLayer>) {
         // Only isolated consecutive profiles form a track. Junctions and
         // empty source rows stop it, so no invented bridges are needed.
         for track in finished {
-            if track.len() < 64 {
+            // Short straight spans also need a filled band now that coverage
+            // is carried by the face rather than an image-wide alpha mask.
+            if track.len() < 8 {
                 continue;
             }
             let n = track.len() as f32;
@@ -121,15 +127,17 @@ pub(crate) fn extract(matte: &AlphaMatte) -> (AlphaMatte, Vec<AlphaMaskLayer>) {
                 point(x1 + half_width, end),
                 point(x0 + half_width, start)
             );
+            let mut pixels = Vec::new();
             for section in &track {
                 for x in section.left..section.right {
                     cleared.push(index(x, section.row));
+                    pixels.push(index(x, section.row));
                 }
             }
-            layers.push(AlphaMaskLayer {
+            layers.push(AlphaBand {
                 path_data,
                 opacity: peak,
-                paint: Some(Paint::Solid { color: [1.0; 3] }),
+                pixels,
             });
         }
     }

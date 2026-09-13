@@ -619,7 +619,13 @@ pub(crate) fn plan_candidates<S: RasterSource + ?Sized>(
         height: source.height(),
     };
     let support = foreground_support(source, matte);
-    let regions = object_regions(&support, source.width(), source.height(), tile_dimension);
+    let mut regions = object_regions(&support, source.width(), source.height(), tile_dimension);
+    if regions.is_empty() && source.width().max(source.height()) > tile_dimension {
+        // No safe small replacement exists. A complete source model is still
+        // a valid candidate: it introduces no crop joins and must pass exactly
+        // the same source-error and representation-cost tests as local models.
+        regions.push(whole);
+    }
     let mut candidates = regions
         .into_iter()
         .filter_map(|core| {
@@ -726,7 +732,7 @@ pub(crate) fn compose_refinements(
     }
     layer.push_str("</g>");
     let mut document = String::with_capacity(close + layer.len() + 512);
-    if replace_base && refinements_cover_canvas(refinements, source_dimensions) {
+    if refinements_cover_canvas(refinements, source_dimensions) {
         // No base element is visible. Keeping its paths and gradient definitions
         // would still charge parsing, storage and mask-rendering costs.
         let root = base_document
@@ -740,7 +746,7 @@ pub(crate) fn compose_refinements(
         document.push_str(&base_document[..body]);
     } else if replace_base {
         // A transparent refinement must replace, rather than merely cover,
-        // the coarse content in its core.  Mask those disjoint rectangles out
+        // the coarse content in its core.  Clip those rectangles out
         // of the base first; otherwise a finer, smaller silhouette would
         // leave the coarse silhouette visible underneath it.
         let root = base_document
@@ -751,25 +757,49 @@ pub(crate) fn compose_refinements(
             .map(|offset| root + offset + 1)
             .ok_or_else(|| -> Error { "base SVG has an incomplete root element".into() })?;
         document.push_str(&base_document[..body]);
-        document.push_str("<defs><mask id=\"adaptive-base-mask\" maskUnits=\"userSpaceOnUse\" x=\"0\" y=\"0\" width=\"");
-        document.push_str(&base_width.to_string());
-        document.push_str("\" height=\"");
-        document.push_str(&base_height.to_string());
-        document.push_str("\"><rect width=\"100%\" height=\"100%\" fill=\"white\"/>");
+        // Build the uncovered strips. Subtracting a union this way also
+        // handles overlapping refinement cores without restoring their overlap.
+        let mut xs = vec![0, source_width];
         for refinement in refinements {
-            let x = refinement.core.x as f32 * base_width as f32 / source_width as f32;
-            let y = refinement.core.y as f32 * base_height as f32 / source_height as f32;
-            let width = refinement.core.width as f32 * base_width as f32 / source_width as f32;
-            let height = refinement.core.height as f32 * base_height as f32 / source_height as f32;
-            document.push_str(&format!(
-                "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" fill=\"black\"/>",
-                number(x),
-                number(y),
-                number(width),
-                number(height),
-            ));
+            xs.push(refinement.core.x.min(source_width));
+            xs.push((refinement.core.x + refinement.core.width).min(source_width));
         }
-        document.push_str("</mask></defs><g mask=\"url(#adaptive-base-mask)\">");
+        xs.sort_unstable();
+        xs.dedup();
+        let mut clip = String::new();
+        for span in xs.windows(2) {
+            let mut covered: Vec<_> = refinements
+                .iter()
+                .filter(|r| r.core.x < span[1] && r.core.x + r.core.width > span[0])
+                .map(|r| {
+                    (
+                        r.core.y.min(source_height),
+                        (r.core.y + r.core.height).min(source_height),
+                    )
+                })
+                .collect();
+            covered.sort_unstable();
+            covered.push((source_height, source_height));
+            let mut cursor = 0;
+            for (top, bottom) in covered {
+                if top > cursor {
+                    let x0 = span[0] as f32 * base_width as f32 / source_width as f32;
+                    let x1 = span[1] as f32 * base_width as f32 / source_width as f32;
+                    let y0 = cursor as f32 * base_height as f32 / source_height as f32;
+                    let y1 = top as f32 * base_height as f32 / source_height as f32;
+                    clip.push_str(&format!(
+                        "M{} {}H{}V{}H{}Z",
+                        number(x0),
+                        number(y0),
+                        number(x1),
+                        number(y1),
+                        number(x0)
+                    ));
+                }
+                cursor = cursor.max(bottom);
+            }
+        }
+        document.push_str(&format!("<defs><clipPath id=\"adaptive-base-clip\"><path d=\"{clip}\" clip-rule=\"nonzero\"/></clipPath></defs><g clip-path=\"url(#adaptive-base-clip)\">"));
         document.push_str(&base_document[body..close]);
         document.push_str("</g>");
     } else {
@@ -1036,6 +1066,34 @@ mod tests {
     }
 
     #[test]
+    fn oversized_connected_content_uses_the_same_measured_candidate_model() {
+        for ink in [[0.0; 3], [0.7, 0.1, 0.2]] {
+            let mut source = Raster::blank(320, 160, [1.0; 3]);
+            for y in 40..120 {
+                for x in 20..300 {
+                    source.pixels[y * 320 + x] = ink;
+                }
+            }
+            let coarse = Raster::blank(80, 40, [1.0; 3]);
+            let labels = vec![0; 80 * 40];
+            let candidates = plan_candidates(&source, None, &coarse, &labels, 140, 64, 0.75);
+            assert_eq!(candidates.len(), 1);
+            assert_eq!(
+                candidates[0].core,
+                SourceRect {
+                    x: 0,
+                    y: 0,
+                    width: 320,
+                    height: 160
+                }
+            );
+            assert!(candidates[0].baseline.combined > 0.75);
+            assert!(plan_candidates(&source, None, &source, &labels, 140, 64, 0.75).is_empty());
+            assert!(plan_candidates(&source, None, &coarse, &labels, 140, 0, 0.75).is_empty());
+        }
+    }
+
+    #[test]
     fn dense_visible_detail_reaches_measured_refinement_evaluation() {
         let mut source = Raster::blank(160, 160, [1.0; 3]);
         for y in 32..128 {
@@ -1132,7 +1190,7 @@ mod tests {
     }
 
     #[test]
-    fn full_transparent_replacement_discards_base_but_partial_does_not() {
+    fn full_replacement_discards_base_for_opaque_and_transparent_sources() {
         let base = "<svg width=\"10\" height=\"10\"><defs/><path id=\"obsolete\"/></svg>";
         let mut patches: Vec<_> = (0..2)
             .map(|i| EmbeddedRefinement {
@@ -1156,6 +1214,8 @@ mod tests {
         let full = compose_refinements(base, (10, 10), (10, 10), &patches, true).unwrap();
         assert!(!full.contains("obsolete"));
         assert!(full.contains("lod-0-replacement") && full.contains("lod-1-replacement"));
+        let opaque = compose_refinements(base, (10, 10), (10, 10), &patches, false).unwrap();
+        assert_eq!(opaque, full);
         patches[1].expanded.x = 4;
         patches[1].core.x = 4; // The summed area still matches, but there is overlap and a hole.
         let partial = compose_refinements(base, (10, 10), (10, 10), &patches, true).unwrap();
@@ -1236,7 +1296,7 @@ mod tests {
     }
 
     #[test]
-    fn transparent_refinement_masks_its_core_out_of_the_base() {
+    fn transparent_refinement_clips_its_core_out_of_the_base() {
         let base = "<svg width=\"10\" height=\"10\"><rect width=\"10\" height=\"10\"/></svg>";
         let child = "<svg width=\"4\" height=\"4\"></svg>";
         let result = compose_refinements(
@@ -1263,8 +1323,49 @@ mod tests {
             true,
         )
         .unwrap();
-        assert!(result.contains("id=\"adaptive-base-mask\""));
-        assert!(result.contains("<rect x=\"2\" y=\"3\" width=\"4\" height=\"4\" fill=\"black\"/>"));
-        assert!(result.contains("<g mask=\"url(#adaptive-base-mask)\">"));
+        assert!(result.contains("id=\"adaptive-base-clip\""));
+        assert!(result.contains("M2 0H6V3H2Z"));
+        assert!(!result.contains("<mask"));
+        assert!(result.contains("<g clip-path=\"url(#adaptive-base-clip)\">"));
+    }
+    #[test]
+    fn overlapping_transparent_refinements_do_not_restore_the_base() {
+        let base = r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" height="10"/></svg>"#;
+        let child = r#"<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"></svg>"#;
+        let refinements: Vec<_> = [2, 4]
+            .into_iter()
+            .map(|x| {
+                let core = SourceRect {
+                    x,
+                    y: 3,
+                    width: 4,
+                    height: 4,
+                };
+                EmbeddedRefinement {
+                    core,
+                    expanded: core,
+                    document: child.into(),
+                    processing_width: 4,
+                    processing_height: 4,
+                }
+            })
+            .collect();
+        let svg = compose_refinements(base, (10, 10), (10, 10), &refinements, true).unwrap();
+        assert!(!svg.contains("<mask"));
+        let tree = resvg::usvg::Tree::from_str(&svg, &resvg::usvg::Options::default()).unwrap();
+        let mut pixmap = resvg::tiny_skia::Pixmap::new(10, 10).unwrap();
+        resvg::render(
+            &tree,
+            resvg::tiny_skia::Transform::identity(),
+            &mut pixmap.as_mut(),
+        );
+        assert_eq!(pixmap.pixel(1, 4).unwrap().alpha(), 255);
+        for x in 2..8 {
+            assert_eq!(
+                pixmap.pixel(x, 4).unwrap().alpha(),
+                0,
+                "base leaked at x={x}"
+            );
+        }
     }
 }

@@ -21,8 +21,9 @@ pub struct Config {
     /// Refine source regions whose perceptual error reduction justifies the
     /// additional editable SVG representation cost.
     pub adaptive_refinement: bool,
-    /// Largest source-space side of a refinement core. Oversized connected
-    /// figures retain their whole-image model instead of being split.
+    /// Largest source-space side of a local refinement core. If no safe local
+    /// core exists, evaluate the complete source with the same vector model
+    /// and quality/cost gates instead of splitting connected content.
     pub adaptive_tile_dimension: u32,
     /// Maximum number of source regions evaluated by the full vector model.
     pub adaptive_max_patches: usize,

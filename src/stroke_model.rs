@@ -643,16 +643,38 @@ pub(super) fn recover_alpha_boundary(
     image: &Raster,
     matte: &crate::chroma::AlphaMatte,
 ) -> Vec<StructuralStroke> {
-    let mut strokes = recover_alpha_boundary_polarity(image, matte, true);
-    strokes.extend(recover_alpha_boundary_polarity(image, matte, false));
+    let mut strokes = recover_alpha_boundary_polarity(image, matte, true, false);
+    strokes.extend(recover_alpha_boundary_polarity(image, matte, false, false));
     strokes.sort_by_key(|s| s.role == "alpha-boundary-stroke");
     strokes
+}
+
+pub(super) fn recover_local_coverage_boundary(
+    image: &Raster,
+    matte: &crate::chroma::AlphaMatte,
+    local: &crate::alpha_coverage::LocalCoverage,
+) -> Vec<StructuralStroke> {
+    let support = crate::chroma::AlphaMatte::from_u8(
+        matte.width,
+        matte.height,
+        (0..matte.len())
+            .map(|i| {
+                if local.opacity[i] > 0.0 {
+                    (matte.get(i) * 255.0).round() as u8
+                } else {
+                    0
+                }
+            })
+            .collect(),
+    );
+    recover_alpha_boundary_polarity(image, &support, false, true)
 }
 
 fn recover_alpha_boundary_polarity(
     image: &Raster,
     matte: &crate::chroma::AlphaMatte,
     bright: bool,
+    inward: bool,
 ) -> Vec<StructuralStroke> {
     let polarity = if bright { 1.0 } else { -1.0 };
     let mut strokes = Vec::new();
@@ -777,7 +799,7 @@ fn recover_alpha_boundary_polarity(
             }
         }
         for i in 0..count {
-            let Some((_, paint, _)) = observations[i] else {
+            let Some((normal, paint, _)) = observations[i] else {
                 continue;
             };
             let mut local: Vec<_> = (-2..=2)
@@ -790,8 +812,29 @@ fn recover_alpha_boundary_polarity(
                 continue;
             }
             let points = spans[i].points.to_vec();
-            // The stroke lies on the shared mask curve; clipping its outside
-            // half leaves exactly the measured inward band width.
+            if inward {
+                // Paint the measured band inside the silhouette. A stroke of
+                // twice this width on the edge relied on a now-forbidden mask.
+                for (colour, band_width, role) in [
+                    (inks[i], width, "alpha-boundary-stroke"),
+                    (paint, (width + 0.75).min(2.5), "alpha-boundary-underpaint"),
+                ] {
+                    strokes.push(StructuralStroke {
+                        points: points
+                            .iter()
+                            .map(|&p| offset(p, normal, band_width * 0.5))
+                            .collect(),
+                        path_data: None,
+                        precise_points: None,
+                        color: colour,
+                        width: band_width,
+                        role,
+                        width_samples: Vec::new(),
+                    });
+                }
+                continue;
+            }
+            // Legacy uniform-coverage recovery retains its existing geometry.
             strokes.push(StructuralStroke {
                 points: points.clone(),
                 path_data: Some(spans[i].path_data.clone()),
@@ -818,12 +861,17 @@ fn recover_alpha_boundary_polarity(
     let mut joined: Vec<StructuralStroke> = Vec::new();
     for stroke in strokes {
         if let Some(previous) = joined.last_mut() {
-            let connected = previous.points.last().unwrap().distance(stroke.points[0]) < 1e-3;
+            let connected = previous.points.last().unwrap().distance(stroke.points[0])
+                < if inward { 0.35 } else { 1e-3 };
             if connected
                 && previous.role == stroke.role
                 && distance(previous.color, stroke.color) < 0.06
                 && (previous.width - stroke.width).abs() < 0.25 * previous.width.max(0.5)
             {
+                if inward {
+                    previous.points.extend(stroke.points.into_iter().skip(1));
+                    continue;
+                }
                 let path = stroke.path_data.as_ref().unwrap();
                 if let Some(start) = path.find(" C").into_iter().chain(path.find(" L")).min() {
                     previous
@@ -838,9 +886,17 @@ fn recover_alpha_boundary_polarity(
         }
         joined.push(stroke);
     }
+    if inward {
+        for stroke in &mut joined {
+            stroke.path_data = Some(crate::geometry::fitted_structural_open_path_data(
+                &stroke.points,
+                0.15,
+                0.5,
+            ));
+        }
+    }
     joined
 }
-
 /// Re-measure repeated subpixel ink after graph joining. Connectivity is only
 /// a geometric hypothesis: it must not turn a dotted source into a solid band.
 pub(super) fn refine_interrupted(
@@ -985,6 +1041,43 @@ pub(super) fn refine_interrupted(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn local_coverage_rim_is_measured_inside_the_silhouette_without_a_mask() {
+        let (w, h) = (192, 192);
+        let mut colours = Vec::new();
+        let mut values = Vec::new();
+        for y in 0..h {
+            for x in 0..w {
+                let d = ((x as f32 + 0.5 - 96.0).powi(2) + (y as f32 + 0.5 - 96.0).powi(2)).sqrt();
+                let alpha = (85.5 - d).clamp(0.0, 1.0);
+                let inner = (84.8 - d).clamp(0.0, 1.0);
+                values.push(alpha);
+                colours.push([0.9, 0.7, 0.2].map(|c| c * inner / alpha.max(1e-6)));
+            }
+        }
+        let source = Raster::new(w, h, colours);
+        let matte = crate::chroma::AlphaMatte::new(w, h, values);
+        let local = crate::alpha_coverage::detect_components(&matte).unwrap();
+        let strokes = recover_local_coverage_boundary(&source, &matte, &local);
+        let ink: Vec<_> = strokes
+            .iter()
+            .filter(|s| s.role == "alpha-boundary-stroke")
+            .collect();
+        assert!(!ink.is_empty());
+        for stroke in ink {
+            assert!(stroke.width < 1.8);
+            for p in &stroke.points {
+                let outer =
+                    ((p.x - 96.0).powi(2) + (p.y - 96.0).powi(2)).sqrt() + stroke.width * 0.5;
+                assert!(
+                    outer < 85.75,
+                    "rim extended outside its silhouette: {outer}"
+                );
+            }
+        }
+    }
+
     use super::*;
 
     #[test]

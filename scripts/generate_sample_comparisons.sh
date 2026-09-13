@@ -23,17 +23,19 @@ trap 'rm -rf -- "$working_directory"' EXIT
 export XDG_CACHE_HOME="$working_directory/cache"
 mkdir -p -- "$XDG_CACHE_HOME"
 
-pairs=(
-    "boy_and_turtle|Boy and turtle|boy_and_turtle.png|boy_and_turtle.svg"
-    "car|Car|car.png|car.svg"
-    "cliparts|Clip art|cliparts.png|cliparts.svg"
-    "cliparts-6x6|Clip art 6x6|cliparts-6x6.png|cliparts-6x6.svg"
-    "remojii|Remojii|remojii.png|remojii.svg"
-    "viewport1|Viewport 1|viewport1.jpg|viewport1.svg"
-    "viewport2|Viewport 2|viewport2.jpg|viewport2.svg"
-    "wikipedia_logo_1_0|Wikipedia logo|wikipedia_logo_1_0.png|wikipedia_logo_1_0.svg"
-    "vectorization-stress-still-life|Vectorization stress still life|vectorization-stress-still-life.png|vectorization-stress-still-life.svg"
-)
+pairs=()
+for input_path in "$repository_root"/sample/input/*; do
+    [[ -f "$input_path" ]] || continue
+    input_name=${input_path##*/}
+    stem=${input_name%.*}
+    title=${stem//[-_]/ }
+    title=${title^}
+    if [[ ! -f "$repository_root/sample/output/$stem.svg" ]]; then
+        echo "Missing SVG for $input_name; regenerate sample/output first" >&2
+        exit 1
+    fi
+    pairs+=("$stem|$title|$input_name|$stem.svg")
+done
 
 for specification in "${pairs[@]}"; do
     IFS='|' read -r stem title input_name output_name <<<"$specification"

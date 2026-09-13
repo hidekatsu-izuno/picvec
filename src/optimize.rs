@@ -1,4 +1,4 @@
-//! Exact geometry normalization used by the serializer.
+//! Geometry normalization and bounded cubic consolidation for the serializer.
 //!
 //! Primitive recognition happens while region masks are still available, so
 //! it is both faster and safer than reparsing a multi-megabyte SVG afterward.
@@ -388,6 +388,109 @@ fn canonicalize(subpath: Subpath) -> (Subpath, usize, usize) {
         converted,
         removed,
     )
+}
+
+fn lerp(first: VectorPoint, second: VectorPoint, t: f64) -> VectorPoint {
+    VectorPoint {
+        x: first.x + (second.x - first.x) * t,
+        y: first.y + (second.y - first.y) * t,
+    }
+}
+
+fn split_cubic(curve: Segment, t: f64) -> (Segment, Segment) {
+    let first = lerp(curve.start, curve.first, t);
+    let middle = lerp(curve.first, curve.second, t);
+    let last = lerp(curve.second, curve.end, t);
+    let left = lerp(first, middle, t);
+    let right = lerp(middle, last, t);
+    let joint = lerp(left, right, t);
+    (
+        Segment::cubic(curve.start, first, left, joint),
+        Segment::cubic(joint, right, last, curve.end),
+    )
+}
+
+fn cubic_interval(curve: Segment, start: f64, end: f64) -> Segment {
+    let prefix = split_cubic(curve, end).0;
+    if start == 0.0 {
+        prefix
+    } else {
+        split_cubic(prefix, start / end).1
+    }
+}
+
+fn joined_cubic(left: Segment, right: Segment) -> Option<(Segment, f64)> {
+    if left.kind != SegmentKind::Cubic
+        || right.kind != SegmentKind::Cubic
+        || left.end.distance(right.start) > 1e-9
+    {
+        return None;
+    }
+    let incoming = subtract(left.end, left.second);
+    let outgoing = subtract(right.first, right.start);
+    let a = incoming.x.hypot(incoming.y);
+    let b = outgoing.x.hypot(outgoing.y);
+    // Keep real corners, cusps and stationary joins, even on tiny pieces.
+    if a.min(b) < 1e-9 || incoming.x * outgoing.x + incoming.y * outgoing.y < 0.995 * a * b {
+        return None;
+    }
+    let t = a / (a + b);
+    if !(0.001..=0.999).contains(&t) {
+        return None;
+    }
+    Some((
+        Segment::cubic(
+            left.start,
+            lerp(left.start, left.first, 1.0 / t),
+            lerp(right.end, right.second, 1.0 / (1.0 - t)),
+            right.end,
+        ),
+        t,
+    ))
+}
+
+fn consolidate_cubics(subpath: &mut Subpath) -> usize {
+    let mut output = Vec::<Segment>::new();
+    let mut originals = Vec::<(Segment, f64, f64)>::new();
+    let mut removed = 0;
+    for &segment in &subpath.segments {
+        let candidate = output
+            .last()
+            .and_then(|&previous| joined_cubic(previous, segment));
+        if let Some((candidate, t)) = candidate.filter(|_| originals.len() < 64) {
+            let mut intervals: Vec<_> = originals
+                .iter()
+                .map(|&(curve, first, last)| (curve, first * t, last * t))
+                .collect();
+            intervals.push((segment, t, 1.0));
+            // Bernstein weights are nonnegative and sum to one: bounding
+            // every control-point displacement bounds the entire curve.
+            // Always compare against the original pieces, so repeated joins
+            // cannot accumulate drift. Endpoints and outer tangents stay fixed.
+            let supported = intervals.iter().all(|&(original, first, last)| {
+                let slice = cubic_interval(candidate, first, last);
+                [
+                    slice.start.distance(original.start),
+                    slice.first.distance(original.first),
+                    slice.second.distance(original.second),
+                    slice.end.distance(original.end),
+                ]
+                .into_iter()
+                .all(|distance| distance <= 0.1)
+            });
+            if supported {
+                *output.last_mut().unwrap() = candidate;
+                originals = intervals;
+                removed += 1;
+                continue;
+            }
+        }
+        output.push(segment);
+        originals.clear();
+        originals.push((segment, 0.0, 1.0));
+    }
+    subpath.segments = output;
+    removed
 }
 
 fn cubic_point(segment: Segment, amount: f64) -> VectorPoint {
@@ -896,6 +999,9 @@ pub fn optimize_path(
         }
         subpaths = values;
     }
+    for subpath in &mut subpaths {
+        operations.redundant_segments += consolidate_cubics(subpath);
+    }
     if subpaths.len() == 1 {
         if let Some((x, y, width, height)) = rect_geometry(&subpaths[0]) {
             return Some((
@@ -949,6 +1055,125 @@ pub fn separated_bboxes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_curve() -> Segment {
+        Segment::cubic(
+            VectorPoint { x: 0.0, y: 0.0 },
+            VectorPoint { x: 15.0, y: 30.0 },
+            VectorPoint { x: 35.0, y: -20.0 },
+            VectorPoint { x: 50.0, y: 5.0 },
+        )
+    }
+
+    #[test]
+    fn rounded_cubic_slices_recover_one_curve_in_both_directions() {
+        let curve = test_curve();
+        let pieces: Vec<_> = (0..24)
+            .map(|i| cubic_interval(curve, i as f64 / 24.0, (i + 1) as f64 / 24.0))
+            .collect();
+        // Geometry arrives at the serializer rounded to three decimals.
+        let round = |p: VectorPoint| VectorPoint {
+            x: (p.x * 1000.0).round() / 1000.0,
+            y: (p.y * 1000.0).round() / 1000.0,
+        };
+        for reverse in [false, true] {
+            let mut segments: Vec<_> = pieces
+                .iter()
+                .map(|c| {
+                    Segment::cubic(
+                        round(c.start),
+                        round(c.first),
+                        round(c.second),
+                        round(c.end),
+                    )
+                })
+                .collect();
+            if reverse {
+                segments.reverse();
+                for c in &mut segments {
+                    *c = Segment::cubic(c.end, c.second, c.first, c.start);
+                }
+            }
+            let mut path = Subpath {
+                start: segments[0].start,
+                segments,
+                closed: false,
+            };
+            assert_eq!(consolidate_cubics(&mut path), 23);
+            let result = path.segments[0];
+            for i in 0..=1000 {
+                let t = i as f64 / 1000.0;
+                let expected = split_cubic(curve, if reverse { 1.0 - t } else { t }).0.end;
+                assert!(split_cubic(result, t).0.end.distance(expected) < 0.1);
+            }
+        }
+    }
+
+    #[test]
+    fn consolidation_keeps_corners_and_rejects_large_shape_changes() {
+        let (left, right) = split_cubic(test_curve(), 0.5);
+        for modified in [
+            Segment {
+                first: VectorPoint {
+                    x: right.start.x,
+                    y: right.start.y + 5.0,
+                },
+                ..right
+            },
+            Segment {
+                second: VectorPoint {
+                    x: right.second.x,
+                    y: right.second.y + 5.0,
+                },
+                ..right
+            },
+            Segment {
+                first: right.start,
+                ..right
+            },
+        ] {
+            let mut path = Subpath {
+                start: left.start,
+                segments: vec![left, modified],
+                closed: false,
+            };
+            assert_eq!(consolidate_cubics(&mut path), 0);
+        }
+    }
+
+    #[test]
+    fn repeated_joins_remain_close_to_all_original_pieces() {
+        let curve = test_curve();
+        let pieces: Vec<_> = (0..48)
+            .map(|i| {
+                let mut piece = cubic_interval(curve, i as f64 / 48.0, (i + 1) as f64 / 48.0);
+                let offset = (i as f64 * 0.6).sin() * 0.09;
+                piece.first.y += offset;
+                piece.second.y += offset;
+                piece
+            })
+            .collect();
+        let reference: Vec<_> = pieces
+            .iter()
+            .flat_map(|&c| (0..=200).map(move |i| split_cubic(c, i as f64 / 200.0).0.end))
+            .collect();
+        let mut path = Subpath {
+            start: curve.start,
+            segments: pieces,
+            closed: false,
+        };
+        assert!(consolidate_cubics(&mut path) > 0);
+        let result: Vec<_> = path
+            .segments
+            .iter()
+            .flat_map(|&c| (0..=2000).map(move |i| split_cubic(c, i as f64 / 2000.0).0.end))
+            .collect();
+        for (from, to) in [(&reference, &result), (&result, &reference)] {
+            assert!(from
+                .iter()
+                .all(|p| to.iter().any(|q| p.distance(*q) <= 0.11)));
+        }
+    }
 
     #[test]
     fn disjoint_compound_path_remains_batchable_but_nested_path_does_not() {

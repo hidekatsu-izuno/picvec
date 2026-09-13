@@ -103,11 +103,12 @@ fn run() -> picvec::Result<()> {
         }
     }
     eprintln!(
-        "wrote {} ({}x{}, {} regions, {:.3}s)",
+        "wrote {} ({}x{}, {} objects, {} subpaths, {:.3}s)",
         summary.output.display(),
         summary.processing_width,
         summary.processing_height,
-        summary.geometry.regions,
+        summary.svg.objects,
+        summary.svg.path_subpaths,
         summary.elapsed_seconds,
     );
     if summary.adaptive_refinement.rejected_for_budget > 0 {
