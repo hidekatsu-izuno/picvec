@@ -4441,45 +4441,6 @@ fn merge_candidate_proposal(
     proposal.score.is_finite().then_some(proposal)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn push_merge_candidate(
-    source: &Raster,
-    regions: &[Option<MergeRegion>],
-    versions: &[usize],
-    protected_by_label: &[HashSet<usize>],
-    structural_boundaries: &[StructuralColorBoundary],
-    structural_by_label: &[Vec<usize>],
-    left: usize,
-    right: usize,
-    config: &Config,
-    sequence: &mut usize,
-    queue: &mut BinaryHeap<MergeQueueEntry>,
-) {
-    let (left, right) = pair(left, right);
-    let Some(proposal) = merge_candidate_proposal(
-        source,
-        regions,
-        protected_by_label,
-        structural_boundaries,
-        structural_by_label,
-        left,
-        right,
-        config,
-    ) else {
-        return;
-    };
-    queue.push(MergeQueueEntry {
-        score: proposal.score,
-        sequence: *sequence,
-        left,
-        right,
-        left_version: versions[left],
-        right_version: versions[right],
-        proposal,
-    });
-    *sequence += 1;
-}
-
 /// Merge quantizer bands only when a single Office-compatible Paint explains
 /// their union and each child independently.  Strong measured interfaces and
 /// explicit face barriers are propagated through the RAG, so a later merge
@@ -4767,20 +4728,38 @@ pub fn merge_partition(
             adjacency[*neighbour].remove(&entry.right);
             adjacency[*neighbour].insert(entry.left);
         }
-        for neighbour in ordered_neighbours {
-            push_merge_candidate(
-                source,
-                &regions,
-                &versions,
-                &protected_by_label,
-                &structural_boundaries,
-                &structural_by_label,
-                entry.left,
-                neighbour,
-                config,
-                &mut sequence,
-                &mut queue,
-            );
+        // Score against a fixed post-merge snapshot; queue insertion stays in
+        // the original order, including sequence numbers for equal scores.
+        let proposals: Vec<_> = ordered_neighbours
+            .par_iter()
+            .map(|&neighbour| {
+                let (left, right) = pair(entry.left, neighbour);
+                let proposal = merge_candidate_proposal(
+                    source,
+                    &regions,
+                    &protected_by_label,
+                    &structural_boundaries,
+                    &structural_by_label,
+                    left,
+                    right,
+                    config,
+                );
+                (left, right, proposal)
+            })
+            .collect();
+        for (left, right, proposal) in proposals {
+            if let Some(proposal) = proposal {
+                queue.push(MergeQueueEntry {
+                    score: proposal.score,
+                    sequence,
+                    left,
+                    right,
+                    left_version: versions[left],
+                    right_version: versions[right],
+                    proposal,
+                });
+                sequence += 1;
+            }
         }
         accepted += 1;
     }

@@ -28,584 +28,36 @@ pub(crate) fn absorb_micro_regions(
                 pixels[id as usize].push(i);
             }
         }
-        let mut changes = Vec::new();
-        let mut material_unions = vec![false; count];
-        let mut parent_slots = vec![usize::MAX; count];
-        for (id, component) in pixels.iter().enumerate() {
-            if component.is_empty() {
-                continue;
-            }
-            let region = &segmentation.regions[id];
-            let neutral = component.iter().all(|&i| {
-                let p = image.pixels[i];
-                p.iter().copied().fold(f32::NEG_INFINITY, f32::max)
-                    - p.iter().copied().fold(f32::INFINITY, f32::min)
-                    <= 48.0 / 255.0
-            });
-            let radius = if neutral { 8 } else { 4 };
-            let large = component.len() > 128;
-            let interior: Vec<_> = if large {
-                component
+        // Bound scratch allocation to a few chunks per worker, and collect in
+        // label order so chained unions and tie-breaking remain deterministic.
+        let chunk_size = count.div_ceil(rayon::current_num_threads() * 4).max(1);
+        let proposals: Vec<Vec<MicroProposal>> = pixels
+            .par_chunks(chunk_size)
+            .enumerate()
+            .map(|(chunk, components)| {
+                let mut parent_slots = vec![usize::MAX; count];
+                components
                     .iter()
-                    .copied()
-                    .filter(|&i| {
-                        let (x, y) = (i % w, i / w);
-                        x > 0
-                            && x + 1 < w
-                            && y > 0
-                            && y + 1 < h
-                            && [i - 1, i + 1, i - w, i + w]
-                                .iter()
-                                .all(|&j| labels[j] as usize == id)
+                    .enumerate()
+                    .map(|(offset, component)| {
+                        micro_region_proposal(
+                            image,
+                            segmentation,
+                            matte,
+                            chunk * chunk_size + offset,
+                            component,
+                            &mut parent_slots,
+                        )
                     })
                     .collect()
-            } else {
-                Vec::new()
-            };
-            let material_distribution =
-                (interior.len() >= 8).then(|| colour_distribution(image, &interior));
-            let resolved_shading = large && has_resolved_shading(image, &interior);
-            if large && material_distribution.is_none() {
-                continue;
-            }
-            // Only an incident, larger owner may receive this region.
-            let mut contacts = BTreeSet::new();
-            let mut boundary_differences = BTreeMap::<usize, Vec<f32>>::new();
-            for &i in component {
-                let (x, y) = (i % w, i / w);
-                for j in [
-                    (x > 0).then(|| i - 1),
-                    (x + 1 < w).then(|| i + 1),
-                    (y > 0).then(|| i - w),
-                    (y + 1 < h).then(|| i + w),
-                ]
-                .into_iter()
-                .flatten()
-                {
-                    let other = labels[j] as usize;
-                    if other != id && segmentation.regions[other].area > component.len() {
-                        contacts.insert(other);
-                        if large
-                            && x >= 2
-                            && x + 2 < w
-                            && y >= 2
-                            && y + 2 < h
-                            && [i - 1, i + 1, i - w, i + w, j - 1, j + 1, j - w, j + w]
-                                .iter()
-                                .all(|&k| labels[k] as usize == id || labels[k] as usize == other)
-                        {
-                            boundary_differences.entry(other).or_default().push(
-                                (0..3)
-                                    .map(|c| (image.pixels[i][c] - image.pixels[j][c]).abs())
-                                    .fold(0.0_f32, f32::max),
-                            );
-                        }
-                    }
-                }
-            }
-            if contacts.is_empty() {
-                continue;
-            }
-            let opacity = |i| matte.map_or(1.0, |a| a.get(i));
-            let a = component.iter().map(|&i| opacity(i)).sum::<f32>() / component.len() as f32;
-            if a <= 0.0
-                || component
-                    .iter()
-                    .any(|&i| (opacity(i) - a).abs() > 1.5 / 255.0)
-            {
-                continue;
-            }
-            // A raster fringe can itself separate a tip from its material.
-            // Discover source paints in the same local window, while keeping
-            // direct contacts separate for ordinary same-material merging.
-            // Nonincident paints are evidence only for partial coverage below.
-            let incident = contacts.clone();
-            if !large && neutral {
-                for y in region.min_y.saturating_sub(radius)..(region.max_y + radius).min(h) {
-                    for x in region.min_x.saturating_sub(radius)..(region.max_x + radius).min(w) {
-                        let other = labels[y * w + x] as usize;
-                        if other != id && segmentation.regions[other].area > 128 {
-                            contacts.insert(other);
-                        }
-                    }
-                }
-            }
-            let varying_coverage = (0..3).any(|c| {
-                let low = component
-                    .iter()
-                    .map(|&i| image.pixels[i][c])
-                    .fold(f32::INFINITY, f32::min);
-                let high = component
-                    .iter()
-                    .map(|&i| image.pixels[i][c])
-                    .fold(f32::NEG_INFINITY, f32::max);
-                high - low > 16.0 / 255.0
-            });
-            let resolved_interior = component.iter().any(|&i| {
-                let (x, y) = (i % w, i / w);
-                x + 1 < w
-                    && y + 1 < h
-                    && [i + 1, i + w, i + w + 1].iter().all(|&j| {
-                        labels[j] as usize == id
-                            && (0..3).all(|c| {
-                                (image.pixels[i][c] - image.pixels[j][c]).abs() <= 8.0 / 255.0
-                            })
-                    })
-            });
-            let mut parents = Vec::new();
-            let mut edge_parents = Vec::new();
-            let mut repeated = Vec::new();
-            let mut same_material = Vec::new();
-            // Visit the local window once, distributing its pixels to the
-            // incident owners. Keep both parent order and row-major sample
-            // order identical to scanning the whole window for each parent.
-            let mut parent_samples = vec![(Vec::new(), Vec::new()); contacts.len()];
-            for (slot, &parent) in contacts.iter().enumerate() {
-                parent_slots[parent] = slot;
-            }
-            for y in region.min_y.saturating_sub(radius)..(region.max_y + radius).min(h) {
-                for x in region.min_x.saturating_sub(radius)..(region.max_x + radius).min(w) {
-                    let j = y * w + x;
-                    let parent = labels[j] as usize;
-                    let slot = parent_slots[parent];
-                    if slot == usize::MAX || (opacity(j) - a).abs() > 1.5 / 255.0 {
-                        continue;
-                    }
-                    let (samples, core) = &mut parent_samples[slot];
-                    samples.push(j);
-                    if x > 0
-                        && x + 1 < w
-                        && y > 0
-                        && y + 1 < h
-                        && [j - 1, j + 1, j - w, j + w]
-                            .iter()
-                            .all(|&k| labels[k] as usize == parent)
-                    {
-                        core.push(j);
-                    }
-                }
-            }
-            for &parent in &contacts {
-                parent_slots[parent] = usize::MAX;
-            }
-            for (parent, (samples, core)) in contacts.into_iter().zip(parent_samples) {
-                let selected = if core.len() >= 3 { &core } else { &samples };
-                if selected.len() < 3 {
-                    continue;
-                }
-                let mut rgb = [0.0; 3];
-                for c in 0..3 {
-                    let mut values: Vec<_> = selected.iter().map(|&j| image.pixels[j][c]).collect();
-                    values.sort_by(f32::total_cmp);
-                    rgb[c] = values[values.len() / 2];
-                }
-                if large {
-                    if core.len() >= 16 {
-                        let parent_distribution = colour_distribution(image, &core);
-                        let material = material_distribution.as_ref().unwrap();
-                        let overlapping_tails = (0..3).all(|c| {
-                            material[c][0] <= parent_distribution[c][4] + 1.01 / 255.0
-                                && parent_distribution[c][0] <= material[c][4] + 1.01 / 255.0
-                        });
-                        let near_black_overlap = overlapping_tails
-                            && (0..3).all(|c| {
-                                material[c][4].max(parent_distribution[c][4]) <= 24.0 / 255.0
-                                    && material[c][4] - material[c][0] <= 16.01 / 255.0
-                            });
-                        let varying_continuation = overlapping_tails
-                            && (0..3)
-                                .filter(|&c| {
-                                    material[c][3] - material[c][1] >= 1.99 / 255.0
-                                        && parent_distribution[c][3] - parent_distribution[c][1]
-                                            >= 0.99 / 255.0
-                                })
-                                .count()
-                                >= 2
-                            && (0..3).all(|c| {
-                                (material[c][2] - parent_distribution[c][2]).abs() <= 12.01 / 255.0
-                                    && material[c][4] - material[c][0] <= 16.01 / 255.0
-                                    && parent_distribution[c][4] - parent_distribution[c][0]
-                                        <= 16.01 / 255.0
-                                    && (material[c][0] - parent_distribution[c][2]).abs()
-                                        <= 16.01 / 255.0
-                                    && (material[c][4] - parent_distribution[c][2]).abs()
-                                        <= 16.01 / 255.0
-                            });
-                        // Quantized material can have several code values of
-                        // internal variation. Compare its interface with that
-                        // variation and two-sample quantization uncertainty.
-                        // Flat distinct paints cannot use the varying-field gate.
-                        let noise_limit = if near_black_overlap || varying_continuation {
-                            let mut steps = Vec::new();
-                            for &i in &interior {
-                                for j in [i + 1, i + w] {
-                                    if labels[j] as usize == id {
-                                        steps.push(
-                                            (0..3)
-                                                .map(|c| {
-                                                    (image.pixels[i][c] - image.pixels[j][c]).abs()
-                                                })
-                                                .fold(0.0_f32, f32::max),
-                                        );
-                                    }
-                                }
-                            }
-                            steps.sort_by(f32::total_cmp);
-                            steps
-                                .get(steps.len().saturating_sub(1) * 3 / 4)
-                                .copied()
-                                .map(|v| v + 2.01 / 255.0)
-                                .unwrap_or(0.0)
-                                .clamp(2.01 / 255.0, 4.01 / 255.0)
-                        } else {
-                            2.01 / 255.0
-                        };
-                        let continuous =
-                            boundary_differences
-                                .get_mut(&parent)
-                                .is_some_and(|samples| {
-                                    samples.sort_by(f32::total_cmp);
-                                    samples.len() >= 8
-                                        && samples[samples.len() / 2] <= noise_limit
-                                        && samples[(samples.len() - 1) * 3 / 4] <= 8.01 / 255.0
-                                });
-                        let ink_continuation = continuous && near_black_overlap;
-                        let median = material_distribution.as_ref().unwrap().map(|q| q[2]);
-                        let extra_error = interior
-                            .iter()
-                            .map(|&i| {
-                                (0..3)
-                                    .map(|c| {
-                                        (image.pixels[i][c] - rgb[c]).powi(2)
-                                            - (image.pixels[i][c] - median[c]).powi(2)
-                                    })
-                                    .sum::<f32>()
-                                    / 3.0
-                            })
-                            .sum::<f32>()
-                            / interior.len() as f32;
-                        if (!resolved_shading
-                            || ink_continuation
-                            || (continuous && varying_continuation))
-                            && ((continuous && varying_continuation)
-                                || distributions_share_material(
-                                    material_distribution.as_ref().unwrap(),
-                                    &parent_distribution,
-                                    continuous,
-                                )
-                                || (extra_error <= (8.0_f32 / 255.0).powi(2)
-                                    && distributions_support_continuation(
-                                        material_distribution.as_ref().unwrap(),
-                                        &parent_distribution,
-                                        continuous,
-                                    )))
-                        {
-                            let score = (0..3)
-                                .map(|c| {
-                                    (material_distribution.as_ref().unwrap()[c][2]
-                                        - parent_distribution[c][2])
-                                        .powi(2)
-                                })
-                                .sum::<f32>();
-                            same_material.push((score, parent, rgb));
-                        }
-                    }
-                    continue;
-                }
-                // A sampled dark outline may have a noisy local median. Two
-                // matching native samples in the same incident owner prove
-                // this tiny island is not a new material or an isolated dot.
-                if incident.contains(&parent)
-                    && component.iter().all(|&i| {
-                        samples
-                            .iter()
-                            .filter(|&&j| {
-                                (0..3).all(|c| {
-                                    (image.pixels[i][c] - image.pixels[j][c]).abs()
-                                        <= (if neutral { 12.01 } else { 6.01 }) / 255.0
-                                })
-                            })
-                            .take(2)
-                            .count()
-                            >= 2
-                    })
-                {
-                    repeated.push((parent, rgb));
-                }
-                let nearest = samples
-                    .iter()
-                    .min_by_key(|&&j| {
-                        let dx =
-                            (2 * (j % w) + 1) as isize - (region.min_x + region.max_x) as isize;
-                        let dy =
-                            (2 * (j / w) + 1) as isize - (region.min_y + region.max_y) as isize;
-                        (dx * dx + dy * dy, j)
-                    })
-                    .copied()
-                    .unwrap();
-                // Median alone does not represent an antialiased outline:
-                // local samples include both its ink and its coverage ramp.
-                // Keep observed endpoints so a noisy dark fragment is not
-                // forced to become a separate material below that median.
-                for extreme in [
-                    selected.iter().min_by(|&&a, &&b| {
-                        rgb_to_oklab(image.pixels[a])
-                            .l
-                            .total_cmp(&rgb_to_oklab(image.pixels[b]).l)
-                    }),
-                    selected.iter().max_by(|&&a, &&b| {
-                        rgb_to_oklab(image.pixels[a])
-                            .l
-                            .total_cmp(&rgb_to_oklab(image.pixels[b]).l)
-                    }),
-                ]
-                .into_iter()
-                .flatten()
-                {
-                    let endpoint = image.pixels[*extreme];
-                    // An isolated extremum may belong to a narrow coloured
-                    // rim or to noise, rather than the adjacent material.
-                    // Only recurrent source colours are material endpoints.
-                    if selected
-                        .iter()
-                        .filter(|&&j| {
-                            (0..3).all(|c| (image.pixels[j][c] - endpoint[c]).abs() <= 3.01 / 255.0)
-                        })
-                        .take(3)
-                        .count()
-                        == 3
-                    {
-                        edge_parents.push((parent, endpoint));
-                    }
-                }
-                edge_parents.push((parent, image.pixels[nearest]));
-                if incident.contains(&parent) {
-                    parents.push((parent, rgb));
-                } else {
-                    edge_parents.push((parent, rgb));
-                }
-            }
-            if large {
-                if let Some(&(_, parent, rgb)) = same_material
-                    .iter()
-                    .min_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)))
-                {
-                    material_unions[id] = true;
-                    for &i in component {
-                        changes.push((i, parent as u32, rgb));
-                    }
-                    total += 1;
-                }
-                continue;
-            }
-            if let Some(&(parent, rgb)) = repeated
-                .iter()
-                .min_by_key(|&&(parent, _)| std::cmp::Reverse(segmentation.regions[parent].area))
-            {
-                material_unions[id] = true;
-                for &i in component {
-                    changes.push((i, parent as u32, rgb));
-                }
-                total += 1;
-                continue;
-            }
-            // Border samples contain coverage of other paints. Requiring
-            // every sample to equal one solid invents a new material for each
-            // small piece of the same noisy outline. Compare robust material
-            // colours, then bound the *additional* source error of sharing it.
-            let mut material = [0.0; 3];
-            for c in 0..3 {
-                let mut values: Vec<_> = component.iter().map(|&i| image.pixels[i][c]).collect();
-                values.sort_by(f32::total_cmp);
-                material[c] = (values[(values.len() - 1) / 2] + values[values.len() / 2]) * 0.5;
-            }
-            let source_variance = component
-                .iter()
-                .map(|&i| {
-                    (0..3)
-                        .map(|c| (image.pixels[i][c] - material[c]).powi(2))
-                        .sum::<f32>()
-                        / 3.0
-                })
-                .sum::<f32>()
-                / component.len() as f32;
-            let shared = parents
-                .iter()
-                .filter_map(|&(parent, rgb)| {
-                    if (0..3).any(|c| {
-                        (material[c] - rgb[c]).abs() > (if neutral { 32.0 } else { 16.0 }) / 255.0
-                    }) {
-                        return None;
-                    }
-                    let extra = component
-                        .iter()
-                        .map(|&i| {
-                            (0..3)
-                                .map(|c| {
-                                    (image.pixels[i][c] - rgb[c]).powi(2)
-                                        - (image.pixels[i][c] - material[c]).powi(2)
-                                })
-                                .sum::<f32>()
-                                / 3.0
-                        })
-                        .sum::<f32>()
-                        / component.len() as f32;
-                    (extra
-                        <= (12.0_f32 / 255.0).powi(2)
-                            + if neutral {
-                                source_variance / component.len() as f32
-                            } else {
-                                0.0
-                            }
-                        || (neutral
-                            && extra * component.len() as f32 <= (32.0_f32 / 255.0).powi(2)))
-                    .then_some((extra, parent, rgb))
-                })
-                .min_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
-            if let Some((_, parent, rgb)) = shared {
-                material_unions[id] = true;
-                for &i in component {
-                    changes.push((i, parent as u32, rgb));
-                }
-                total += 1;
-                continue;
-            }
-            // Preserve uniform/chromatic interiors. Noisy neutral coverage
-            // shoulders can occupy a few raster rows, so require a wider
-            // interior there before treating them as an independent material.
-            let uniform = component
-                .iter()
-                .all(|&i| (0..3).all(|c| (image.pixels[i][c] - material[c]).abs() <= 6.0 / 255.0));
-            if component.iter().any(|&i| {
-                let (x, y) = (i % w, i / w);
-                let radius = if uniform || !neutral { 1 } else { 2 };
-                x >= radius
-                    && x + radius < w
-                    && y >= radius
-                    && y + radius < h
-                    && (y - radius..=y + radius).all(|yy| {
-                        (x - radius..=x + radius).all(|xx| labels[yy * w + xx] as usize == id)
-                    })
-            }) {
-                continue;
-            }
-            // Source endpoints describe local shading. Nearby neutral paints
-            // can explain partial coverage at a terminal, but cannot replace
-            // a fully covered isolated mark or become a disconnected owner.
-            parents.extend(edge_parents);
-            let mut best = None::<(f32, Vec<(usize, u32, [f32; 3])>)>;
-            for left in 0..parents.len() {
-                for right in left + 1..parents.len() {
-                    let (first, c1) = parents[left];
-                    let (second, c2) = parents[right];
-                    if first == second
-                        || (!incident.contains(&first) && !incident.contains(&second))
-                    {
-                        continue;
-                    }
-                    if delta_e_ok(rgb_to_oklab(c1), rgb_to_oklab(c2)) < 6.0 {
-                        continue;
-                    }
-                    let mut assignments = Vec::new();
-                    let mut error = 0.0_f32;
-                    for &i in component {
-                        let (alpha, residual) = coverage_mixture(image.pixels[i], c1, c2);
-                        // Independent coloured dots, highlights and extrema
-                        // fail the bounded two-parent colour model.
-                        if !(-0.02..=1.02).contains(&alpha)
-                            || residual > 2.0
-                            || (!incident.contains(&first) && alpha >= 0.95)
-                            || (!incident.contains(&second) && alpha <= 0.05)
-                        {
-                            break;
-                        }
-                        error = error.max(residual);
-                        let amount = partition_coverage_alpha(image.pixels[i], c1, c2);
-                        let (owner, rgb) = if amount >= 0.5 {
-                            (first, c1)
-                        } else {
-                            (second, c2)
-                        };
-                        // A nearby paint is coverage evidence, not permission
-                        // to create a disconnected island of its label. Keep
-                        // ownership in an actual incident face.
-                        let (owner, rgb) = if incident.contains(&owner) {
-                            (owner, rgb)
-                        } else {
-                            // Only a mixed junction without a resolved material
-                            // interior may redistribute coverage to its incident
-                            // paints. A narrow opaque stripe (such as a wiper)
-                            // must not be replaced with the neighbouring glass.
-                            if resolved_interior || (incident.len() < 2 && !varying_coverage) {
-                                break;
-                            }
-                            parents
-                                .iter()
-                                .filter(|e| incident.contains(&e.0))
-                                .min_by(|a, b| {
-                                    let distance = |c: [f32; 3]| {
-                                        (0..3).map(|k| (c[k] - rgb[k]).powi(2)).sum::<f32>()
-                                    };
-                                    distance(a.1).total_cmp(&distance(b.1))
-                                })
-                                .copied()
-                                .unwrap()
-                        };
-                        assignments.push((i, owner as u32, rgb));
-                    }
-                    if assignments.len() == component.len()
-                        && best.as_ref().is_none_or(|b| error < b.0)
-                    {
-                        best = Some((error, assignments));
-                    }
-                }
-            }
-            // At a three-face junction the raster sample can mix all three
-            // paints. It need not lie on any single two-colour segment.
-            if best.is_none() {
-                for first in 0..parents.len() {
-                    for second in first + 1..parents.len() {
-                        for third in second + 1..parents.len() {
-                            let entries = [parents[first], parents[second], parents[third]];
-                            if entries[0].0 == entries[1].0
-                                || entries[0].0 == entries[2].0
-                                || entries[1].0 == entries[2].0
-                            {
-                                continue;
-                            }
-                            if entries.iter().any(|e| !incident.contains(&e.0)) {
-                                continue;
-                            }
-                            let mut assignments = Vec::new();
-                            let mut worst = 0.0_f32;
-                            for &i in component {
-                                let Some((error, weights)) =
-                                    junction_mixture(image.pixels[i], entries.map(|p| p.1))
-                                else {
-                                    break;
-                                };
-                                if error > 2.0 {
-                                    break;
-                                }
-                                worst = worst.max(error);
-                                let winner = (0..3)
-                                    .max_by(|&a, &b| weights[a].total_cmp(&weights[b]))
-                                    .unwrap();
-                                assignments.push((i, entries[winner].0 as u32, entries[winner].1));
-                            }
-                            if assignments.len() == component.len()
-                                && best.as_ref().is_none_or(|b| worst < b.0)
-                            {
-                                best = Some((worst, assignments));
-                            }
-                        }
-                    }
-                }
-            }
-            if let Some((_, assignments)) = best {
-                changes.extend(assignments);
-                total += 1;
-            }
+            })
+            .collect();
+        let mut changes = Vec::new();
+        let mut material_unions = vec![false; count];
+        for (id, proposal) in proposals.into_iter().flatten().enumerate() {
+            total += proposal.merges;
+            material_unions[id] = proposal.material_union;
+            changes.extend(proposal.changes);
         }
         if changes.is_empty() {
             break;
@@ -712,6 +164,586 @@ pub(crate) fn absorb_micro_regions(
     }
     segmentation.summary.micro_region_merges += total;
     total
+}
+
+#[derive(Default)]
+struct MicroProposal {
+    changes: Vec<(usize, u32, [f32; 3])>,
+    material_union: bool,
+    merges: usize,
+}
+
+// Read the same ownership snapshot for every region. Scratch slots are private
+// to a chunk and reset before any return that follows their population.
+fn micro_region_proposal(
+    image: &Raster,
+    segmentation: &Segmentation,
+    matte: Option<&crate::chroma::AlphaMatte>,
+    id: usize,
+    component: &[usize],
+    parent_slots: &mut [usize],
+) -> MicroProposal {
+    let (w, h) = (image.width, image.height);
+    let labels = &segmentation.labels;
+    let mut proposal = MicroProposal::default();
+    if component.is_empty() {
+        return proposal;
+    }
+    let region = &segmentation.regions[id];
+    let neutral = component.iter().all(|&i| {
+        let p = image.pixels[i];
+        p.iter().copied().fold(f32::NEG_INFINITY, f32::max)
+            - p.iter().copied().fold(f32::INFINITY, f32::min)
+            <= 48.0 / 255.0
+    });
+    let radius = if neutral { 8 } else { 4 };
+    let large = component.len() > 128;
+    let interior: Vec<_> = if large {
+        component
+            .iter()
+            .copied()
+            .filter(|&i| {
+                let (x, y) = (i % w, i / w);
+                x > 0
+                    && x + 1 < w
+                    && y > 0
+                    && y + 1 < h
+                    && [i - 1, i + 1, i - w, i + w]
+                        .iter()
+                        .all(|&j| labels[j] as usize == id)
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let material_distribution =
+        (interior.len() >= 8).then(|| colour_distribution(image, &interior));
+    let resolved_shading = large && has_resolved_shading(image, &interior);
+    if large && material_distribution.is_none() {
+        return proposal;
+    }
+    // Only an incident, larger owner may receive this region.
+    let mut contacts = BTreeSet::new();
+    let mut boundary_differences = BTreeMap::<usize, Vec<f32>>::new();
+    for &i in component {
+        let (x, y) = (i % w, i / w);
+        for j in [
+            (x > 0).then(|| i - 1),
+            (x + 1 < w).then(|| i + 1),
+            (y > 0).then(|| i - w),
+            (y + 1 < h).then(|| i + w),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let other = labels[j] as usize;
+            if other != id && segmentation.regions[other].area > component.len() {
+                contacts.insert(other);
+                if large
+                    && x >= 2
+                    && x + 2 < w
+                    && y >= 2
+                    && y + 2 < h
+                    && [i - 1, i + 1, i - w, i + w, j - 1, j + 1, j - w, j + w]
+                        .iter()
+                        .all(|&k| labels[k] as usize == id || labels[k] as usize == other)
+                {
+                    boundary_differences.entry(other).or_default().push(
+                        (0..3)
+                            .map(|c| (image.pixels[i][c] - image.pixels[j][c]).abs())
+                            .fold(0.0_f32, f32::max),
+                    );
+                }
+            }
+        }
+    }
+    if contacts.is_empty() {
+        return proposal;
+    }
+    let opacity = |i| matte.map_or(1.0, |a| a.get(i));
+    let a = component.iter().map(|&i| opacity(i)).sum::<f32>() / component.len() as f32;
+    if a <= 0.0
+        || component
+            .iter()
+            .any(|&i| (opacity(i) - a).abs() > 1.5 / 255.0)
+    {
+        return proposal;
+    }
+    // A raster fringe can itself separate a tip from its material.
+    // Discover source paints in the same local window, while keeping
+    // direct contacts separate for ordinary same-material merging.
+    // Nonincident paints are evidence only for partial coverage below.
+    let incident = contacts.clone();
+    if !large && neutral {
+        for y in region.min_y.saturating_sub(radius)..(region.max_y + radius).min(h) {
+            for x in region.min_x.saturating_sub(radius)..(region.max_x + radius).min(w) {
+                let other = labels[y * w + x] as usize;
+                if other != id && segmentation.regions[other].area > 128 {
+                    contacts.insert(other);
+                }
+            }
+        }
+    }
+    let varying_coverage = (0..3).any(|c| {
+        let low = component
+            .iter()
+            .map(|&i| image.pixels[i][c])
+            .fold(f32::INFINITY, f32::min);
+        let high = component
+            .iter()
+            .map(|&i| image.pixels[i][c])
+            .fold(f32::NEG_INFINITY, f32::max);
+        high - low > 16.0 / 255.0
+    });
+    let resolved_interior = component.iter().any(|&i| {
+        let (x, y) = (i % w, i / w);
+        x + 1 < w
+            && y + 1 < h
+            && [i + 1, i + w, i + w + 1].iter().all(|&j| {
+                labels[j] as usize == id
+                    && (0..3)
+                        .all(|c| (image.pixels[i][c] - image.pixels[j][c]).abs() <= 8.0 / 255.0)
+            })
+    });
+    let mut parents = Vec::new();
+    let mut edge_parents = Vec::new();
+    let mut repeated = Vec::new();
+    let mut same_material = Vec::new();
+    // Visit the local window once, distributing its pixels to the
+    // incident owners. Keep both parent order and row-major sample
+    // order identical to scanning the whole window for each parent.
+    let mut parent_samples = vec![(Vec::new(), Vec::new()); contacts.len()];
+    for (slot, &parent) in contacts.iter().enumerate() {
+        parent_slots[parent] = slot;
+    }
+    for y in region.min_y.saturating_sub(radius)..(region.max_y + radius).min(h) {
+        for x in region.min_x.saturating_sub(radius)..(region.max_x + radius).min(w) {
+            let j = y * w + x;
+            let parent = labels[j] as usize;
+            let slot = parent_slots[parent];
+            if slot == usize::MAX || (opacity(j) - a).abs() > 1.5 / 255.0 {
+                continue;
+            }
+            let (samples, core) = &mut parent_samples[slot];
+            samples.push(j);
+            if x > 0
+                && x + 1 < w
+                && y > 0
+                && y + 1 < h
+                && [j - 1, j + 1, j - w, j + w]
+                    .iter()
+                    .all(|&k| labels[k] as usize == parent)
+            {
+                core.push(j);
+            }
+        }
+    }
+    for &parent in &contacts {
+        parent_slots[parent] = usize::MAX;
+    }
+    for (parent, (samples, core)) in contacts.into_iter().zip(parent_samples) {
+        let selected = if core.len() >= 3 { &core } else { &samples };
+        if selected.len() < 3 {
+            continue;
+        }
+        let mut rgb = [0.0; 3];
+        for c in 0..3 {
+            let mut values: Vec<_> = selected.iter().map(|&j| image.pixels[j][c]).collect();
+            values.sort_by(f32::total_cmp);
+            rgb[c] = values[values.len() / 2];
+        }
+        if large {
+            if core.len() >= 16 {
+                let parent_distribution = colour_distribution(image, &core);
+                let material = material_distribution.as_ref().unwrap();
+                let overlapping_tails = (0..3).all(|c| {
+                    material[c][0] <= parent_distribution[c][4] + 1.01 / 255.0
+                        && parent_distribution[c][0] <= material[c][4] + 1.01 / 255.0
+                });
+                let near_black_overlap = overlapping_tails
+                    && (0..3).all(|c| {
+                        material[c][4].max(parent_distribution[c][4]) <= 24.0 / 255.0
+                            && material[c][4] - material[c][0] <= 16.01 / 255.0
+                    });
+                let varying_continuation = overlapping_tails
+                    && (0..3)
+                        .filter(|&c| {
+                            material[c][3] - material[c][1] >= 1.99 / 255.0
+                                && parent_distribution[c][3] - parent_distribution[c][1]
+                                    >= 0.99 / 255.0
+                        })
+                        .count()
+                        >= 2
+                    && (0..3).all(|c| {
+                        (material[c][2] - parent_distribution[c][2]).abs() <= 12.01 / 255.0
+                            && material[c][4] - material[c][0] <= 16.01 / 255.0
+                            && parent_distribution[c][4] - parent_distribution[c][0]
+                                <= 16.01 / 255.0
+                            && (material[c][0] - parent_distribution[c][2]).abs() <= 16.01 / 255.0
+                            && (material[c][4] - parent_distribution[c][2]).abs() <= 16.01 / 255.0
+                    });
+                // Quantized material can have several code values of
+                // internal variation. Compare its interface with that
+                // variation and two-sample quantization uncertainty.
+                // Flat distinct paints cannot use the varying-field gate.
+                let noise_limit = if near_black_overlap || varying_continuation {
+                    let mut steps = Vec::new();
+                    for &i in &interior {
+                        for j in [i + 1, i + w] {
+                            if labels[j] as usize == id {
+                                steps.push(
+                                    (0..3)
+                                        .map(|c| (image.pixels[i][c] - image.pixels[j][c]).abs())
+                                        .fold(0.0_f32, f32::max),
+                                );
+                            }
+                        }
+                    }
+                    steps.sort_by(f32::total_cmp);
+                    steps
+                        .get(steps.len().saturating_sub(1) * 3 / 4)
+                        .copied()
+                        .map(|v| v + 2.01 / 255.0)
+                        .unwrap_or(0.0)
+                        .clamp(2.01 / 255.0, 4.01 / 255.0)
+                } else {
+                    2.01 / 255.0
+                };
+                let continuous = boundary_differences
+                    .get_mut(&parent)
+                    .is_some_and(|samples| {
+                        samples.sort_by(f32::total_cmp);
+                        samples.len() >= 8
+                            && samples[samples.len() / 2] <= noise_limit
+                            && samples[(samples.len() - 1) * 3 / 4] <= 8.01 / 255.0
+                    });
+                let ink_continuation = continuous && near_black_overlap;
+                let median = material_distribution.as_ref().unwrap().map(|q| q[2]);
+                let extra_error = interior
+                    .iter()
+                    .map(|&i| {
+                        (0..3)
+                            .map(|c| {
+                                (image.pixels[i][c] - rgb[c]).powi(2)
+                                    - (image.pixels[i][c] - median[c]).powi(2)
+                            })
+                            .sum::<f32>()
+                            / 3.0
+                    })
+                    .sum::<f32>()
+                    / interior.len() as f32;
+                if (!resolved_shading || ink_continuation || (continuous && varying_continuation))
+                    && ((continuous && varying_continuation)
+                        || distributions_share_material(
+                            material_distribution.as_ref().unwrap(),
+                            &parent_distribution,
+                            continuous,
+                        )
+                        || (extra_error <= (8.0_f32 / 255.0).powi(2)
+                            && distributions_support_continuation(
+                                material_distribution.as_ref().unwrap(),
+                                &parent_distribution,
+                                continuous,
+                            )))
+                {
+                    let score = (0..3)
+                        .map(|c| {
+                            (material_distribution.as_ref().unwrap()[c][2]
+                                - parent_distribution[c][2])
+                                .powi(2)
+                        })
+                        .sum::<f32>();
+                    same_material.push((score, parent, rgb));
+                }
+            }
+            continue;
+        }
+        // A sampled dark outline may have a noisy local median. Two
+        // matching native samples in the same incident owner prove
+        // this tiny island is not a new material or an isolated dot.
+        if incident.contains(&parent)
+            && component.iter().all(|&i| {
+                samples
+                    .iter()
+                    .filter(|&&j| {
+                        (0..3).all(|c| {
+                            (image.pixels[i][c] - image.pixels[j][c]).abs()
+                                <= (if neutral { 12.01 } else { 6.01 }) / 255.0
+                        })
+                    })
+                    .take(2)
+                    .count()
+                    >= 2
+            })
+        {
+            repeated.push((parent, rgb));
+        }
+        let nearest = samples
+            .iter()
+            .min_by_key(|&&j| {
+                let dx = (2 * (j % w) + 1) as isize - (region.min_x + region.max_x) as isize;
+                let dy = (2 * (j / w) + 1) as isize - (region.min_y + region.max_y) as isize;
+                (dx * dx + dy * dy, j)
+            })
+            .copied()
+            .unwrap();
+        // Median alone does not represent an antialiased outline:
+        // local samples include both its ink and its coverage ramp.
+        // Keep observed endpoints so a noisy dark fragment is not
+        // forced to become a separate material below that median.
+        for extreme in [
+            selected.iter().min_by(|&&a, &&b| {
+                rgb_to_oklab(image.pixels[a])
+                    .l
+                    .total_cmp(&rgb_to_oklab(image.pixels[b]).l)
+            }),
+            selected.iter().max_by(|&&a, &&b| {
+                rgb_to_oklab(image.pixels[a])
+                    .l
+                    .total_cmp(&rgb_to_oklab(image.pixels[b]).l)
+            }),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let endpoint = image.pixels[*extreme];
+            // An isolated extremum may belong to a narrow coloured
+            // rim or to noise, rather than the adjacent material.
+            // Only recurrent source colours are material endpoints.
+            if selected
+                .iter()
+                .filter(|&&j| {
+                    (0..3).all(|c| (image.pixels[j][c] - endpoint[c]).abs() <= 3.01 / 255.0)
+                })
+                .take(3)
+                .count()
+                == 3
+            {
+                edge_parents.push((parent, endpoint));
+            }
+        }
+        edge_parents.push((parent, image.pixels[nearest]));
+        if incident.contains(&parent) {
+            parents.push((parent, rgb));
+        } else {
+            edge_parents.push((parent, rgb));
+        }
+    }
+    if large {
+        if let Some(&(_, parent, rgb)) = same_material
+            .iter()
+            .min_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)))
+        {
+            proposal.material_union = true;
+            for &i in component {
+                proposal.changes.push((i, parent as u32, rgb));
+            }
+            proposal.merges += 1;
+        }
+        return proposal;
+    }
+    if let Some(&(parent, rgb)) = repeated
+        .iter()
+        .min_by_key(|&&(parent, _)| std::cmp::Reverse(segmentation.regions[parent].area))
+    {
+        proposal.material_union = true;
+        for &i in component {
+            proposal.changes.push((i, parent as u32, rgb));
+        }
+        proposal.merges += 1;
+        return proposal;
+    }
+    // Border samples contain coverage of other paints. Requiring
+    // every sample to equal one solid invents a new material for each
+    // small piece of the same noisy outline. Compare robust material
+    // colours, then bound the *additional* source error of sharing it.
+    let mut material = [0.0; 3];
+    for c in 0..3 {
+        let mut values: Vec<_> = component.iter().map(|&i| image.pixels[i][c]).collect();
+        values.sort_by(f32::total_cmp);
+        material[c] = (values[(values.len() - 1) / 2] + values[values.len() / 2]) * 0.5;
+    }
+    let source_variance = component
+        .iter()
+        .map(|&i| {
+            (0..3)
+                .map(|c| (image.pixels[i][c] - material[c]).powi(2))
+                .sum::<f32>()
+                / 3.0
+        })
+        .sum::<f32>()
+        / component.len() as f32;
+    let shared = parents
+        .iter()
+        .filter_map(|&(parent, rgb)| {
+            if (0..3)
+                .any(|c| (material[c] - rgb[c]).abs() > (if neutral { 32.0 } else { 16.0 }) / 255.0)
+            {
+                return None;
+            }
+            let extra = component
+                .iter()
+                .map(|&i| {
+                    (0..3)
+                        .map(|c| {
+                            (image.pixels[i][c] - rgb[c]).powi(2)
+                                - (image.pixels[i][c] - material[c]).powi(2)
+                        })
+                        .sum::<f32>()
+                        / 3.0
+                })
+                .sum::<f32>()
+                / component.len() as f32;
+            (extra
+                <= (12.0_f32 / 255.0).powi(2)
+                    + if neutral {
+                        source_variance / component.len() as f32
+                    } else {
+                        0.0
+                    }
+                || (neutral && extra * component.len() as f32 <= (32.0_f32 / 255.0).powi(2)))
+            .then_some((extra, parent, rgb))
+        })
+        .min_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+    if let Some((_, parent, rgb)) = shared {
+        proposal.material_union = true;
+        for &i in component {
+            proposal.changes.push((i, parent as u32, rgb));
+        }
+        proposal.merges += 1;
+        return proposal;
+    }
+    // Preserve uniform/chromatic interiors. Noisy neutral coverage
+    // shoulders can occupy a few raster rows, so require a wider
+    // interior there before treating them as an independent material.
+    let uniform = component
+        .iter()
+        .all(|&i| (0..3).all(|c| (image.pixels[i][c] - material[c]).abs() <= 6.0 / 255.0));
+    if component.iter().any(|&i| {
+        let (x, y) = (i % w, i / w);
+        let radius = if uniform || !neutral { 1 } else { 2 };
+        x >= radius
+            && x + radius < w
+            && y >= radius
+            && y + radius < h
+            && (y - radius..=y + radius)
+                .all(|yy| (x - radius..=x + radius).all(|xx| labels[yy * w + xx] as usize == id))
+    }) {
+        return proposal;
+    }
+    // Source endpoints describe local shading. Nearby neutral paints
+    // can explain partial coverage at a terminal, but cannot replace
+    // a fully covered isolated mark or become a disconnected owner.
+    parents.extend(edge_parents);
+    let mut best = None::<(f32, Vec<(usize, u32, [f32; 3])>)>;
+    for left in 0..parents.len() {
+        for right in left + 1..parents.len() {
+            let (first, c1) = parents[left];
+            let (second, c2) = parents[right];
+            if first == second || (!incident.contains(&first) && !incident.contains(&second)) {
+                continue;
+            }
+            if delta_e_ok(rgb_to_oklab(c1), rgb_to_oklab(c2)) < 6.0 {
+                continue;
+            }
+            let mut assignments = Vec::new();
+            let mut error = 0.0_f32;
+            for &i in component {
+                let (alpha, residual) = coverage_mixture(image.pixels[i], c1, c2);
+                // Independent coloured dots, highlights and extrema
+                // fail the bounded two-parent colour model.
+                if !(-0.02..=1.02).contains(&alpha)
+                    || residual > 2.0
+                    || (!incident.contains(&first) && alpha >= 0.95)
+                    || (!incident.contains(&second) && alpha <= 0.05)
+                {
+                    break;
+                }
+                error = error.max(residual);
+                let amount = partition_coverage_alpha(image.pixels[i], c1, c2);
+                let (owner, rgb) = if amount >= 0.5 {
+                    (first, c1)
+                } else {
+                    (second, c2)
+                };
+                // A nearby paint is coverage evidence, not permission
+                // to create a disconnected island of its label. Keep
+                // ownership in an actual incident face.
+                let (owner, rgb) = if incident.contains(&owner) {
+                    (owner, rgb)
+                } else {
+                    // Only a mixed junction without a resolved material
+                    // interior may redistribute coverage to its incident
+                    // paints. A narrow opaque stripe (such as a wiper)
+                    // must not be replaced with the neighbouring glass.
+                    if resolved_interior || (incident.len() < 2 && !varying_coverage) {
+                        break;
+                    }
+                    parents
+                        .iter()
+                        .filter(|e| incident.contains(&e.0))
+                        .min_by(|a, b| {
+                            let distance =
+                                |c: [f32; 3]| (0..3).map(|k| (c[k] - rgb[k]).powi(2)).sum::<f32>();
+                            distance(a.1).total_cmp(&distance(b.1))
+                        })
+                        .copied()
+                        .unwrap()
+                };
+                assignments.push((i, owner as u32, rgb));
+            }
+            if assignments.len() == component.len() && best.as_ref().is_none_or(|b| error < b.0) {
+                best = Some((error, assignments));
+            }
+        }
+    }
+    // At a three-face junction the raster sample can mix all three
+    // paints. It need not lie on any single two-colour segment.
+    if best.is_none() {
+        for first in 0..parents.len() {
+            for second in first + 1..parents.len() {
+                for third in second + 1..parents.len() {
+                    let entries = [parents[first], parents[second], parents[third]];
+                    if entries[0].0 == entries[1].0
+                        || entries[0].0 == entries[2].0
+                        || entries[1].0 == entries[2].0
+                    {
+                        continue;
+                    }
+                    if entries.iter().any(|e| !incident.contains(&e.0)) {
+                        continue;
+                    }
+                    let mut assignments = Vec::new();
+                    let mut worst = 0.0_f32;
+                    for &i in component {
+                        let Some((error, weights)) =
+                            junction_mixture(image.pixels[i], entries.map(|p| p.1))
+                        else {
+                            break;
+                        };
+                        if error > 2.0 {
+                            break;
+                        }
+                        worst = worst.max(error);
+                        let winner = (0..3)
+                            .max_by(|&a, &b| weights[a].total_cmp(&weights[b]))
+                            .unwrap();
+                        assignments.push((i, entries[winner].0 as u32, entries[winner].1));
+                    }
+                    if assignments.len() == component.len()
+                        && best.as_ref().is_none_or(|b| worst < b.0)
+                    {
+                        best = Some((worst, assignments));
+                    }
+                }
+            }
+        }
+    }
+    if let Some((_, assignments)) = best {
+        proposal.changes.extend(assignments);
+        proposal.merges += 1;
+    }
+    proposal
 }
 
 // Preserve even shallow, spatially coherent shading. Overlapping colour
@@ -955,6 +987,57 @@ mod tests {
             material[0][2] < 0.4,
             "wiper inherited glass paint: {material:?}"
         );
+    }
+
+    #[test]
+    fn local_ownership_and_paint_evidence_are_identical_across_worker_counts() {
+        for (png, labels) in [
+            (
+                &include_bytes!("test-data/car-wiper-material.png")[..],
+                &include_bytes!("test-data/car-wiper-material.labels")[..],
+            ),
+            (
+                &include_bytes!("test-data/remojii-micro-boundary.png")[..],
+                &include_bytes!("test-data/remojii-micro-boundary.labels")[..],
+            ),
+            (
+                &include_bytes!("test-data/remojii-micro-junction.png")[..],
+                &include_bytes!("test-data/remojii-micro-junction.labels")[..],
+            ),
+        ] {
+            let image = image::load_from_memory(png).unwrap().to_rgb8();
+            let source = Raster::new(
+                image.width() as usize,
+                image.height() as usize,
+                image
+                    .pixels()
+                    .map(|p| p.0.map(|v| v as f32 / 255.0))
+                    .collect(),
+            );
+            let count = *labels.iter().max().unwrap() as usize + 1;
+            let mut reference = None;
+            for threads in [1, 2, 4] {
+                let mut seg = partition(&source, labels.iter().map(|&v| v as u32).collect(), count);
+                let merges = rayon::ThreadPoolBuilder::new()
+                    .num_threads(threads)
+                    .build()
+                    .unwrap()
+                    .install(|| absorb_micro_regions(&source, &mut seg, None));
+                assert!(merges > 0);
+                let result = (
+                    merges,
+                    seg.labels,
+                    seg.canonical.pixels,
+                    seg.paint_samples,
+                    seg.summary.micro_pixels_reassigned,
+                );
+                if let Some(expected) = &reference {
+                    assert_eq!(&result, expected, "workers: {threads}");
+                } else {
+                    reference = Some(result);
+                }
+            }
+        }
     }
 
     #[test]
