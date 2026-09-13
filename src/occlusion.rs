@@ -47,16 +47,40 @@ impl Baseline {
         Some(Self { size, bands })
     }
 
+    #[cfg(test)]
     fn equivalent(&self, after: &str, completion: Option<&Completion<'_>>) -> bool {
         self.equivalent_in(after, completion, &[])
     }
 
+    fn selected_bands(&self, ranges: &[(f32, f32)]) -> Vec<bool> {
+        self.bands
+            .iter()
+            .map(|band| {
+                ranges.is_empty()
+                    || ranges.iter().any(|&(top, bottom)| {
+                        (band.y as f32) < bottom && ((band.y + 64) as f32) > top
+                    })
+            })
+            .collect()
+    }
+
+    #[cfg(test)]
     fn equivalent_in(
         &self,
         after: &str,
         completion: Option<&Completion<'_>>,
         ranges: &[(f32, f32)],
     ) -> bool {
+        self.equivalent_bands(after, completion, &self.selected_bands(ranges))
+    }
+
+    fn equivalent_bands(
+        &self,
+        after: &str,
+        completion: Option<&Completion<'_>>,
+        selected: &[bool],
+    ) -> bool {
+        assert_eq!(selected.len(), self.bands.len());
         let Ok(tree) = Tree::from_str(after, &Options::default()) else {
             return false;
         };
@@ -65,50 +89,49 @@ impl Baseline {
         }
         // Every candidate uses the same original pixels; accepted changes never
         // become the baseline, so neither rounding nor tolerances accumulate.
-        self.bands.par_iter().all(|band| {
-            if !ranges.is_empty()
-                && !ranges
-                    .iter()
-                    .any(|&(top, bottom)| (band.y as f32) < bottom && ((band.y + 64) as f32) > top)
-            {
-                return true;
-            }
-            let p = &band.pixels;
-            let tw = p.width() as usize;
-            let mut q = Pixmap::new(p.width(), p.height()).unwrap();
-            resvg::render(&tree, band_transform(band.scale, band.y), &mut q.as_mut());
-            for (k, (p, q)) in p
-                .data()
-                .chunks_exact(4)
-                .zip(q.data().chunks_exact(4))
-                .enumerate()
-            {
-                if p.iter().zip(q).all(|(&p, &q)| p.abs_diff(q) <= 1) {
-                    continue;
+        self.bands
+            .par_iter()
+            .zip(selected.par_iter())
+            .all(|(band, &selected)| {
+                if !selected {
+                    return true;
                 }
-                let Some(context) = completion else {
-                    return false;
-                };
-                let i = (band.y + k / tw / band.scale) * context.width + k % tw / band.scale;
-                let target_alpha = context.alpha.map_or(1.0, |a| a.get(i));
-                let added_alpha = q[3] as i16 - p[3] as i16;
-                // Boundary-only completion: retain the old premultiplied
-                // foreground and add at most the formerly uncovered alpha.
-                // This is not permission to repaint an opaque pixel.
-                if !context.boundary[i]
-                    || target_alpha < 254.0 / 255.0 - 1e-6
-                    || added_alpha < 0
-                    || q[3] as f32 > target_alpha * 255.0 + 1.01
-                    || (0..3).any(|c| {
-                        let delta = q[c] as i16 - p[c] as i16;
-                        delta < -1 || delta > added_alpha + 1
-                    })
+                let p = &band.pixels;
+                let tw = p.width() as usize;
+                let mut q = Pixmap::new(p.width(), p.height()).unwrap();
+                resvg::render(&tree, band_transform(band.scale, band.y), &mut q.as_mut());
+                for (k, (p, q)) in p
+                    .data()
+                    .chunks_exact(4)
+                    .zip(q.data().chunks_exact(4))
+                    .enumerate()
                 {
-                    return false;
+                    if p.iter().zip(q).all(|(&p, &q)| p.abs_diff(q) <= 1) {
+                        continue;
+                    }
+                    let Some(context) = completion else {
+                        return false;
+                    };
+                    let i = (band.y + k / tw / band.scale) * context.width + k % tw / band.scale;
+                    let target_alpha = context.alpha.map_or(1.0, |a| a.get(i));
+                    let added_alpha = q[3] as i16 - p[3] as i16;
+                    // Boundary-only completion: retain the old premultiplied
+                    // foreground and add at most the formerly uncovered alpha.
+                    // This is not permission to repaint an opaque pixel.
+                    if !context.boundary[i]
+                        || target_alpha < 254.0 / 255.0 - 1e-6
+                        || added_alpha < 0
+                        || q[3] as f32 > target_alpha * 255.0 + 1.01
+                        || (0..3).any(|c| {
+                            let delta = q[c] as i16 - p[c] as i16;
+                            delta < -1 || delta > added_alpha + 1
+                        })
+                    {
+                        return false;
+                    }
                 }
-            }
-            true
-        })
+                true
+            })
     }
 }
 
@@ -204,6 +227,10 @@ where
         .collect();
     let mut current = original.clone();
     let mut removed = 0;
+    // Valid only for the exact SVG in `current`, against the original
+    // baseline and the same immutable completion evidence. Replaced, never
+    // unioned, when another candidate is accepted.
+    let mut verified = vec![false; baseline.bands.len()];
     fn visit<F>(
         items: &[(usize, String, (f32, f32))],
         geometry: &mut [RegionGeometry],
@@ -211,6 +238,7 @@ where
         completion: &Completion<'_>,
         current: &mut (String, SvgSummary),
         removed: &mut usize,
+        verified: &mut Vec<bool>,
         serialize: &mut F,
     ) where
         F: FnMut(&[RegionGeometry]) -> (String, SvgSummary),
@@ -230,12 +258,14 @@ where
             *data = data.replacen(path, "", 1);
         }
         let ranges: Vec<_> = items.iter().map(|item| item.2).collect();
+        let selected = baseline.selected_bands(&ranges);
         let candidate = serialize(geometry);
         if candidate.0.len() < current.0.len()
-            && baseline.equivalent_in(&candidate.0, Some(completion), &ranges)
+            && baseline.equivalent_bands(&candidate.0, Some(completion), &selected)
         {
             *current = candidate;
             *removed += items.len();
+            *verified = selected;
             return;
         }
         for (i, data) in backup {
@@ -250,6 +280,7 @@ where
                 completion,
                 current,
                 removed,
+                verified,
                 serialize,
             );
             visit(
@@ -259,6 +290,7 @@ where
                 completion,
                 current,
                 removed,
+                verified,
                 serialize,
             );
         }
@@ -270,11 +302,18 @@ where
         &completion,
         &mut current,
         &mut removed,
+        &mut verified,
         &mut serialize,
     );
     // The band bounds are an acceleration hint, never the final authority.
-    // Validate the complete accumulated output once before committing it.
-    if removed > 0 && !baseline.equivalent(&current.0, Some(&completion)) {
+    // Every band of the complete accumulated output must pass. The last
+    // accepted candidate already checked some of them for this exact SVG.
+    // Older candidates' checks cannot be reused: their SVG was different.
+    let unchecked: Vec<_> = verified.iter().map(|&checked| !checked).collect();
+    if removed > 0
+        && unchecked.iter().any(|&check| check)
+        && !baseline.equivalent_bands(&current.0, Some(&completion), &unchecked)
+    {
         for (g, saved) in geometry.iter_mut().zip(saved_paths) {
             g.occlusion_path_data = saved;
         }
@@ -284,8 +323,104 @@ where
 }
 
 #[cfg(test)]
+#[path = "occlusion_reference.rs"]
+mod reference;
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn reused_checks_match_full_final_render_for_partial_and_complete_acceptance() {
+        for mode in 0..4 {
+            let mut geometry: Vec<_> = (0..6)
+                .map(|i| {
+                    let y = i * 64;
+                    // Keep removal profitable even when the adversarial
+                    // serializer below adds an unrelated rectangle.
+                    let hole = format!(
+                        "M8 {}H24V{}H8{}Z",
+                        y + 8,
+                        y + 24,
+                        format!("L8 {}", y + 24).repeat(12)
+                    );
+                    let path = format!("M0 {y}H96V{}H0Z {hole}", y + 64);
+                    RegionGeometry {
+                        region: i,
+                        loops: vec![],
+                        path_data: path.clone(),
+                        occlusion_path_data: Some(path),
+                        covered_hole_paths: vec![hole],
+                        primitive: None,
+                    }
+                })
+                .collect();
+            let serialize = |g: &[RegionGeometry]| {
+                let mut svg = String::from(
+                    r#"<svg xmlns="http://www.w3.org/2000/svg" width="96" height="384">"#,
+                );
+                for (i, face) in g.iter().enumerate() {
+                    let alpha = if mode == 1 && i % 2 == 0 { 0.5 } else { 1.0 };
+                    let width = if mode == 2 && i == 5 { 8 } else { 18 };
+                    let y = i * 64;
+                    svg.push_str(&format!(r##"<path fill="#fff" fill-rule="evenodd" d="{}"/><rect x="7" y="{}" width="{width}" height="18" fill="#123456" fill-opacity="{alpha}"/>"##,face.occlusion_path_data.as_ref().unwrap(), y+7));
+                }
+                // A later candidate changes a band checked by an earlier
+                // accepted candidate. Accumulating old check bits is unsafe.
+                if mode == 3
+                    && !g[5]
+                        .occlusion_path_data
+                        .as_ref()
+                        .unwrap()
+                        .contains(&g[5].covered_hole_paths[0])
+                {
+                    svg.push_str(r##"<rect y="40" width="96" height="8" fill="#f00"/>"##);
+                }
+                svg.push_str("</svg>");
+                (svg, SvgSummary::default())
+            };
+            let original = serialize(&geometry);
+            let mut expected_geometry = geometry.clone();
+            let labels = vec![0; 96 * 384];
+            let expected = reference::simplify(
+                &mut expected_geometry,
+                original.clone(),
+                &labels,
+                96,
+                None,
+                serialize,
+            );
+            let actual = simplify(&mut geometry, original, &labels, 96, None, serialize);
+            assert_eq!(actual.0, expected.0, "mode={mode}");
+            assert_eq!(actual.2, expected.2, "mode={mode}");
+            assert_eq!(
+                serde_json::to_string(&actual.1).unwrap(),
+                serde_json::to_string(&expected.1).unwrap()
+            );
+            assert_eq!(
+                geometry
+                    .iter()
+                    .map(|g| &g.occlusion_path_data)
+                    .collect::<Vec<_>>(),
+                expected_geometry
+                    .iter()
+                    .map(|g| &g.occlusion_path_data)
+                    .collect::<Vec<_>>()
+            );
+            if mode == 0 {
+                assert_eq!(actual.2, 6);
+            }
+            if mode == 1 {
+                assert_eq!(actual.2, 3);
+            }
+            if mode == 2 {
+                assert_eq!(actual.2, 5);
+            }
+            if mode == 3 {
+                assert_eq!(actual.2, 0);
+            }
+        }
+    }
+
     #[test]
     fn final_full_render_rolls_back_changes_outside_candidate_bounds() {
         let hole = "M8 8H24V24H8Z";
