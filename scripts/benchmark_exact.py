@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 from pathlib import Path
 import re
 import statistics
@@ -21,22 +22,25 @@ CASES = {
     "car": ("sample/input/car.png", []),
     "boy": ("sample/input/boy_and_turtle.png", []),
     "photo": ("sample/input/viewport2.jpg", []),
+    "photo-small": ("sample/input/viewport1.jpg", []),
     "wiki": ("sample/input/wikipedia_logo_1_0.png", []),
     "alpha": ("src/test-data/cube-alpha.png", []),
     "key": ("src/test-data/round-buttons-source.png", ["--remove-chroma-key-background"]),
     "adaptive": ("sample/input/cliparts-6x6.png", ["--remove-chroma-key-background"]),
+    "adaptive-small": ("sample/input/cliparts.png", ["--max-dimension", "512"]),
     "car-3passes": ("sample/input/car.png", ["--paint-merge-passes", "3"]),
     "car-quality": ("sample/input/car.png", ["--quality-metrics"]),
 }
 
 
-def run(binary: Path, case: str, output: Path, threads: int) -> dict:
+def run(binary: Path, case: str, output: Path, threads: int,
+        timeout: float | None = None) -> dict:
     source, options = CASES[case]
     command = [str(binary), str(ROOT / source), str(output),
                "--threads", str(threads), "--verbose", *options]
     started = time.perf_counter()
     with output.with_suffix(".log").open("w") as log:
-        subprocess.run(command, cwd=ROOT, stdout=log, stderr=log, check=True)
+        subprocess.run(command, cwd=ROOT, stdout=log, stderr=log, check=True, timeout=timeout)
     elapsed = time.perf_counter() - started
     log = output.with_suffix(".log").read_text()
     summary, _ = json.JSONDecoder().raw_decode(log[log.index("{\n"):])
@@ -61,9 +65,15 @@ def main() -> None:
                         default=["car", "wiki", "boy", "alpha"])
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--threads", type=int, default=4)
+    parser.add_argument("--timeout-seconds", type=float,
+                        help="Optional time limit per conversion; a timeout fails the comparison")
     args = parser.parse_args()
     if args.repeats < 1 or args.threads < 1:
         parser.error("repeats and threads must be positive")
+    if args.timeout_seconds is not None and (
+        not math.isfinite(args.timeout_seconds) or args.timeout_seconds <= 0
+    ):
+        parser.error("timeout must be positive and finite")
     binaries = {"baseline": args.baseline.resolve(), "candidate": args.candidate.resolve()}
     for binary in binaries.values():
         if not binary.is_file():
@@ -85,7 +95,7 @@ def main() -> None:
             pair = {}
             for version in order:
                 output = args.output_dir / f"{case}-{repeat}-{version}.svg"
-                trial = run(binaries[version], case, output, args.threads)
+                trial = run(binaries[version], case, output, args.threads, args.timeout_seconds)
                 records.append({"case": case, "repeat": repeat, "version": version, **trial})
                 pair[version] = trial
                 result_path.write_text(json.dumps(report, indent=2) + "\n")

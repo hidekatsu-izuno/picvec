@@ -3443,17 +3443,19 @@ fn fit_residual_paint(
     // Residual outliers on an incident edge must not buy a broad shadow
     // by worsening nearby samples. Keep this evidence tied
     // to the original base so several small overlays cannot accumulate drift.
-    let supported: Vec<_> = validation_samples
+    // Most candidates fail on an early validation pixel. Evaluate immutable
+    // source/base evidence only when reached, and share it across candidates.
+    let supported: Vec<std::cell::OnceCell<(Oklab, f32)>> = validation_samples
         .iter()
-        .map(|&i| {
-            let target = rgb_to_oklab(source.pixels[i]);
-            let error = delta_e_ok(target, rgb_to_oklab(paint_at(&base, i, source.width)));
-            (i, target, error)
-        })
+        .map(|_| std::cell::OnceCell::new())
         .collect();
     // Colour-only residual fitting can improve a biased base while adding
     // circular extrema to a smooth ramp. Validate spatial colour changes too.
-    let observed: HashSet<_> = validation_samples.iter().copied().collect();
+    let observed: HashSet<_> = validation_samples
+        .iter()
+        .filter(|_| preserve_shape)
+        .copied()
+        .collect();
     let difference = |a: Oklab, b: Oklab| Oklab {
         l: b.l - a.l,
         a: b.a - a.a,
@@ -3683,7 +3685,15 @@ fn fit_residual_paint(
                         };
                         let mse = paint_rgb_mse_with(source, samples, &mut candidate_at);
                         if best.as_ref().is_none_or(|(best_mse, _)| mse < *best_mse)
-                            && supported.iter().all(|&(i, target, error)| {
+                            && validation_samples.iter().zip(&supported).all(|(&i, cell)| {
+                                let &(target, error) = cell.get_or_init(|| {
+                                    let target = rgb_to_oklab(source.pixels[i]);
+                                    let error = delta_e_ok(
+                                        target,
+                                        rgb_to_oklab(paint_at(&original_base, i, source.width)),
+                                    );
+                                    (target, error)
+                                });
                                 delta_e_ok(target, rgb_to_oklab(candidate_at(i))) <= error + 1.0
                             })
                             && slopes.iter().all(|&(i, j, target, original)| {
@@ -6879,18 +6889,27 @@ fn merge_source_supported_paints_round(
                 paints[left].clone(),
                 paints[right].clone(),
             ]);
-            for base in layered_bases
+            // The bases are independent, but selection is order-sensitive on
+            // tied scores. Fit concurrently in the existing pool, then reduce
+            // in the original order without changing the greedy merge order.
+            let layered_bases: Vec<_> = layered_bases
                 .into_iter()
                 .filter(|paint| !matches!(paint, Paint::Layered { .. }))
-            {
-                let (layered, layered_stats) = fit_layered_residual_paint_validated(
-                    source,
-                    &layered_samples,
-                    &layered_validation,
-                    combined_bounds,
-                    base,
-                    3,
-                );
+                .collect();
+            let layered_fits: Vec<_> = layered_bases
+                .into_par_iter()
+                .map(|base| {
+                    fit_layered_residual_paint_validated(
+                        source,
+                        &layered_samples,
+                        &layered_validation,
+                        combined_bounds,
+                        base,
+                        3,
+                    )
+                })
+                .collect();
+            for (layered, layered_stats) in layered_fits {
                 let layered_score = objective(layered_stats)
                     .max(objective(paint_stats(
                         source,
@@ -7611,21 +7630,22 @@ fn refit_single_residual_field(
     if samples.len() < 6 {
         return None;
     }
-    let observations: Vec<_> = samples
+    let observations: Vec<(_, std::cell::OnceCell<(Oklab, f32)>)> = samples
         .iter()
         .chain(validation)
-        .map(|&i| {
-            let target = rgb_to_oklab(source.pixels[i]);
-            (
-                i,
-                target,
-                delta_e_ok(target, rgb_to_oklab(paint_at(original, i, source.width))),
-            )
-        })
+        .map(|&i| (i, std::cell::OnceCell::new()))
         .collect();
     let acceptable = |candidate: &Paint| {
         let mut increase = 0.0;
-        for &(i, target, before) in &observations {
+        for (i, cell) in &observations {
+            let i = *i;
+            let &(target, before) = cell.get_or_init(|| {
+                let target = rgb_to_oklab(source.pixels[i]);
+                (
+                    target,
+                    delta_e_ok(target, rgb_to_oklab(paint_at(original, i, source.width))),
+                )
+            });
             let after = delta_e_ok(target, rgb_to_oklab(paint_at(candidate, i, source.width)));
             if after > before + 1.5 {
                 return false;

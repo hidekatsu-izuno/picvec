@@ -2204,8 +2204,14 @@ fn fit_cubic_recursive(
     right_tangent: Point,
     tolerance_squared: f32,
 ) -> Vec<CurveSegment> {
-    fit_cubic_with_budget(points, left_tangent, right_tangent, tolerance_squared, usize::MAX)
-        .expect("an unrestricted fit cannot exceed its segment budget")
+    fit_cubic_with_budget(
+        points,
+        left_tangent,
+        right_tangent,
+        tolerance_squared,
+        usize::MAX,
+    )
+    .expect("an unrestricted fit cannot exceed its segment budget")
 }
 
 // Preserve the exact split tree, but stop once it cannot beat a caller's
@@ -7856,28 +7862,6 @@ fn follows_alpha_rim(points: &[Point], matte: &crate::chroma::AlphaMatte) -> boo
     near * 100 >= points.len() * 98
 }
 
-pub(crate) fn build_with_paint_overlap(
-    segmentation: &Segmentation,
-    topology: &HierarchicalTopology,
-    source: &Raster,
-    matte: Option<&crate::chroma::AlphaMatte>,
-    overlap: f32,
-    opaque: &[bool],
-    order: Option<&[usize]>,
-    excluded: &[bool],
-) -> (Vec<RegionGeometry>, GeometrySummary) {
-    build_internal(
-        segmentation,
-        Some(topology),
-        Some(source),
-        matte,
-        overlap.max(0.0),
-        opaque,
-        order,
-        excluded,
-    )
-}
-
 // Reverse the shared-boundary ownership once. Scanning every chain for every
 // region is quadratic, although only incident chains can satisfy membership.
 fn chains_by_owner(chain_owners: &[BTreeSet<usize>], count: usize) -> Vec<Vec<usize>> {
@@ -7900,324 +7884,392 @@ fn build_internal(
     order: Option<&[usize]>,
     excluded: &[bool],
 ) -> (Vec<RegionGeometry>, GeometrySummary) {
-    let count = segmentation.regions.len();
-    let order_ranks = order
-        .map(Vec::from)
-        .unwrap_or_else(|| paint_order_ranks(segmentation));
-    let stride = segmentation.width + 1;
-    let (edges, shared) = region_boundary_edges(segmentation, stride, topology);
-    let pair_edges = pair_boundary_edges(segmentation, stride, topology);
-    let source_edges = edges.iter().map(Vec::len).sum();
-    let (shared_chains, shared_lookup, positions, shared_report) =
-        build_shared_chains(segmentation, source, excluded, stride, &edges, &pair_edges);
-    let mut chain_owners = vec![BTreeSet::new(); shared_chains.len()];
-    for (owner, boundary) in edges.iter().enumerate() {
-        for edge in boundary {
-            if let Some(&(chain, _, _)) = shared_lookup.get(&EdgeKey::new(edge.start, edge.end)) {
-                chain_owners[chain].insert(owner);
-            }
-        }
-    }
-    let incident_chains = chains_by_owner(&chain_owners, count);
-    let mut endpoint_degree = HashMap::<(i64, i64), usize>::new();
-    let mut endpoint_order = Vec::<(i64, i64)>::new();
-    for chain in &shared_chains {
-        if chain.closed || chain.points.len() < 2 {
-            continue;
-        }
-        for point in [chain.points[0], chain.points[chain.points.len() - 1]] {
-            let key = (
-                (point.x * 10_000.0).round() as i64,
-                (point.y * 10_000.0).round() as i64,
-            );
-            if !endpoint_degree.contains_key(&key) {
-                endpoint_order.push(key);
-            }
-            *endpoint_degree.entry(key).or_default() += 1;
-        }
-    }
-    let paint_junctions = endpoint_order
-        .into_iter()
-        .filter_map(|(x, y)| {
-            let degree = endpoint_degree[&(x, y)];
-            (degree > 2).then_some(Point {
-                x: x as f32 / 10_000.0,
-                y: y as f32 / 10_000.0,
-            })
-        })
-        .collect::<Vec<_>>();
-    let canvas_corners = [
-        Point { x: 0.0, y: 0.0 },
-        Point {
-            x: segmentation.width as f32,
-            y: 0.0,
-        },
-        Point {
-            x: segmentation.width as f32,
-            y: segmentation.height as f32,
-        },
-        Point {
-            x: 0.0,
-            y: segmentation.height as f32,
-        },
-    ];
-    // Python's shared-half-edge graph accepts the one canonical curve after
-    // its source-corridor check; it never estimates a curved face's area from
-    // only the curve endpoints.  The former Rust-only stabilization did just
-    // that and downgraded hundreds of valid shallow cubics to pixel-grid
-    // polylines.  Topology is already exact because both faces reference the
-    // same de Casteljau intervals.
-    let mut summary = GeometrySummary {
-        regions: count,
-        source_boundary_edges: source_edges,
-        shared_boundary_edges: shared / 2,
-        paint_junctions,
-        ..shared_report
-    };
-    let alpha_contours = matte.map(|m| m.isocontours(0.5)).unwrap_or_default();
-    let contour_bounds = |points: &[Point]| {
-        points.iter().fold(
-            [
-                f32::INFINITY,
-                f32::INFINITY,
-                f32::NEG_INFINITY,
-                f32::NEG_INFINITY,
-            ],
-            |b, p| [b[0].min(p.x), b[1].min(p.y), b[2].max(p.x), b[3].max(p.y)],
-        )
-    };
-    let mut geometries = Vec::with_capacity(count);
-    for (region, region_edges) in edges.iter().enumerate().take(count) {
-        // For a long strip, 2 * area / perimeter estimates its width.
-        // Narrow faces need the old half-width coverage on both shared sides
-        // to retain highlights/rims; this is not a semantic line classifier.
-        // Perimeter squared / area also identifies long strokes and rings
-        // independently of scale. Neither measure changes the paint order.
-        // Every face puts full overlap underneath later owners; only narrow
-        // or elongated faces receive half-width padding against earlier ones.
-        let area = segmentation.regions[region].area as f32;
-        let perimeter = region_edges.len().max(1) as f32;
-        let narrow = 2.0 * area / perimeter <= 4.0 || perimeter * perimeter >= 64.0 * area;
-        let overlap_chains: HashSet<usize> = incident_chains[region]
-            .iter()
-            .map(|&chain| (chain, &chain_owners[chain]))
-            .filter(|(_, owners)| {
-                overlap > 0.0
-                    && owners.len() == 2
-                    && owners.contains(&region)
-                    && opaque.get(region).copied().unwrap_or(false)
-                    && owners.iter().all(|&other| {
-                        other == region
-                            || ((order_ranks[other] > order_ranks[region])
-                                && opaque.get(other).copied().unwrap_or(false))
-                    })
-            })
-            .map(|(chain, _)| chain)
-            .collect();
-        // With an explicit order, keep the upper contour on the fitted shared
-        // boundary. Only the lower face receives hidden overlap.
-        let width_chains: HashSet<usize> = incident_chains[region]
-            .iter()
-            .map(|&chain| (chain, &chain_owners[chain]))
-            .filter(|(_, owners)| {
-                order.is_none()
-                    && narrow
-                    && overlap > 0.0
-                    && owners.len() == 2
-                    && owners.contains(&region)
-                    && opaque.get(region).copied().unwrap_or(false)
-                    && owners.iter().all(|&other| {
-                        other == region
-                            || (order_ranks[other] < order_ranks[region]
-                                && opaque.get(other).copied().unwrap_or(false))
-                    })
-            })
-            .map(|(chain, _)| chain)
-            .collect();
-        let traced = trace_region_vertex_loops(region_edges, stride);
-        let mut loops = Vec::<Vec<Point>>::new();
-        let mut data = String::new();
-        let mut occlusion_data = String::new();
-        let mut removed_hole = false;
-        let mut covered_hole_paths = Vec::new();
-        for vertices in traced {
-            let source_points: Vec<Point> = vertices
-                .iter()
-                .map(|&value| point_from_vertex(value, stride))
-                .collect();
-            let raw_points: Vec<Point> = vertices
-                .iter()
-                .map(|&value| {
-                    positions
-                        .get(&value)
-                        .copied()
-                        .unwrap_or_else(|| point_from_vertex(value, stride))
-                })
-                .collect();
-            let source_area = signed_area(&source_points);
-            if source_area.abs() < 0.5 {
-                continue;
-            }
-            let supported_hole = source_area < 0.0
-                && (opaque.is_empty() || opaque.get(region).copied().unwrap_or(false))
-                && hole_is_covered_by_later_regions(
-                    &source_points,
-                    region,
-                    segmentation,
-                    &order_ranks,
-                    opaque,
-                );
-            let candidate_hole = overlap > 0.0
-                && !opaque.is_empty()
-                && opaque.get(region).copied().unwrap_or(false)
-                && supported_hole;
-            let covered_hole =
-                overlap == 0.0 && matte.is_none() && opaque.is_empty() && supported_hole;
-            if covered_hole {
-                summary.covered_holes_removed += 1;
-                removed_hole = true;
-            }
-            // This complete contour follows the transparent exterior. It does
-            // not need the junctions introduced by tiny RGB rim fragments.
-            if matte.is_some_and(|matte| follows_alpha_rim(&source_points, matte)) {
-                let bounds = contour_bounds(&source_points);
-                let contour = alpha_contours.iter().find(|contour| {
-                    let other = contour_bounds(contour);
-                    (0..4).all(|i| (bounds[i] - other[i]).abs() <= 2.0)
-                        && (signed_area(contour).abs() - source_area.abs()).abs()
-                            <= source_area.abs() * 0.03
-                });
-                let path = fitted_alpha_contour_path_data(
-                    contour.map_or(source_points.as_slice(), Vec::as_slice),
-                );
-                summary.cubic_segments += path.matches("C ").count();
-                summary.line_segments += path.matches("L ").count();
-                data.push_str(&path);
-                if !covered_hole {
-                    occlusion_data.push_str(&path);
-                    if candidate_hole {
-                        covered_hole_paths.push(path.clone());
-                    }
+    PreparedGeometry::new(segmentation, topology, source, matte, excluded)
+        .build(overlap, opaque, order)
+}
+
+/// Shared source-fitted curves are independent of paint order. Keep their
+/// immutable inputs borrowed while assembling either ordering, so validation
+/// can reuse the exact masters without caching order-dependent overlap.
+pub(crate) struct PreparedGeometry<'a> {
+    segmentation: &'a Segmentation,
+    matte: Option<&'a crate::chroma::AlphaMatte>,
+    edges: Vec<Vec<GridEdge>>,
+    shared_chains: Vec<SharedChain>,
+    shared_lookup: EdgeChainLookup,
+    positions: VertexPositions,
+    chain_owners: Vec<BTreeSet<usize>>,
+    incident_chains: Vec<Vec<usize>>,
+    summary: GeometrySummary,
+    alpha_contours: Vec<Vec<Point>>,
+}
+
+impl<'a> PreparedGeometry<'a> {
+    pub(crate) fn new(
+        segmentation: &'a Segmentation,
+        topology: Option<&HierarchicalTopology>,
+        source: Option<&Raster>,
+        matte: Option<&'a crate::chroma::AlphaMatte>,
+        excluded: &[bool],
+    ) -> Self {
+        let count = segmentation.regions.len();
+        let stride = segmentation.width + 1;
+        let (edges, shared) = region_boundary_edges(segmentation, stride, topology);
+        let pair_edges = pair_boundary_edges(segmentation, stride, topology);
+        let source_edges = edges.iter().map(Vec::len).sum();
+        let (shared_chains, shared_lookup, positions, shared_report) =
+            build_shared_chains(segmentation, source, excluded, stride, &edges, &pair_edges);
+        let mut chain_owners = vec![BTreeSet::new(); shared_chains.len()];
+        for (owner, boundary) in edges.iter().enumerate() {
+            for edge in boundary {
+                if let Some(&(chain, _, _)) = shared_lookup.get(&EdgeKey::new(edge.start, edge.end))
+                {
+                    chain_owners[chain].insert(owner);
                 }
-                loops.push(source_points);
+            }
+        }
+        let incident_chains = chains_by_owner(&chain_owners, count);
+        let mut endpoint_degree = HashMap::<(i64, i64), usize>::new();
+        let mut endpoint_order = Vec::<(i64, i64)>::new();
+        for chain in &shared_chains {
+            if chain.closed || chain.points.len() < 2 {
                 continue;
             }
-            match shared_region_loop(
-                &vertices,
-                &shared_chains,
-                &shared_lookup,
-                &mut summary.cubic_segments,
-                &mut summary.line_segments,
-                None,
-            ) {
-                Ok((points, path)) => {
-                    loops.push(points);
-                    data.push_str(&path);
-                    if !covered_hole {
-                        let expanded = if overlap_chains.is_empty() && width_chains.is_empty() {
-                            path.clone()
-                        } else {
-                            shared_region_loop(
-                                &vertices,
-                                &shared_chains,
-                                &shared_lookup,
-                                &mut 0,
-                                &mut 0,
-                                Some((&overlap_chains, &width_chains, overlap)),
-                            )
-                            .map(|(_, path)| path)
-                            .unwrap_or_else(|_| path.clone())
-                        };
-                        occlusion_data.push_str(&expanded);
-                        if candidate_hole {
-                            covered_hole_paths.push(expanded);
-                        }
-                    }
+            for point in [chain.points[0], chain.points[chain.points.len() - 1]] {
+                let key = (
+                    (point.x * 10_000.0).round() as i64,
+                    (point.y * 10_000.0).round() as i64,
+                );
+                if !endpoint_degree.contains_key(&key) {
+                    endpoint_order.push(key);
+                }
+                *endpoint_degree.entry(key).or_default() += 1;
+            }
+        }
+        let paint_junctions = endpoint_order
+            .into_iter()
+            .filter_map(|(x, y)| {
+                let degree = endpoint_degree[&(x, y)];
+                (degree > 2).then_some(Point {
+                    x: x as f32 / 10_000.0,
+                    y: y as f32 / 10_000.0,
+                })
+            })
+            .collect::<Vec<_>>();
+        let summary = GeometrySummary {
+            regions: count,
+            source_boundary_edges: source_edges,
+            shared_boundary_edges: shared / 2,
+            paint_junctions,
+            ..shared_report
+        };
+        Self {
+            segmentation,
+            matte,
+            edges,
+            shared_chains,
+            shared_lookup,
+            positions,
+            chain_owners,
+            incident_chains,
+            summary,
+            alpha_contours: matte.map(|m| m.isocontours(0.5)).unwrap_or_default(),
+        }
+    }
+
+    pub(crate) fn build(
+        &self,
+        overlap: f32,
+        opaque: &[bool],
+        order: Option<&[usize]>,
+    ) -> (Vec<RegionGeometry>, GeometrySummary) {
+        let Self {
+            segmentation,
+            matte,
+            edges,
+            shared_chains,
+            shared_lookup,
+            positions,
+            chain_owners,
+            incident_chains,
+            summary,
+            alpha_contours,
+        } = self;
+        let matte = *matte;
+        let overlap = overlap.max(0.0);
+        let count = segmentation.regions.len();
+        let stride = segmentation.width + 1;
+        let order_ranks = order
+            .map(Vec::from)
+            .unwrap_or_else(|| paint_order_ranks(segmentation));
+        let canvas_corners = [
+            Point { x: 0.0, y: 0.0 },
+            Point {
+                x: segmentation.width as f32,
+                y: 0.0,
+            },
+            Point {
+                x: segmentation.width as f32,
+                y: segmentation.height as f32,
+            },
+            Point {
+                x: 0.0,
+                y: segmentation.height as f32,
+            },
+        ];
+        // Python's shared-half-edge graph accepts the one canonical curve after
+        // its source-corridor check; it never estimates a curved face's area from
+        // only the curve endpoints.  The former Rust-only stabilization did just
+        // that and downgraded hundreds of valid shallow cubics to pixel-grid
+        // polylines.  Topology is already exact because both faces reference the
+        // same de Casteljau intervals.
+        let mut summary = summary.clone();
+        let contour_bounds = |points: &[Point]| {
+            points.iter().fold(
+                [
+                    f32::INFINITY,
+                    f32::INFINITY,
+                    f32::NEG_INFINITY,
+                    f32::NEG_INFINITY,
+                ],
+                |b, p| [b[0].min(p.x), b[1].min(p.y), b[2].max(p.x), b[3].max(p.y)],
+            )
+        };
+        let mut geometries = Vec::with_capacity(count);
+        for (region, region_edges) in edges.iter().enumerate().take(count) {
+            // For a long strip, 2 * area / perimeter estimates its width.
+            // Narrow faces need the old half-width coverage on both shared sides
+            // to retain highlights/rims; this is not a semantic line classifier.
+            // Perimeter squared / area also identifies long strokes and rings
+            // independently of scale. Neither measure changes the paint order.
+            // Every face puts full overlap underneath later owners; only narrow
+            // or elongated faces receive half-width padding against earlier ones.
+            let area = segmentation.regions[region].area as f32;
+            let perimeter = region_edges.len().max(1) as f32;
+            let narrow = 2.0 * area / perimeter <= 4.0 || perimeter * perimeter >= 64.0 * area;
+            let overlap_chains: HashSet<usize> = incident_chains[region]
+                .iter()
+                .map(|&chain| (chain, &chain_owners[chain]))
+                .filter(|(_, owners)| {
+                    overlap > 0.0
+                        && owners.len() == 2
+                        && owners.contains(&region)
+                        && opaque.get(region).copied().unwrap_or(false)
+                        && owners.iter().all(|&other| {
+                            other == region
+                                || ((order_ranks[other] > order_ranks[region])
+                                    && opaque.get(other).copied().unwrap_or(false))
+                        })
+                })
+                .map(|(chain, _)| chain)
+                .collect();
+            // With an explicit order, keep the upper contour on the fitted shared
+            // boundary. Only the lower face receives hidden overlap.
+            let width_chains: HashSet<usize> = incident_chains[region]
+                .iter()
+                .map(|&chain| (chain, &chain_owners[chain]))
+                .filter(|(_, owners)| {
+                    order.is_none()
+                        && narrow
+                        && overlap > 0.0
+                        && owners.len() == 2
+                        && owners.contains(&region)
+                        && opaque.get(region).copied().unwrap_or(false)
+                        && owners.iter().all(|&other| {
+                            other == region
+                                || (order_ranks[other] < order_ranks[region]
+                                    && opaque.get(other).copied().unwrap_or(false))
+                        })
+                })
+                .map(|(chain, _)| chain)
+                .collect();
+            let traced = trace_region_vertex_loops(region_edges, stride);
+            let mut loops = Vec::<Vec<Point>>::new();
+            let mut data = String::new();
+            let mut occlusion_data = String::new();
+            let mut removed_hole = false;
+            let mut covered_hole_paths = Vec::new();
+            for vertices in traced {
+                let source_points: Vec<Point> = vertices
+                    .iter()
+                    .map(|&value| point_from_vertex(value, stride))
+                    .collect();
+                let raw_points: Vec<Point> = vertices
+                    .iter()
+                    .map(|&value| {
+                        positions
+                            .get(&value)
+                            .copied()
+                            .unwrap_or_else(|| point_from_vertex(value, stride))
+                    })
+                    .collect();
+                let source_area = signed_area(&source_points);
+                if source_area.abs() < 0.5 {
                     continue;
                 }
-                Err(SharedLoopFailure::MissingEdge) => summary.shared_loop_missing_edges += 1,
-                Err(SharedLoopFailure::Discontinuous) => summary.shared_loop_discontinuities += 1,
-                Err(SharedLoopFailure::Empty) => summary.shared_loop_invalid_areas += 1,
-            }
-            summary.shared_loop_fallbacks += 1;
-            let simplified = preserve_closed_points(
-                simplify_grid_closed(&raw_points, std::f32::consts::FRAC_1_SQRT_2),
-                &raw_points,
-                &canvas_corners,
-            );
-            let simplified_area = signed_area(&simplified);
-            let points = if simplified.len() >= 3
-                && simplified_area.signum() == source_area.signum()
-                && simplified_area.abs() >= 0.05 * source_area.abs()
-            {
-                simplified
-            } else {
-                let positioned = remove_collinear(&raw_points);
-                let positioned_area = signed_area(&positioned);
-                if positioned.len() >= 3
-                    && positioned_area.signum() == source_area.signum()
-                    && positioned_area.abs() >= 0.05 * source_area.abs()
-                {
-                    positioned
-                } else {
-                    remove_collinear(&source_points)
+                let supported_hole = source_area < 0.0
+                    && (opaque.is_empty() || opaque.get(region).copied().unwrap_or(false))
+                    && hole_is_covered_by_later_regions(
+                        &source_points,
+                        region,
+                        segmentation,
+                        &order_ranks,
+                        opaque,
+                    );
+                let candidate_hole = overlap > 0.0
+                    && !opaque.is_empty()
+                    && opaque.get(region).copied().unwrap_or(false)
+                    && supported_hole;
+                let covered_hole =
+                    overlap == 0.0 && matte.is_none() && opaque.is_empty() && supported_hole;
+                if covered_hole {
+                    summary.covered_holes_removed += 1;
+                    removed_hole = true;
                 }
-            };
-            if points.len() >= 3 {
-                let path = closed_path_data(
-                    &points,
+                // This complete contour follows the transparent exterior. It does
+                // not need the junctions introduced by tiny RGB rim fragments.
+                if matte.is_some_and(|matte| follows_alpha_rim(&source_points, matte)) {
+                    let bounds = contour_bounds(&source_points);
+                    let contour = alpha_contours.iter().find(|contour| {
+                        let other = contour_bounds(contour);
+                        (0..4).all(|i| (bounds[i] - other[i]).abs() <= 2.0)
+                            && (signed_area(contour).abs() - source_area.abs()).abs()
+                                <= source_area.abs() * 0.03
+                    });
+                    let path = fitted_alpha_contour_path_data(
+                        contour.map_or(source_points.as_slice(), Vec::as_slice),
+                    );
+                    summary.cubic_segments += path.matches("C ").count();
+                    summary.line_segments += path.matches("L ").count();
+                    data.push_str(&path);
+                    if !covered_hole {
+                        occlusion_data.push_str(&path);
+                        if candidate_hole {
+                            covered_hole_paths.push(path.clone());
+                        }
+                    }
+                    loops.push(source_points);
+                    continue;
+                }
+                match shared_region_loop(
+                    &vertices,
+                    &shared_chains,
+                    &shared_lookup,
                     &mut summary.cubic_segments,
                     &mut summary.line_segments,
-                );
-                data.push_str(&path);
-                if !covered_hole {
-                    occlusion_data.push_str(&path);
-                    if candidate_hole {
-                        covered_hole_paths.push(path.clone());
+                    None,
+                ) {
+                    Ok((points, path)) => {
+                        loops.push(points);
+                        data.push_str(&path);
+                        if !covered_hole {
+                            let expanded = if overlap_chains.is_empty() && width_chains.is_empty() {
+                                path.clone()
+                            } else {
+                                shared_region_loop(
+                                    &vertices,
+                                    &shared_chains,
+                                    &shared_lookup,
+                                    &mut 0,
+                                    &mut 0,
+                                    Some((&overlap_chains, &width_chains, overlap)),
+                                )
+                                .map(|(_, path)| path)
+                                .unwrap_or_else(|_| path.clone())
+                            };
+                            occlusion_data.push_str(&expanded);
+                            if candidate_hole {
+                                covered_hole_paths.push(expanded);
+                            }
+                        }
+                        continue;
                     }
+                    Err(SharedLoopFailure::MissingEdge) => summary.shared_loop_missing_edges += 1,
+                    Err(SharedLoopFailure::Discontinuous) => {
+                        summary.shared_loop_discontinuities += 1
+                    }
+                    Err(SharedLoopFailure::Empty) => summary.shared_loop_invalid_areas += 1,
                 }
-                loops.push(points);
+                summary.shared_loop_fallbacks += 1;
+                let simplified = preserve_closed_points(
+                    simplify_grid_closed(&raw_points, std::f32::consts::FRAC_1_SQRT_2),
+                    &raw_points,
+                    &canvas_corners,
+                );
+                let simplified_area = signed_area(&simplified);
+                let points = if simplified.len() >= 3
+                    && simplified_area.signum() == source_area.signum()
+                    && simplified_area.abs() >= 0.05 * source_area.abs()
+                {
+                    simplified
+                } else {
+                    let positioned = remove_collinear(&raw_points);
+                    let positioned_area = signed_area(&positioned);
+                    if positioned.len() >= 3
+                        && positioned_area.signum() == source_area.signum()
+                        && positioned_area.abs() >= 0.05 * source_area.abs()
+                    {
+                        positioned
+                    } else {
+                        remove_collinear(&source_points)
+                    }
+                };
+                if points.len() >= 3 {
+                    let path = closed_path_data(
+                        &points,
+                        &mut summary.cubic_segments,
+                        &mut summary.line_segments,
+                    );
+                    data.push_str(&path);
+                    if !covered_hole {
+                        occlusion_data.push_str(&path);
+                        if candidate_hole {
+                            covered_hole_paths.push(path.clone());
+                        }
+                    }
+                    loops.push(points);
+                }
             }
+            loops.sort_by(|a, b| signed_area(b).abs().total_cmp(&signed_area(a).abs()));
+            if loops.is_empty() {
+                summary.empty_regions += 1;
+                summary.empty_region_pixels += segmentation.regions[region].area;
+                summary.largest_empty_region = summary
+                    .largest_empty_region
+                    .max(segmentation.regions[region].area);
+            }
+            summary.loops += loops.len();
+            summary.simplified_vertices += loops.iter().map(Vec::len).sum::<usize>();
+            // Keep the one-face-per-region shared path intact here.  The Python
+            // pipeline recognizes exact primitives only after the structural
+            // layer has been composited, as part of the final render-gated SVG
+            // optimization.  Recognizing raster rectangles at this stage changes
+            // both the serialized geometry and the optimizer's candidate tree.
+            let primitive = None;
+            geometries.push(RegionGeometry {
+                region: region as u32,
+                loops,
+                path_data: data,
+                occlusion_path_data: (removed_hole
+                    || !overlap_chains.is_empty()
+                    || !width_chains.is_empty()
+                    || !covered_hole_paths.is_empty())
+                .then_some(occlusion_data),
+                covered_hole_paths,
+                primitive,
+            });
         }
-        loops.sort_by(|a, b| signed_area(b).abs().total_cmp(&signed_area(a).abs()));
-        if loops.is_empty() {
-            summary.empty_regions += 1;
-            summary.empty_region_pixels += segmentation.regions[region].area;
-            summary.largest_empty_region = summary
-                .largest_empty_region
-                .max(segmentation.regions[region].area);
-        }
-        summary.loops += loops.len();
-        summary.simplified_vertices += loops.iter().map(Vec::len).sum::<usize>();
-        // Keep the one-face-per-region shared path intact here.  The Python
-        // pipeline recognizes exact primitives only after the structural
-        // layer has been composited, as part of the final render-gated SVG
-        // optimization.  Recognizing raster rectangles at this stage changes
-        // both the serialized geometry and the optimizer's candidate tree.
-        let primitive = None;
-        geometries.push(RegionGeometry {
-            region: region as u32,
-            loops,
-            path_data: data,
-            occlusion_path_data: (removed_hole
-                || !overlap_chains.is_empty()
-                || !width_chains.is_empty()
-                || !covered_hole_paths.is_empty())
-            .then_some(occlusion_data),
-            covered_hole_paths,
-            primitive,
+        // Serialize in the same order used to decide which boundaries are hidden,
+        // before any render-dependent structural selection.
+        geometries.sort_by(|left, right| {
+            let left_region = left.region as usize;
+            let right_region = right.region as usize;
+            order_ranks[left_region]
+                .cmp(&order_ranks[right_region])
+                .then_with(|| left_region.cmp(&right_region))
         });
+        (geometries, summary)
     }
-    // Serialize in the same order used to decide which boundaries are hidden,
-    // before any render-dependent structural selection.
-    geometries.sort_by(|left, right| {
-        let left_region = left.region as usize;
-        let right_region = right.region as usize;
-        order_ranks[left_region]
-            .cmp(&order_ranks[right_region])
-            .then_with(|| left_region.cmp(&right_region))
-    });
-    (geometries, summary)
 }
 
 /// Preserve the accepted master instead of refitting it from a tessellation.
@@ -8492,33 +8544,133 @@ mod tests {
     use super::*;
 
     #[test]
-    fn incident_chain_index_matches_the_complete_ownership_scan() {
-        let owners: Vec<BTreeSet<usize>> = (0..64).map(|mask| {
-            (0..6).filter(|&owner| mask & (1 << owner) != 0).collect()
-        }).collect();
-        let indexed = chains_by_owner(&owners, 6);
-        for (owner, chains) in indexed.iter().enumerate() {
-            let scanned: Vec<usize> = owners.iter().enumerate()
-                .filter(|(_, set)| set.contains(&owner)).map(|(chain, _)| chain).collect();
-            assert_eq!(*chains, scanned);
+    fn shared_preparation_does_not_retain_overlap_or_order_from_previous_builds() {
+        let (width, height) = (32, 24);
+        let labels: Vec<u32> = (0..width * height)
+            .map(|i| {
+                let boundary = 12 + i / width / 4;
+                if i % width < boundary {
+                    0
+                } else if i % width < boundary + 3 {
+                    1
+                } else {
+                    2
+                }
+            })
+            .collect();
+        let colours = [[0.2; 3], [0.05; 3], [0.8; 3]];
+        let source = Raster::new(
+            width,
+            height,
+            labels.iter().map(|&id| colours[id as usize]).collect(),
+        );
+        let segmentation = Segmentation {
+            width,
+            height,
+            labels: labels.clone(),
+            canonical: source.clone(),
+            paint_keys: vec![0, 1, 2],
+            paint_samples: vec![true; labels.len()],
+            regions: (0..3)
+                .map(|id| RegionStats {
+                    id,
+                    area: labels.iter().filter(|&&label| label == id).count(),
+                    min_x: 0,
+                    min_y: 0,
+                    max_x: width,
+                    max_y: height,
+                    mean_rgb: colours[id as usize],
+                    mean_lab: rgb_to_oklab(colours[id as usize]),
+                })
+                .collect(),
+            summary: SegmentationSummary::default(),
+        };
+        let topology = HierarchicalTopology::build(&segmentation);
+        let matte = crate::chroma::AlphaMatte::from_u8(
+            width,
+            height,
+            labels
+                .iter()
+                .map(|&id| if id == 2 { 128 } else { 255 })
+                .collect(),
+        );
+        for alpha in [None, Some(&matte)] {
+            let prepared =
+                PreparedGeometry::new(&segmentation, Some(&topology), Some(&source), alpha, &[]);
+            for (overlap, opaque, order) in [
+                (0.6, [true; 3], Some([2, 0, 1])),
+                (0.0, [true, true, false], Some([0, 1, 2])),
+                (0.6, [true; 3], None),
+                (0.6, [true; 3], Some([2, 0, 1])),
+            ] {
+                let order = order.as_ref().map(|r| r.as_slice());
+                let reused = prepared.build(overlap, &opaque, order);
+                let fresh = build_internal(
+                    &segmentation,
+                    Some(&topology),
+                    Some(&source),
+                    alpha,
+                    overlap,
+                    &opaque,
+                    order,
+                    &[],
+                );
+                assert_eq!(format!("{reused:?}"), format!("{fresh:?}"));
+            }
         }
     }
 
+    #[test]
+    fn incident_chain_index_matches_the_complete_ownership_scan() {
+        let owners: Vec<BTreeSet<usize>> = (0..64)
+            .map(|mask| (0..6).filter(|&owner| mask & (1 << owner) != 0).collect())
+            .collect();
+        let indexed = chains_by_owner(&owners, 6);
+        for (owner, chains) in indexed.iter().enumerate() {
+            let scanned: Vec<usize> = owners
+                .iter()
+                .enumerate()
+                .filter(|(_, set)| set.contains(&owner))
+                .map(|(chain, _)| chain)
+                .collect();
+            assert_eq!(*chains, scanned);
+        }
+    }
 
     #[test]
     fn segment_budget_preserves_every_competitive_cubic_fit() {
         for count in [2, 17, 129, 513] {
             for amplitude in [0.0_f32, 1.0, 12.0] {
-                let points: Vec<Point> = (0..count).map(|i| Point {
-                    x: i as f32 * 0.35,
-                    y: amplitude * ((i as f32 * 0.17).sin() + 0.2 * (i as f32 * 1.3).cos()),
-                }).collect();
-                let left = normalized(Point { x: points[1].x - points[0].x, y: points[1].y - points[0].y });
-                let right = normalized(Point { x: points[count - 2].x - points[count - 1].x, y: points[count - 2].y - points[count - 1].y });
+                let points: Vec<Point> = (0..count)
+                    .map(|i| Point {
+                        x: i as f32 * 0.35,
+                        y: amplitude * ((i as f32 * 0.17).sin() + 0.2 * (i as f32 * 1.3).cos()),
+                    })
+                    .collect();
+                let left = normalized(Point {
+                    x: points[1].x - points[0].x,
+                    y: points[1].y - points[0].y,
+                });
+                let right = normalized(Point {
+                    x: points[count - 2].x - points[count - 1].x,
+                    y: points[count - 2].y - points[count - 1].y,
+                });
                 for tolerance in [0.1_f32, 0.75, 1.25] {
                     let complete = fit_cubic_recursive(&points, left, right, tolerance * tolerance);
-                    for budget in [0, 1, complete.len().saturating_sub(1), complete.len(), complete.len() + 3] {
-                        let limited = fit_cubic_with_budget(&points, left, right, tolerance * tolerance, budget);
+                    for budget in [
+                        0,
+                        1,
+                        complete.len().saturating_sub(1),
+                        complete.len(),
+                        complete.len() + 3,
+                    ] {
+                        let limited = fit_cubic_with_budget(
+                            &points,
+                            left,
+                            right,
+                            tolerance * tolerance,
+                            budget,
+                        );
                         if complete.len() > budget {
                             assert!(limited.is_none());
                         } else {

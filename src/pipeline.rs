@@ -1024,8 +1024,8 @@ fn vectorize_inner(
     let processing_height = processing.height;
     let source_scale = (input_width as f32 / processing_width.max(1) as f32)
         .max(input_height as f32 / processing_height.max(1) as f32);
-    let retain_adaptive_source = config.adaptive_refinement
-        && source_scale >= config.adaptive_min_source_scale;
+    let retain_adaptive_source =
+        config.adaptive_refinement && source_scale >= config.adaptive_min_source_scale;
     let adaptive_source = retain_adaptive_source.then_some(source);
     let adaptive_reference = retain_adaptive_source.then_some(source_reference);
     let adaptive_matte = if retain_adaptive_source {
@@ -1659,20 +1659,23 @@ fn vectorize_processing(
         &baseline_order,
     );
     // Finalize ordering before deciding and fitting hidden overlap.
-    let (mut geometry, mut geometry_report) = crate::geometry::build_with_paint_overlap(
+    let prepared_geometry = crate::geometry::PreparedGeometry::new(
         &segmentation,
-        &topology,
-        &geometry_edge_reference,
+        Some(&topology),
+        Some(&geometry_edge_reference),
         if source_alpha { chroma_matte } else { None },
-        config.shared_boundary_overlap,
-        &overlap_opaque,
-        (order_proposal.summary.changed_ranks > 0).then_some(order_proposal.ranks.as_slice()),
         if variable_opacity {
             &excluded_regions
         } else {
             &[]
         },
     );
+    let (mut geometry, mut geometry_report) = prepared_geometry.build(
+        config.shared_boundary_overlap,
+        &overlap_opaque,
+        (order_proposal.summary.changed_ranks > 0).then_some(order_proposal.ranks.as_slice()),
+    );
+    let prepared_geometry = (order_proposal.summary.changed_ranks > 0).then_some(prepared_geometry);
     if let Some(alpha) = &mut face_alpha {
         for (band, colour) in std::mem::take(&mut alpha.bands) {
             let region = paints.len() as u32;
@@ -1892,21 +1895,10 @@ fn vectorize_processing(
     if order_proposal.summary.changed_ranks > 0 {
         // The old ordering is only a validation reference, never an input to
         // the ordered geometry's expansion decisions.
-        let (mut reference_geometry, reference_geometry_report) =
-            crate::geometry::build_with_paint_overlap(
-                &segmentation,
-                &topology,
-                &geometry_edge_reference,
-                if source_alpha { chroma_matte } else { None },
-                config.shared_boundary_overlap,
-                &overlap_opaque,
-                None,
-                if variable_opacity {
-                    &excluded_regions
-                } else {
-                    &[]
-                },
-            );
+        let (mut reference_geometry, reference_geometry_report) = prepared_geometry
+            .as_ref()
+            .unwrap()
+            .build(config.shared_boundary_overlap, &overlap_opaque, None);
         reference_geometry.extend(
             geometry
                 .iter()
@@ -1945,6 +1937,7 @@ fn vectorize_processing(
         }
         report_progress(config, "paint-order-validation", started, &mut checkpoint);
     }
+    drop(prepared_geometry);
     #[cfg(feature = "diagnostics")]
     if let Ok(prefix) = std::env::var("PICVEC_PIPELINE_DIAGNOSTICS") {
         let _ = fs::write(

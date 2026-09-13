@@ -30,6 +30,7 @@ pub(crate) fn absorb_micro_regions(
         }
         let mut changes = Vec::new();
         let mut material_unions = vec![false; count];
+        let mut parent_slots = vec![usize::MAX; count];
         for (id, component) in pixels.iter().enumerate() {
             if component.is_empty() {
                 continue;
@@ -119,11 +120,13 @@ pub(crate) fn absorb_micro_regions(
             // direct contacts separate for ordinary same-material merging.
             // Nonincident paints are evidence only for partial coverage below.
             let incident = contacts.clone();
-            for y in region.min_y.saturating_sub(radius)..(region.max_y + radius).min(h) {
-                for x in region.min_x.saturating_sub(radius)..(region.max_x + radius).min(w) {
-                    let other = labels[y * w + x] as usize;
-                    if !large && neutral && other != id && segmentation.regions[other].area > 128 {
-                        contacts.insert(other);
+            if !large && neutral {
+                for y in region.min_y.saturating_sub(radius)..(region.max_y + radius).min(h) {
+                    for x in region.min_x.saturating_sub(radius)..(region.max_x + radius).min(w) {
+                        let other = labels[y * w + x] as usize;
+                        if other != id && segmentation.regions[other].area > 128 {
+                            contacts.insert(other);
+                        }
                     }
                 }
             }
@@ -153,28 +156,39 @@ pub(crate) fn absorb_micro_regions(
             let mut edge_parents = Vec::new();
             let mut repeated = Vec::new();
             let mut same_material = Vec::new();
-            for parent in contacts {
-                let mut samples = Vec::new();
-                let mut core = Vec::new();
-                for y in region.min_y.saturating_sub(radius)..(region.max_y + radius).min(h) {
-                    for x in region.min_x.saturating_sub(radius)..(region.max_x + radius).min(w) {
-                        let j = y * w + x;
-                        if labels[j] as usize != parent || (opacity(j) - a).abs() > 1.5 / 255.0 {
-                            continue;
-                        }
-                        samples.push(j);
-                        if x > 0
-                            && x + 1 < w
-                            && y > 0
-                            && y + 1 < h
-                            && [j - 1, j + 1, j - w, j + w]
-                                .iter()
-                                .all(|&k| labels[k] as usize == parent)
-                        {
-                            core.push(j);
-                        }
+            // Visit the local window once, distributing its pixels to the
+            // incident owners. Keep both parent order and row-major sample
+            // order identical to scanning the whole window for each parent.
+            let mut parent_samples = vec![(Vec::new(), Vec::new()); contacts.len()];
+            for (slot, &parent) in contacts.iter().enumerate() {
+                parent_slots[parent] = slot;
+            }
+            for y in region.min_y.saturating_sub(radius)..(region.max_y + radius).min(h) {
+                for x in region.min_x.saturating_sub(radius)..(region.max_x + radius).min(w) {
+                    let j = y * w + x;
+                    let parent = labels[j] as usize;
+                    let slot = parent_slots[parent];
+                    if slot == usize::MAX || (opacity(j) - a).abs() > 1.5 / 255.0 {
+                        continue;
+                    }
+                    let (samples, core) = &mut parent_samples[slot];
+                    samples.push(j);
+                    if x > 0
+                        && x + 1 < w
+                        && y > 0
+                        && y + 1 < h
+                        && [j - 1, j + 1, j - w, j + w]
+                            .iter()
+                            .all(|&k| labels[k] as usize == parent)
+                    {
+                        core.push(j);
                     }
                 }
+            }
+            for &parent in &contacts {
+                parent_slots[parent] = usize::MAX;
+            }
+            for (parent, (samples, core)) in contacts.into_iter().zip(parent_samples) {
                 let selected = if core.len() >= 3 { &core } else { &samples };
                 if selected.len() < 3 {
                     continue;
