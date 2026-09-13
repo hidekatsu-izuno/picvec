@@ -443,12 +443,15 @@ fn interpolate(stops: &[ColorStop], t: f32) -> [f32; 3] {
 }
 
 fn median(values: &mut [f32]) -> f32 {
-    values.sort_by(f32::total_cmp);
     let middle = values.len() / 2;
-    if values.len().is_multiple_of(2) {
-        0.5 * (values[middle - 1] + values[middle])
+    let even = values.len().is_multiple_of(2);
+    let (lower, upper, _) = values.select_nth_unstable_by(middle, f32::total_cmp);
+    if even {
+        // Only the two central ranks are needed. Preserve the reference's
+        // total ordering (including signed zero) and arithmetic expression.
+        0.5 * (*lower.iter().max_by(|a, b| a.total_cmp(b)).unwrap() + *upper)
     } else {
-        values[middle]
+        *upper
     }
 }
 
@@ -6556,13 +6559,21 @@ fn supported_merge_error_gate(
     let mut baseline_errors = Vec::new();
     let mut candidate_errors = Vec::new();
     for (samples, baseline) in faces {
-        let before = paint_stats_against_labs(labs, samples, width, baseline);
-        let after = paint_stats_against_labs(labs, samples, width, candidate);
+        let before_errors = errors_for_indices(labs, samples, width, baseline);
+        let after_errors = errors_for_indices(labs, samples, width, candidate);
+        let stats = |errors: &[f32]| ErrorStats {
+            mean: numpy_sum_f32(errors) / errors.len().max(1) as f32,
+            // Percentile selection reorders its buffer. Keep the original
+            // sample order for the combined floating-point reduction below.
+            percentile: percentile(errors.to_vec(), 0.90),
+        };
+        let before = stats(&before_errors);
+        let after = stats(&after_errors);
         if after.mean > before.mean + 0.30 || after.percentile > before.percentile + 0.75 {
             return 1;
         }
-        baseline_errors.extend(errors_for_indices(labs, samples, width, baseline));
-        candidate_errors.extend(errors_for_indices(labs, samples, width, candidate));
+        baseline_errors.extend(before_errors);
+        candidate_errors.extend(after_errors);
     }
     let before = numpy_sum_f32(&baseline_errors) / baseline_errors.len().max(1) as f32;
     let after = numpy_sum_f32(&candidate_errors) / candidate_errors.len().max(1) as f32;
@@ -8942,6 +8953,129 @@ mod tests {
         assert!((center.x - 64.0).abs() < 0.5, "{center:?}");
         assert!((center.y - 150.0).abs() < 0.5, "{center:?}");
         assert!((radius.x / radius.y - 110.0 / 130.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn selected_median_matches_sorted_bits() {
+        for length in 1..1025 {
+            let mut values = (0..length)
+                .map(|i| ((i * 73 + length * 31) % 101) as f32 - 50.0)
+                .collect::<Vec<_>>();
+            if length >= 6 {
+                values[..6].copy_from_slice(&[
+                    -0.0,
+                    0.0,
+                    f32::MIN,
+                    f32::MAX,
+                    f32::NEG_INFINITY,
+                    f32::INFINITY,
+                ]);
+            }
+            let mut sorted = values.clone();
+            sorted.sort_by(f32::total_cmp);
+            let middle = length / 2;
+            let expected = if length % 2 == 0 {
+                0.5 * (sorted[middle - 1] + sorted[middle])
+            } else {
+                sorted[middle]
+            };
+            assert_eq!(median(&mut values).to_bits(), expected.to_bits());
+        }
+        for mut values in [
+            vec![-0.0, 0.0],
+            vec![0.0, -0.0],
+            vec![f32::NAN],
+            vec![1.0, f32::NAN, 2.0],
+        ] {
+            let mut sorted = values.clone();
+            sorted.sort_by(f32::total_cmp);
+            let middle = sorted.len() / 2;
+            let expected = if sorted.len() % 2 == 0 {
+                0.5 * (sorted[middle - 1] + sorted[middle])
+            } else {
+                sorted[middle]
+            };
+            assert_eq!(median(&mut values).to_bits(), expected.to_bits());
+        }
+    }
+
+    #[test]
+    fn reused_merge_errors_preserve_all_gate_outcomes() {
+        // Independent reference: compute face statistics, then render both
+        // paints again for the combined gate, as before this optimization.
+        fn reference(
+            labs: &[Oklab],
+            width: usize,
+            faces: [(&[usize], &Paint); 2],
+            candidate: &Paint,
+        ) -> u8 {
+            let mut baseline_errors = Vec::new();
+            let mut candidate_errors = Vec::new();
+            for (samples, baseline) in faces {
+                let before = paint_stats_against_labs(labs, samples, width, baseline);
+                let after = paint_stats_against_labs(labs, samples, width, candidate);
+                if after.mean > before.mean + 0.30 || after.percentile > before.percentile + 0.75 {
+                    return 1;
+                }
+                baseline_errors.extend(errors_for_indices(labs, samples, width, baseline));
+                candidate_errors.extend(errors_for_indices(labs, samples, width, candidate));
+            }
+            let before = numpy_sum_f32(&baseline_errors) / baseline_errors.len().max(1) as f32;
+            let after = numpy_sum_f32(&candidate_errors) / candidate_errors.len().max(1) as f32;
+            if after > before + 0.01
+                || percentile(candidate_errors, 0.90) > percentile(baseline_errors, 0.90) + 0.04
+            {
+                2
+            } else {
+                0
+            }
+        }
+        let source = Raster::new(
+            32,
+            32,
+            (0..1024)
+                .map(|i| [0.3 + (i % 32) as f32 / 200.0; 3])
+                .collect(),
+        );
+        let labs = oklab_pixels(&source);
+        let mut outcomes = [0usize; 3];
+        for length in [0, 1, 7, 32, 127, 256, 511] {
+            let left: Vec<_> = (0..length).collect();
+            let right: Vec<_> = (512..512 + length).rev().collect();
+            for offset in [-0.01, 0.0, 0.0001, 0.001, 0.002, 0.01, 0.1] {
+                let baseline = Paint::Linear {
+                    preset: LinearPreset::LeftToRight,
+                    start: Point { x: 0.0, y: 0.0 },
+                    end: Point { x: 31.0, y: 0.0 },
+                    stops: vec![
+                        ColorStop {
+                            offset: 0.0,
+                            color: [0.3; 3],
+                        },
+                        ColorStop {
+                            offset: 1.0,
+                            color: [0.455; 3],
+                        },
+                    ],
+                };
+                let mut candidate = baseline.clone();
+                if let Paint::Linear { stops, .. } = &mut candidate {
+                    for stop in stops {
+                        for c in &mut stop.color {
+                            *c += offset;
+                        }
+                    }
+                }
+                let faces = [(&left[..], &baseline), (&right[..], &baseline)];
+                let expected = reference(&labs, 32, faces, &candidate);
+                assert_eq!(
+                    supported_merge_error_gate(&labs, 32, faces, &candidate),
+                    expected
+                );
+                outcomes[expected as usize] += 1;
+            }
+        }
+        assert!(outcomes.iter().all(|&count| count > 0), "{outcomes:?}");
     }
 
     #[test]

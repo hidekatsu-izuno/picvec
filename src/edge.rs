@@ -76,6 +76,16 @@ pub fn oklab_pixels(image: &Raster) -> Vec<Oklab> {
 }
 
 pub fn oklab_values(pixels: &[[f32; 3]]) -> Vec<Oklab> {
+    // Paint searches repeatedly convert small batches, often inside an
+    // already parallel region fit. Scheduling these batches costs more than
+    // the pixel transforms. Keep exactly the same transform and output order.
+    if pixels.len() <= 256 {
+        return pixels
+            .iter()
+            .copied()
+            .map(crate::color::rgb_to_oklab)
+            .collect();
+    }
     pixels
         .par_iter()
         .copied()
@@ -3242,6 +3252,35 @@ pub fn perceptual_smooth(image: &Raster, config: &Config) -> Raster {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn small_color_batches_match_parallel_transform_bit_for_bit() {
+        use rayon::prelude::*;
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .unwrap();
+        pool.install(|| {
+            let values = [-0.1, -0.0, 0.0, 0.001, 0.04045, 0.04046, 0.5, 1.0, 1.1];
+            for length in [0, 1, 31, 128, 255, 256, 257, 1024] {
+                let pixels: Vec<_> = (0..length)
+                    .map(|i| [values[i % 9], values[(i / 9) % 9], values[(i / 81) % 9]])
+                    .collect();
+                let expected: Vec<_> = pixels
+                    .par_iter()
+                    .copied()
+                    .map(crate::color::rgb_to_oklab)
+                    .collect();
+                for (a, b) in super::oklab_values(&pixels).iter().zip(&expected) {
+                    assert_eq!(
+                        [a.l.to_bits(), a.a.to_bits(), a.b.to_bits()],
+                        [b.l.to_bits(), b.a.to_bits(), b.b.to_bits()]
+                    );
+                }
+                assert_eq!(super::oklab_values(&pixels).len(), expected.len());
+            }
+        });
+    }
+
     #[test]
     fn dark_quantization_noise_smooths_without_erasing_a_black_line() {
         let config = crate::config::Config::default();
