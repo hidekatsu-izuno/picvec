@@ -9,6 +9,12 @@ use crate::raster::Raster;
 use crate::segment::Segmentation;
 use crate::union_find::UnionFind;
 
+#[path = "geometry_distance.rs"]
+mod geometry_distance;
+
+#[path = "geometry_fit_tree.rs"]
+mod geometry_fit_tree;
+
 #[path = "geometry_bezier.rs"]
 mod geometry_bezier;
 #[path = "geometry_primitives.rs"]
@@ -2693,39 +2699,7 @@ fn sample_open_catmull(points: &[Point], spacing: f32) -> Vec<Point> {
 // Acceptance-only checks can stop at the first supporting sample. Keep the
 // distance operation identical to the scored path, including boundary rounding.
 fn samples_within_corridor(query: &[Point], reference: &[Point], maximum: f32) -> bool {
-    if query.is_empty() || reference.is_empty() {
-        return false;
-    }
-    let cell = maximum.max(0.25);
-    let key = |p: Point| ((p.x / cell).floor() as i32, (p.y / cell).floor() as i32);
-    let mut buckets = HashMap::<(i32, i32), Vec<Point>>::new();
-    for &point in reference {
-        buckets.entry(key(point)).or_default().push(point);
-    }
-    // Consecutive contour samples often share support. Recheck that exact
-    // sample before consulting the spatial index; never skip a query point.
-    let mut previous: Option<Point> = None;
-    query.iter().all(|&point| {
-        if previous.is_some_and(|candidate| point.distance(candidate) <= maximum) {
-            return true;
-        }
-        let (x, y) = key(point);
-        (-1..=1).any(|dy| {
-            (-1..=1).any(|dx| {
-                buckets.get(&(x + dx, y + dy)).is_some_and(|values| {
-                    if let Some(&candidate) = values
-                        .iter()
-                        .find(|&&candidate| point.distance(candidate) <= maximum)
-                    {
-                        previous = Some(candidate);
-                        true
-                    } else {
-                        false
-                    }
-                })
-            })
-        })
-    })
+    SampleIndex::new(reference, maximum).contains_all(query)
 }
 
 struct SampleIndex {
@@ -2752,6 +2726,39 @@ impl SampleIndex {
             maximum,
             buckets,
         }
+    }
+
+    fn contains_all(&self, query: &[Point]) -> bool {
+        if query.is_empty() || self.buckets.is_empty() {
+            return false;
+        }
+        // Consecutive contour samples often share support. Recheck that exact
+        // sample before consulting the spatial index; never skip a query point.
+        let mut previous: Option<Point> = None;
+        query.iter().all(|&point| {
+            if previous.is_some_and(|candidate| point.distance(candidate) <= self.maximum) {
+                return true;
+            }
+            let (x, y) = (
+                (point.x / self.cell).floor() as i32,
+                (point.y / self.cell).floor() as i32,
+            );
+            (-1..=1).any(|dy| {
+                (-1..=1).any(|dx| {
+                    self.buckets.get(&(x + dx, y + dy)).is_some_and(|values| {
+                        if let Some(&candidate) = values
+                            .iter()
+                            .find(|&&candidate| point.distance(candidate) <= self.maximum)
+                        {
+                            previous = Some(candidate);
+                            true
+                        } else {
+                            false
+                        }
+                    })
+                })
+            })
+        })
     }
 
     fn distances(&self, query: &[Point]) -> Option<(f32, f32)> {
@@ -3752,20 +3759,39 @@ fn round_curve_to_milli(curve: CurveSegment) -> CurveSegment {
     }
 }
 
+// Source observations and their spatial index survive all candidate checks.
+struct RasterBoundarySupport {
+    observations: Vec<Point>,
+    source: SampleIndex,
+}
+
+impl RasterBoundarySupport {
+    fn new(source: &[Point], maximum: f32) -> Self {
+        Self {
+            observations: source
+                .windows(2)
+                .map(|pair| Point {
+                    x: 0.5 * (pair[0].x + pair[1].x),
+                    y: 0.5 * (pair[0].y + pair[1].y),
+                })
+                .collect(),
+            source: SampleIndex::new(&sample_polyline_segments(source, 0.25), maximum),
+        }
+    }
+
+    fn accepts(&self, rendered: &[Point]) -> bool {
+        rendered.len() >= 2
+            && !self.observations.is_empty()
+            && samples_within_corridor(&self.observations, rendered, self.source.maximum)
+            && self.source.contains_all(rendered)
+    }
+}
+
 fn raster_boundary_supported(source: &[Point], rendered: &[Point], maximum: f32) -> bool {
     if source.len() < 2 || rendered.len() < 2 {
         return false;
     }
-    let observations: Vec<Point> = source
-        .windows(2)
-        .map(|pair| Point {
-            x: 0.5 * (pair[0].x + pair[1].x),
-            y: 0.5 * (pair[0].y + pair[1].y),
-        })
-        .collect();
-    let source_samples = sample_polyline_segments(source, 0.25);
-    samples_within_corridor(&observations, rendered, maximum)
-        && samples_within_corridor(rendered, &source_samples, maximum)
+    RasterBoundarySupport::new(source, maximum).accepts(rendered)
 }
 
 fn nearest_point(reference: &[Point], point: Point) -> (usize, f32) {
@@ -3811,6 +3837,7 @@ fn least_squares_fairing_shared_boundary(
     let allowed_baseline = std::f32::consts::FRAC_1_SQRT_2 + 0.5;
     let allowed_source = std::f32::consts::SQRT_2.max(allowed_baseline);
     let reference_index = SampleIndex::new(&reference_samples, allowed_baseline);
+    let source_support = std::cell::OnceCell::new();
     let mut best = baseline.to_vec();
     let mut best_error = f32::INFINITY;
     for sigma in [
@@ -3830,12 +3857,12 @@ fn least_squares_fairing_shared_boundary(
         for &index in &corner_indices {
             smoothed[index] = reference[index];
         }
-        'tolerance: for fitting_tolerance in [0.75_f32, 1.0, 1.25] {
-            let mut candidate = Vec::<CurveSegment>::new();
-            for span in split_indices.windows(2) {
+        let mut trees: Vec<_> = split_indices
+            .windows(2)
+            .filter_map(|span| {
                 let part = &smoothed[span[0]..=span[1]];
                 if part.len() < 2 {
-                    continue;
+                    return None;
                 }
                 let start_index = 2.min(part.len() - 1);
                 let end_index = part.len().saturating_sub(3);
@@ -3847,14 +3874,18 @@ fn least_squares_fairing_shared_boundary(
                     x: part[end_index].x - part[part.len() - 1].x,
                     y: part[end_index].y - part[part.len() - 1].y,
                 });
-                let budget = best.len().saturating_sub(candidate.len() + 1);
-                let Some(fitted) = fit_cubic_with_budget(
+                Some(geometry_fit_tree::FitTree::new(
                     part,
                     start_direction,
                     end_direction,
-                    fitting_tolerance * fitting_tolerance,
-                    budget,
-                ) else {
+                ))
+            })
+            .collect();
+        'tolerance: for fitting_tolerance in [0.75_f32, 1.0, 1.25] {
+            let mut candidate = Vec::<CurveSegment>::new();
+            for tree in &mut trees {
+                let budget = best.len().saturating_sub(candidate.len() + 1);
+                let Some(fitted) = tree.fit(fitting_tolerance * fitting_tolerance, budget) else {
                     // Equal or larger candidates were already rejected below.
                     continue 'tolerance;
                 };
@@ -3881,11 +3912,10 @@ fn least_squares_fairing_shared_boundary(
             else {
                 continue;
             };
-            if !raster_boundary_supported(
-                source,
-                &sample_curve_sequence(&candidate, 0.25),
-                allowed_source,
-            ) {
+            if !source_support
+                .get_or_init(|| RasterBoundarySupport::new(source, allowed_source))
+                .accepts(&sample_curve_sequence(&candidate, 0.25))
+            {
                 continue;
             }
             if source_corners.iter().any(|&corner| {
@@ -3934,6 +3964,7 @@ fn bounded_fairing_shared_boundary(
     // margin beyond the cell diagonal for a smooth replacement.
     let allowed_source = (tolerance + 0.75).max(fairing_raster_corridor());
     let reference_index = SampleIndex::new(&reference_samples, allowed_baseline);
+    let source_support = std::cell::OnceCell::new();
     let mut best = baseline.to_vec();
     let mut best_error = f32::INFINITY;
     for sigma in [
@@ -3974,11 +4005,10 @@ fn bounded_fairing_shared_boundary(
         else {
             continue;
         };
-        if !raster_boundary_supported(
-            source,
-            &sample_curve_sequence(&candidate, 0.25),
-            allowed_source,
-        ) {
+        if !source_support
+            .get_or_init(|| RasterBoundarySupport::new(source, allowed_source))
+            .accepts(&sample_curve_sequence(&candidate, 0.25))
+        {
             continue;
         }
         if source_corners.iter().any(|(_, corner)| {

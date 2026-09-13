@@ -159,10 +159,10 @@ fn derivatives(c: CurveSegment, t: f32) -> (Point, Point) {
     (first, second)
 }
 
-fn reparameterize(points: &[Point], curve: CurveSegment, ts: &mut [f32]) {
-    let previous = ts.to_vec();
+fn reparameterize(points: &[Point], curve: CurveSegment, ts: &mut [f32]) -> bool {
+    let mut changed = false;
     for i in 1..points.len() - 1 {
-        let mut t = previous[i];
+        let mut t = ts[i];
         for _ in 0..4 {
             let r = sub(cubic_point(curve, t), points[i]);
             let (d, dd) = derivatives(curve, t);
@@ -176,11 +176,22 @@ fn reparameterize(points: &[Point], curve: CurveSegment, ts: &mut [f32]) {
             }
             t = next;
         }
-        ts[i] = t.max(ts[i - 1]);
+        let updated = t.max(ts[i - 1]);
+        changed |= updated.to_bits() != ts[i].to_bits();
+        ts[i] = updated;
     }
+    changed
 }
 
 fn one(
+    points: &[Point],
+    start: Option<Point>,
+    end: Option<Point>,
+) -> Option<(CurveSegment, Error)> {
+    one_with_convergence::<true>(points, start, end)
+}
+
+fn one_with_convergence<const STOP_AT_FIXED_POINT: bool>(
     points: &[Point],
     start: Option<Point>,
     end: Option<Point>,
@@ -191,7 +202,12 @@ fn one(
     let mut ts = super::chord_parameters(points);
     let mut curve = estimate(points, &ts, start, end, None)?;
     for _ in 0..10 {
-        reparameterize(points, curve, &mut ts);
+        let changed = reparameterize(points, curve, &mut ts);
+        // curve is estimate(points, ts, ..., None). If ts did not change,
+        // another estimate and every remaining iteration have identical input.
+        if STOP_AT_FIXED_POINT && !changed {
+            break;
+        }
         curve = estimate(points, &ts, start, end, None)?;
     }
     // Refine the normal-distance objective directly. Repeated full-vector
@@ -241,18 +257,26 @@ fn one(
 
 fn error(source: &[Point], curves: &[CurveSegment]) -> Error {
     let rendered = sample_curve_sequence(curves, 0.35);
+    let indexed = (source.len() >= 16
+        && rendered.len() >= 32
+        && rendered.iter().all(|p| p.x.is_finite() && p.y.is_finite()))
+    .then(|| super::geometry_distance::SegmentIndex::new(&rendered));
     let mut maximum = 0.0;
     let mut squared = 0.0;
     let mut worst = 0;
     for (i, &p) in source.iter().enumerate() {
-        let e = rendered
-            .windows(2)
-            .map(|pair| {
-                let d = sub(pair[1], pair[0]);
-                let t = (dot(sub(p, pair[0]), d) / dot(d, d).max(1e-12)).clamp(0.0, 1.0);
-                p.distance(add(pair[0], scale(d, t)))
-            })
-            .fold(f32::INFINITY, f32::min);
+        let e = if let Some(index) = &indexed {
+            index.distance(p)
+        } else {
+            rendered
+                .windows(2)
+                .map(|pair| {
+                    let d = sub(pair[1], pair[0]);
+                    let t = (dot(sub(p, pair[0]), d) / dot(d, d).max(1e-12)).clamp(0.0, 1.0);
+                    p.distance(add(pair[0], scale(d, t)))
+                })
+                .fold(f32::INFINITY, f32::min)
+        };
         if e > maximum {
             maximum = e;
             worst = i;
@@ -814,15 +838,21 @@ pub(super) fn fit_closed_with_limit(
     knots.sort_unstable();
     knots.dedup();
     let allowed = tolerance.min(2.0);
+    let mut interval_fits = std::collections::HashMap::new();
     loop {
         let mut curves = Vec::new();
         let mut worst = None::<(f32, usize)>;
         for pair in knots.windows(2) {
             let (a, b) = (pair[0], pair[1]);
-            let mut observations: Vec<_> = (a..=b).map(|i| points[i % count]).collect();
-            observations[0] = smooth[a % count];
-            *observations.last_mut()? = smooth[b % count];
-            let result = one(&observations, tangent(a % count), tangent(b % count));
+            // Only the split interval changes. Keep fits of every untouched
+            // interval, including failures, across adaptive subdivision rounds.
+            let result = *interval_fits.entry((a, b)).or_insert_with(|| {
+                let mut observations: Vec<_> = (a..=b).map(|i| points[i % count]).collect();
+                observations[0] = smooth[a % count];
+                let last = observations.len() - 1;
+                observations[last] = smooth[b % count];
+                one(&observations, tangent(a % count), tangent(b % count))
+            });
             let (score, split) = if let Some((curve, e)) = result {
                 curves.push(curve);
                 (
@@ -864,6 +894,39 @@ pub(super) fn fit_closed_with_limit(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fixed_point_exit_matches_all_ten_iterations() {
+        for count in [4, 17, 80, 257] {
+            for shape in 0..4 {
+                let points: Vec<_> = (0..count)
+                    .map(|i| {
+                        let x = i as f32 * 0.5;
+                        Point {
+                            x,
+                            y: match shape {
+                                0 => x * 0.2,
+                                1 => (x * 0.07).sin() * 5.0,
+                                2 => (x * 0.07).sin().round() * 5.0,
+                                _ => (i % 7) as f32,
+                            },
+                        }
+                    })
+                    .collect();
+                for tangent in [None, Some(Point { x: 1.0, y: 0.0 })] {
+                    let expected = one_with_convergence::<false>(&points, tangent, tangent);
+                    let actual = one(&points, tangent, tangent);
+                    assert_eq!(actual.is_some(), expected.is_some());
+                    if let (Some((a, ae)), Some((b, be))) = (actual, expected) {
+                        assert_eq!(a, b);
+                        assert_eq!(ae.maximum.to_bits(), be.maximum.to_bits());
+                        assert_eq!(ae.rms.to_bits(), be.rms.to_bits());
+                        assert_eq!(ae.worst, be.worst);
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn car_hood_tonal_contour_can_use_fewer_curves_with_fixed_end_tangents() {

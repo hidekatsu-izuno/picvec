@@ -2,6 +2,59 @@
 use super::*;
 use std::cell::OnceCell;
 
+// Squared errors are nonnegative. Any completed subtree of NumPy's pairwise
+// sum is a lower bound on the final sum, even with rounded f32 additions.
+// Retain that exact reduction tree so surviving candidates keep identical MSE.
+pub(super) fn mse_below(
+    source: &Raster,
+    samples: &[usize],
+    mut predict: impl FnMut(usize) -> [f32; 3],
+    limit: f32,
+) -> Option<f32> {
+    fn sum(
+        start: usize,
+        len: usize,
+        divisor: f32,
+        limit: f32,
+        value: &mut impl FnMut(usize) -> f32,
+    ) -> Option<f32> {
+        let result = if len <= 128 {
+            let mut values = [0.0_f32; 128];
+            for (offset, target) in values[..len].iter_mut().enumerate() {
+                *target = value(start + offset);
+            }
+            numpy_sum_f32(&values[..len])
+        } else {
+            let mut middle = len / 2;
+            middle -= middle % 8;
+            let left = sum(start, middle, divisor, limit, value)?;
+            let right = sum(start + middle, len - middle, divisor, limit, value)?;
+            left + right
+        };
+        (result / divisor < limit).then_some(result)
+    }
+    if samples.is_empty() {
+        return (0.0 < limit).then_some(0.0);
+    }
+    let mut previous = usize::MAX;
+    let mut squared = [0.0; 3];
+    let mut value = |offset: usize| {
+        let sample = offset / 3;
+        if previous != sample {
+            let index = samples[sample];
+            let predicted = predict(index);
+            squared = [0, 1, 2].map(|c| {
+                let difference = predicted[c] - source.pixels[index][c];
+                difference * difference
+            });
+            previous = sample;
+        }
+        squared[offset % 3]
+    };
+    let len = samples.len() * 3;
+    sum(0, len, len as f32, limit, &mut value).map(|total| total / len as f32)
+}
+
 pub(super) struct SubsetSamples {
     base: Vec<[f32; 3]>,
     overlays: Vec<Vec<([f32; 3], f32)>>,
@@ -130,6 +183,122 @@ impl<'a> SlopeSupport<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounded_mse_preserves_pairwise_rounding_and_strict_thresholds() {
+        let source = Raster::blank(2048, 1, [0.3, 0.6, 0.9]);
+        let predict = |i: usize| {
+            [
+                ((i * 17) % 257) as f32 / 256.0,
+                0.5,
+                ((i * 7) % 31) as f32 / 30.0,
+            ]
+        };
+        for count in [0, 1, 2, 3, 7, 42, 43, 85, 128, 129, 513, 2048] {
+            let samples: Vec<_> = (0..count).collect();
+            let expected = paint_rgb_mse_with(&source, &samples, predict);
+            for limit in [
+                0.0,
+                f32::from_bits(expected.to_bits().saturating_sub(1)),
+                expected,
+                f32::from_bits(expected.to_bits() + 1),
+                0.05,
+                f32::INFINITY,
+            ] {
+                let actual = mse_below(&source, &samples, predict, limit);
+                assert_eq!(
+                    actual.map(f32::to_bits),
+                    (expected < limit).then_some(expected.to_bits()),
+                    "count={count}, limit={limit}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn bounded_mse_stops_before_predicting_a_proven_losing_suffix() {
+        let source = Raster::blank(1024, 1, [0.0; 3]);
+        let samples: Vec<_> = (0..1024).collect();
+        let mut calls = 0;
+        let result = mse_below(
+            &source,
+            &samples,
+            |_| {
+                calls += 1;
+                [1.0; 3]
+            },
+            0.001,
+        );
+        assert!(result.is_none());
+        assert!(calls < 128, "evaluated {calls} samples");
+    }
+
+    #[test]
+    fn shared_overlay_parameter_keeps_colour_and_opacity_exact() {
+        let stops = vec![
+            ColorStop {
+                offset: 0.0,
+                color: [0.13, 0.92, 0.23],
+            },
+            ColorStop {
+                offset: 0.4,
+                color: [0.7, 0.02, 0.58],
+            },
+            ColorStop {
+                offset: 1.0,
+                color: [0.21, 0.18, 0.92],
+            },
+        ];
+        for paint in [
+            Paint::Linear {
+                preset: LinearPreset::Fitted,
+                start: Point { x: 4.0, y: 8.0 },
+                end: Point { x: 18.0, y: 5.0 },
+                stops: stops.clone(),
+            },
+            Paint::Radial {
+                origin: RadialOrigin::Fitted,
+                center: Point { x: 7.0, y: 9.0 },
+                radius: Point { x: 12.0, y: 3.0 },
+                rotation: 0.7,
+                stops,
+            },
+            Paint::Solid {
+                color: [0.2, 0.4, 0.8],
+            },
+        ] {
+            let overlay = PaintOverlay {
+                paint: Box::new(paint),
+                opacity_stops: vec![
+                    OpacityStop {
+                        offset: 0.0,
+                        opacity: 0.8,
+                    },
+                    OpacityStop {
+                        offset: 1.0,
+                        opacity: 0.0,
+                    },
+                ],
+            };
+            for i in 0..32 * 24 {
+                let parameter = match overlay.paint.as_ref() {
+                    Paint::Linear { start, end, .. } => linear_parameter(i, 32, *start, *end),
+                    Paint::Radial {
+                        center,
+                        radius,
+                        rotation,
+                        ..
+                    } => rotated_radial_parameter(i, 32, *center, *radius, *rotation),
+                    _ => 0.0,
+                };
+                let expected = (
+                    paint_at(&overlay.paint, i, 32),
+                    interpolate_opacity(&overlay.opacity_stops, parameter),
+                );
+                assert_eq!(sample_overlay(&overlay, i, 32), expected);
+            }
+        }
+    }
 
     #[test]
     fn lazy_slope_observations_match_uncached_checks() {

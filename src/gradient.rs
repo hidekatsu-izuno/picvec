@@ -2886,16 +2886,27 @@ pub(crate) fn paint_at(paint: &Paint, index: usize, width: usize) -> [f32; 3] {
 }
 
 fn sample_overlay(overlay: &PaintOverlay, index: usize, width: usize) -> ([f32; 3], f32) {
-    let over = paint_at(&overlay.paint, index, width);
-    let parameter = match overlay.paint.as_ref() {
-        Paint::Linear { start, end, .. } => linear_parameter(index, width, *start, *end),
+    // Colour and opacity share the same parameter; evaluate geometry once.
+    let (over, parameter) = match overlay.paint.as_ref() {
+        Paint::Linear {
+            start, end, stops, ..
+        } => {
+            let parameter = linear_parameter(index, width, *start, *end);
+            (interpolate(stops, parameter), parameter)
+        }
         Paint::Radial {
             center,
             radius,
             rotation,
+            stops,
             ..
-        } => rotated_radial_parameter(index, width, *center, *radius, *rotation),
-        Paint::Solid { .. } | Paint::Layered { .. } => 0.0,
+        } => {
+            let parameter = rotated_radial_parameter(index, width, *center, *radius, *rotation);
+            (interpolate(stops, parameter), parameter)
+        }
+        Paint::Solid { .. } | Paint::Layered { .. } => {
+            (paint_at(&overlay.paint, index, width), 0.0)
+        }
     };
     let alpha = interpolate_opacity(&overlay.opacity_stops, parameter);
     (over, alpha)
@@ -3613,6 +3624,12 @@ fn fit_residual_paint(
                     }
                 }
                 for geometry in geometries {
+                    // All opacity profiles fit the same spatial basis. Keep
+                    // sample order and f64 normal-equation accumulation exact.
+                    let parameters: Vec<_> = samples
+                        .iter()
+                        .map(|&index| coupled_parameter(&geometry, index, source.width))
+                        .collect();
                     for (peak_opacity, gaussian) in [(0.55_f32, false), (0.80, false), (0.55, true)]
                     {
                         if gaussian && !preserve_shape {
@@ -3647,8 +3664,7 @@ fn fit_residual_paint(
                         }
                         let mut target = [0.0_f64; 3];
                         let mut denominator = 0.0_f64;
-                        for &index in samples {
-                            let parameter = coupled_parameter(&geometry, index, source.width);
+                        for (&index, &parameter) in samples.iter().zip(&parameters) {
                             let alpha = interpolate_opacity(&opacity_stops, parameter) as f64;
                             if alpha <= 1e-5 {
                                 continue;
@@ -3686,9 +3702,11 @@ fn fit_residual_paint(
                             let (over, alpha) = sample_overlay(&overlay, i, source.width);
                             [0, 1, 2].map(|c| under[c] * (1.0 - alpha) + over[c] * alpha)
                         };
-                        let mse = paint_rgb_mse_with(source, samples, &mut candidate_at);
-                        if best.as_ref().is_none_or(|(best_mse, _)| mse < *best_mse)
-                            && validation_samples.iter().zip(&supported).all(|(&i, cell)| {
+                        // Reject on a bounded prefix before scoring every fit
+                        // sample. The remaining gates and candidate order stay
+                        // unchanged; no sampled approximation can accept a fit.
+                        let supports =
+                            |i: usize, cell: &std::cell::OnceCell<(Oklab, f32)>, predicted| {
                                 let &(target, error) = cell.get_or_init(|| {
                                     let target = rgb_to_oklab(source.pixels[i]);
                                     let error = delta_e_ok(
@@ -3697,8 +3715,32 @@ fn fit_residual_paint(
                                     );
                                     (target, error)
                                 });
-                                delta_e_ok(target, rgb_to_oklab(candidate_at(i))) <= error + 1.0
-                            })
+                                delta_e_ok(target, rgb_to_oklab(predicted)) <= error + 1.0
+                            };
+                        if !validation_samples
+                            .iter()
+                            .zip(&supported)
+                            .take(8)
+                            .all(|(&i, cell)| supports(i, cell, candidate_at(i)))
+                        {
+                            continue;
+                        }
+                        let mse = if let Some((best_mse, _)) = &best {
+                            let Some(mse) =
+                                residual::mse_below(source, samples, &mut candidate_at, *best_mse)
+                            else {
+                                continue;
+                            };
+                            mse
+                        } else {
+                            paint_rgb_mse_with(source, samples, &mut candidate_at)
+                        };
+                        if best.as_ref().is_none_or(|(best_mse, _)| mse < *best_mse)
+                            && validation_samples
+                                .iter()
+                                .zip(&supported)
+                                .skip(8)
+                                .all(|(&i, cell)| supports(i, cell, candidate_at(i)))
                             && slopes.iter().all(|&(i, j, target, original)| {
                                 let predicted = difference(
                                     rgb_to_oklab(candidate_at(i)),
