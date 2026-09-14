@@ -120,6 +120,16 @@ The comparison script discovers the current `sample/input` files and requires
 the corresponding SVGs. It uses `rsvg-convert` and ImageMagick, with the raster
 on the left and SVG rendering on the right, both on white.
 
+The previews below display the original files at a reduced width. SVG previews
+load the SVG directly, without raster conversion; click either preview to open
+the full-size file.
+
+| Sample | Original | SVG |
+| --- | --- | --- |
+| Boy and turtle | [<img src="sample/input/boy_and_turtle.png" alt="Boy and turtle original" width="280">](sample/input/boy_and_turtle.png) | [<img src="sample/output/boy_and_turtle.svg" alt="Boy and turtle SVG" width="280">](sample/output/boy_and_turtle.svg) |
+| Car | [<img src="sample/input/car.png" alt="Car original" width="280">](sample/input/car.png) | [<img src="sample/output/car.svg" alt="Car SVG" width="280">](sample/output/car.svg) |
+| Viewport 1 | [<img src="sample/input/viewport1.jpg" alt="Viewport 1 original" width="280">](sample/input/viewport1.jpg) | [<img src="sample/output/viewport1.svg" alt="Viewport 1 SVG" width="280">](sample/output/viewport1.svg) |
+
 | Input | Editable output | Comparison | Objects | Path contours |
 | --- | --- | --- | ---: | ---: |
 | [Booster layout](sample/input/booster-layout.jpg) | [SVG](sample/output/booster-layout.svg) | [PNG](sample/comparison/booster-layout.png) | 16,445 | 24,614 |
