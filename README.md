@@ -3,7 +3,7 @@
 picvec converts raster images into editable SVG using Rust. Output consists of
 painted paths, geometric primitives and supported structural lines, with solid
 colours or linear/radial gradients. The converter uses the original image as
-its reference; it does not embed the source bitmap in the SVG.
+its reference.
 
 ## Build and convert
 
@@ -14,16 +14,14 @@ mise exec -- cargo build --release --locked
 ```
 
 The second argument is the exact SVG file to write. The converter writes it
-atomically and does not create PNG or JSON sidecars. It embeds `resvg` for
-internal rendering and uses portable `wide` SIMD; librsvg, ImageMagick and an
-external upscaler are not converter runtime dependencies.
+atomically. It embeds `resvg` for internal rendering and uses portable `wide`
+SIMD.
 
 Completion reports the dimensions, **final SVG object count**, **path contour
 count** (`subpaths`) and elapsed time. Groups and definitions are excluded from
 the object count. A compound path is one object even when it contains many
 `M`/`m` contours; the contour count makes that distinction visible. These counts
-come from the final SVG, including accepted source refinements, rather than
-from the initial raster segmentation.
+come from the final SVG, including accepted source refinements.
 
 | Option | Purpose and default |
 | --- | --- |
@@ -53,7 +51,6 @@ emitted document.
 ## Processing order
 
 All images and adaptive source refinements use the same vectorization core.
-There is no separate sparse-drawing SVG generator for `booster-layout`.
 
 1. Decode and validate the source, distinguish paint opacity from edge coverage,
    and select the base resolution.
@@ -62,7 +59,7 @@ There is no separate sparse-drawing SVG generator for `booster-layout`.
    Preserve source-supported dots, highlights, colour and opacity boundaries.
 3. Fit solid/gradient paints and merge compatible ownership before tracing.
    Narrow chromatic-rim recovery supplies ordinary ownership labels before
-   alpha partitioning; it does not append independently fitted tip overlays.
+   alpha partitioning.
 4. Construct shared boundaries and fit curves or geometric primitives. Adjacent
    faces reuse their common boundary. Authored transparency stays in paint.
 5. Determine paint order from line width, elongation and source contrast, then
@@ -75,25 +72,20 @@ There is no separate sparse-drawing SVG generator for `booster-layout`.
 7. Compose accepted refinements, discard superseded base geometry when the whole
    canvas is replaced, count the final drawing elements and write the SVG.
 
-Connected drawings are not split arbitrarily across a rectangular grid. When no
-safe local refinement core exists but background/foreground separation is supported
+When no safe local refinement core exists but background/foreground separation is supported
 by the source, the complete source can be evaluated as a candidate. Images with
 no such separation evidence retain the selected global model. This preserves one
-model for connected strokes and gradients, but can be much slower than the base conversion. A configured SVG budget limits accepted
-additional output bytes, **not** evaluation time or peak memory.
+model for connected strokes and gradients, but can be much slower than the base
+conversion. A configured SVG budget limits accepted additional output bytes.
 
 ### Transparency and visible geometry
 
-- Alpha is expressed by fill/stroke opacity or gradient-stop opacity. SVG alpha
-  masks and group opacity are not used; zero-alpha paint faces are omitted.
-- Edge coverage informs the fitted visible contour. It must not merely hide a
-  stair-stepped RGB contour behind a smoothed mask.
+- Alpha is expressed by fill/stroke opacity or gradient-stop opacity.
+- Edge coverage informs the fitted visible contour.
 - Geometric clipping may delimit adaptive source replacements or stroke outlines.
   Local colour reconstructions explicitly composite each RGBA paint and the
   completed patch before clipping, using a neutral sRGB filter and opaque boundary
-  support. This prevents the black rectangles reproduced in VS Code/Chromium;
-  CSS isolation alone was insufficient. Boundary colour matching preserves source
-  alpha instead of copying coverage errors from the coarse preview.
+  support. Boundary colour matching preserves source alpha.
 - Redundant regions should be merged before fitting. Final visibility checks
   remove contributions only when the rendered RGBA result permits it. Useful
   partial overlaps and authored translucent details remain.
@@ -124,8 +116,7 @@ additional output bytes, **not** evaluation time or peak memory.
 ## Optional x4 evaluation
 
 The Python evaluator compares a completed SVG with a Real-ESRGAN x4 reference.
-It does not feed the upscaled image back into vectorization. Models are supplied
-separately; the scripts do not download them. Transparent inputs use a white
+Models are supplied separately. Transparent inputs use a white
 evaluation background by default.
 
 See [the evaluator guide](scripts/picvec_eval/README.md) for NCNN/PyTorch setup,

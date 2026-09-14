@@ -5,31 +5,23 @@ It treats the native x4 output from `realesrgan-x4plus-anime` as the
 reference and compares it with the SVG rendered directly at the same x4
 resolution.
 
-The evaluator is deliberately separate from the Rust vectorizer:
-
-- it runs only after the SVG has been written;
-- it never edits the SVG;
-- it is not imported by the vectorizer;
-- no score or x4 raster is passed to path, region, Paint, or candidate
-  selection.
+The evaluator runs after the SVG has been written.
 
 ## Requirements
 
 Install `rsvg-convert` for this optional evaluator's SVG rasterization step.
-The Rust converter itself embeds `resvg` and does not require or invoke this
-executable. Real-ESRGAN can run through either of two independent
-evaluation-only backends:
+Real-ESRGAN can run through either of two evaluation backends:
 
 - `realesrgan-ncnn-vulkan` with its `realesrgan-x4plus-anime` model; or
 - SVGDeck's PyTorch/Spandrel loader with the official
   `RealESRGAN_x4plus_anime_6B.pth` file.
 
-The scripts do not download model files. The PyTorch entry point declares its
-runtime dependencies for `uv`; the model must still be supplied explicitly.
+Supply model files explicitly. The PyTorch entry point declares its runtime
+dependencies for `uv`.
 
 ## Run
 
-First create the SVG normally, without any x4 input:
+First create the SVG:
 
 ```bash
 mise exec -- cargo run --release --locked -- input.png output.svg
@@ -62,9 +54,7 @@ timeout 600s nice -n 10 mise x -- uv run --with spandrel==0.4.2 scripts/evaluate
 The generated reference is content-addressed under
 `.cache/picvec/realesrgan`. Its key includes the source pixels, model hash,
 device, accelerator identity, Torch/CUDA/cuDNN/Spandrel versions, precision,
-tile size, and padding. Caches made by the earlier SVGDeck-compatible v1
-namespace are intentionally not reused because those keys did not capture the
-complete inference environment.
+tile size, and padding.
 
 The x4 PNG can also be generated without running the evaluator:
 
@@ -90,8 +80,7 @@ mise x -- uv run scripts/evaluate.py \
 
 The first argument may be the original raster. If picvec resized it during
 vectorization, the evaluator reads the SVG canvas and creates the corresponding
-Lanczos processing raster as `source-processing.png`. This is evaluation-only
-and is never read by picvec.
+Lanczos processing raster as `source-processing.png` for evaluation.
 
 ## Outputs
 
@@ -142,7 +131,7 @@ The report additionally contains `detail_fidelity`, `coarse_fidelity`, and
 `pixel_fidelity`. Detail fidelity uses source-supported high-pass regions and
 the worst tile to expose erased eyes, notes, seams, and highlights. Coarse
 fidelity catches a globally warped or displaced object. Pixel fidelity is
-computed against the original raster (not the Real-ESRGAN image) after the
+computed against the original raster after the
 SVG x4 render is reduced to the original size; its main DeltaE comparison is
 between 5x5 neighbourhood means. This suppresses harmless one-pixel variation
 without any explicit boundary exemption. The same values are evaluated per
@@ -181,8 +170,8 @@ stride. They can be changed with `--worst-tile-size` and
 `--extra-edge-min-area` control the false-edge component report.
 
 The report also includes legacy diagnostics under `quality` and the new
-higher-is-better `selection` result. Complexity is measured from the SVG itself (not from the
-rendered raster): one weighted unit per segment, three per path, and two per
+higher-is-better `selection` result. Complexity is measured from the SVG itself:
+one weighted unit per segment, three per path, and two per
 gradient definition. It is normalised by the Real-ESRGAN reference edge
 pixels, so a candidate made from many tiny overlays is penalised even when its
 edge F1 is slightly higher. The score includes separate thin-line and dark-core
@@ -230,15 +219,13 @@ to visible `fill="none"` paths and is independent of element IDs.
 Continuous open strokes additionally receive a native-resolution anchor
 regularization pass: endpoints and detected corners remain fixed, while
 interior anchors may move by at most 0.5 source pixels. Each edit is retained
-only after a native render gate, and the x4/Real-ESRGAN image is never used by
-the vectorizer.
+only after a native render gate.
 The fixed clip-art profile also applies a source-only outer-silhouette trim:
 the largest foreground component is converted to a smoothed signed-distance
 contour at native resolution and fitted by bounded cubic Beziers. A background
 even-odd face owns the complete exterior of that same curve, preventing seams
-while removing external one-pixel hooks. Real-ESRGAN and the x4 image remain
-evaluation-only.
-The score is a ranking aid, not a vectorizer objective; use
+while removing external one-pixel hooks.
+The score is a ranking aid; use
 `--complexity-target-per-edge` only when comparing datasets with a deliberately
 different geometry budget.
 
