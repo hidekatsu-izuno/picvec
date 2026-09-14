@@ -1,0 +1,28 @@
+    Checking picvec v0.2.0 (/home/hidek/git/picvec)
+warning: fields `lines` and `evidence` are never read
+  --> src/paint_order.rs:37:9
+   |
+35 | pub(crate) struct Proposal {
+   |                   -------- fields in this struct
+36 |     pub ranks: Vec<usize>,
+37 |     pub lines: Vec<bool>,
+   |         ^^^^^
+38 |     pub evidence: Vec<Evidence>,
+   |         ^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `picvec` (lib) generated 1 warning
+warning: field `evidence` is never read
+  --> src/paint_order.rs:38:9
+   |
+35 | pub(crate) struct Proposal {
+   |                   -------- field in this struct
+...
+38 |     pub evidence: Vec<Evidence>,
+   |         ^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `picvec` (lib test) generated 1 warning
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.64s

@@ -1,0 +1,26 @@
+{
+  "reference_commit": "d77df52794659c0166eb72bc483cc32e49b1bb18",
+  "binary": "/tmp/picvec-generic-speed/before",
+  "binary_sha256": "6cf7f412585e740cc7cc5316858b44eabac3c3c92f1ac93b3e1251a695e7cd74",
+  "requested_threads": 0,
+  "runs": [
+    {
+      "input": "boy_and_turtle.png",
+      "seconds": 5.848027470005036,
+      "status": "ok",
+      "command": [
+        "/tmp/picvec-generic-speed/before",
+        "/home/hidek/git/picvec/sample/input/boy_and_turtle.png",
+        "/tmp/picvec-generic-speed/boy-steady/7-before/boy_and_turtle.svg",
+        "--threads",
+        "0",
+        "--verbose"
+      ],
+      "bytes": 98003,
+      "sha256": "bd6883ecd89ddb719000e0b53b973c5bf5684a8b7b81585d4ba0f64adaa8efbc",
+      "exact": true,
+      "mask_free": true,
+      "execution_threads": 10
+    }
+  ]
+}

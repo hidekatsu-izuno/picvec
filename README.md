@@ -142,6 +142,8 @@ python3 scripts/benchmark_committed_svgs.py --output-dir /tmp/picvec-sample-chec
 Use `--update-output` to replace only outputs that match the reference exactly.
 See [the SVG compatibility and timing report](docs/latest-svg-performance-2026-09-14.md)
 for the reference revision, measurements, and validation conditions.
+The subsequent [generic performance improvements and paired measurements](docs/generic-refinement-performance-2026-09-14.md)
+cover component-local residual checks and reuse of clipped render bands.
 
 ## Validation and current limitations
 

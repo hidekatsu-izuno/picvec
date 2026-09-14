@@ -1,0 +1,26 @@
+{
+  "reference_commit": "d77df52794659c0166eb72bc483cc32e49b1bb18",
+  "binary": "/tmp/picvec-generic-speed/after",
+  "binary_sha256": "6bd703b4d01db1fa9937d3d0995d5da03fc9ca96de252fa4a2b194ddd17d59ac",
+  "requested_threads": 0,
+  "runs": [
+    {
+      "input": "vectorization-stress-still-life.png",
+      "seconds": 79.49395436699706,
+      "status": "ok",
+      "command": [
+        "/tmp/picvec-generic-speed/after",
+        "/home/hidek/git/picvec/sample/input/vectorization-stress-still-life.png",
+        "/tmp/picvec-generic-speed/comparison/04-after/vectorization-stress-still-life.svg",
+        "--threads",
+        "0",
+        "--verbose"
+      ],
+      "bytes": 15213528,
+      "sha256": "369d1fb7fed9cdb7bb915e489bb60f3ea662185646fd3d527f5144b8ee71a374",
+      "exact": true,
+      "mask_free": true,
+      "execution_threads": 10
+    }
+  ]
+}

@@ -1,35 +1,17 @@
 {
-  "reference_commit": "d77df52794659c0166eb72bc483cc32e49b1bb18",
-  "binary": "/tmp/picvec-generic-speed/after",
-  "binary_sha256": "6bd703b4d01db1fa9937d3d0995d5da03fc9ca96de252fa4a2b194ddd17d59ac",
+  "reference_commit": "3fa41d2726efb77974a990666f5cd1ab28b85c5f",
+  "binary": "/home/hidek/git/picvec/target/release/picvec",
+  "binary_sha256": "6cf7f412585e740cc7cc5316858b44eabac3c3c92f1ac93b3e1251a695e7cd74",
   "requested_threads": 0,
   "runs": [
     {
-      "input": "booster-layout.jpg",
-      "seconds": 224.17601298899535,
-      "status": "ok",
-      "command": [
-        "/tmp/picvec-generic-speed/after",
-        "/home/hidek/git/picvec/sample/input/booster-layout.jpg",
-        "/tmp/picvec-generic-speed/comparison/00-after/booster-layout.svg",
-        "--threads",
-        "0",
-        "--verbose"
-      ],
-      "bytes": 8261651,
-      "sha256": "69842dfce1fbeed38177a03581448fa5e4e4496ccf0bcfa2925bda5425c8f86b",
-      "exact": true,
-      "mask_free": true,
-      "execution_threads": 10
-    },
-    {
       "input": "cliparts-6x6.png",
-      "seconds": 280.2312642600009,
+      "seconds": 285.15149013500195,
       "status": "ok",
       "command": [
-        "/tmp/picvec-generic-speed/after",
+        "/home/hidek/git/picvec/target/release/picvec",
         "/home/hidek/git/picvec/sample/input/cliparts-6x6.png",
-        "/tmp/picvec-generic-speed/comparison/01-after/cliparts-6x6.svg",
+        "/tmp/picvec-head-exact/queue10/cliparts-6x6.svg",
         "--threads",
         "0",
         "--verbose",
@@ -43,12 +25,12 @@
     },
     {
       "input": "viewport2.jpg",
-      "seconds": 125.08030284700362,
+      "seconds": 128.92107039799885,
       "status": "ok",
       "command": [
-        "/tmp/picvec-generic-speed/after",
+        "/home/hidek/git/picvec/target/release/picvec",
         "/home/hidek/git/picvec/sample/input/viewport2.jpg",
-        "/tmp/picvec-generic-speed/comparison/02-after/viewport2.svg",
+        "/tmp/picvec-head-exact/queue10/viewport2.svg",
         "--threads",
         "0",
         "--verbose"
@@ -60,13 +42,31 @@
       "execution_threads": 10
     },
     {
-      "input": "car.png",
-      "seconds": 21.392232862002857,
+      "input": "booster-layout.jpg",
+      "seconds": 236.81220388500515,
       "status": "ok",
       "command": [
-        "/tmp/picvec-generic-speed/after",
+        "/home/hidek/git/picvec/target/release/picvec",
+        "/home/hidek/git/picvec/sample/input/booster-layout.jpg",
+        "/tmp/picvec-head-exact/queue10/booster-layout.svg",
+        "--threads",
+        "0",
+        "--verbose"
+      ],
+      "bytes": 8261651,
+      "sha256": "69842dfce1fbeed38177a03581448fa5e4e4496ccf0bcfa2925bda5425c8f86b",
+      "exact": true,
+      "mask_free": true,
+      "execution_threads": 10
+    },
+    {
+      "input": "car.png",
+      "seconds": 20.15401217199542,
+      "status": "ok",
+      "command": [
+        "/home/hidek/git/picvec/target/release/picvec",
         "/home/hidek/git/picvec/sample/input/car.png",
-        "/tmp/picvec-generic-speed/comparison/03-after/car.svg",
+        "/tmp/picvec-head-exact/queue10/car.svg",
         "--threads",
         "0",
         "--verbose"
@@ -79,12 +79,12 @@
     },
     {
       "input": "vectorization-stress-still-life.png",
-      "seconds": 79.49395436699706,
+      "seconds": 79.03101688800234,
       "status": "ok",
       "command": [
-        "/tmp/picvec-generic-speed/after",
+        "/home/hidek/git/picvec/target/release/picvec",
         "/home/hidek/git/picvec/sample/input/vectorization-stress-still-life.png",
-        "/tmp/picvec-generic-speed/comparison/04-after/vectorization-stress-still-life.svg",
+        "/tmp/picvec-head-exact/queue10/vectorization-stress-still-life.svg",
         "--threads",
         "0",
         "--verbose"
@@ -96,31 +96,13 @@
       "execution_threads": 10
     },
     {
-      "input": "cliparts.png",
-      "seconds": 37.82637119699939,
-      "status": "ok",
-      "command": [
-        "/tmp/picvec-generic-speed/after",
-        "/home/hidek/git/picvec/sample/input/cliparts.png",
-        "/tmp/picvec-generic-speed/comparison/05-after/cliparts.svg",
-        "--threads",
-        "0",
-        "--verbose"
-      ],
-      "bytes": 4001531,
-      "sha256": "47c6281f943b3eb666714131bacb6750e10b3797a6136246e2148936a46db584",
-      "exact": true,
-      "mask_free": true,
-      "execution_threads": 10
-    },
-    {
       "input": "boy_and_turtle.png",
-      "seconds": 6.073982534006063,
+      "seconds": 5.515391407003335,
       "status": "ok",
       "command": [
-        "/tmp/picvec-generic-speed/after",
+        "/home/hidek/git/picvec/target/release/picvec",
         "/home/hidek/git/picvec/sample/input/boy_and_turtle.png",
-        "/tmp/picvec-generic-speed/comparison/06-after/boy_and_turtle.svg",
+        "/tmp/picvec-head-exact/queue10/boy_and_turtle.svg",
         "--threads",
         "0",
         "--verbose"
@@ -132,13 +114,31 @@
       "execution_threads": 10
     },
     {
-      "input": "viewport1.jpg",
-      "seconds": 12.321121118999145,
+      "input": "cliparts.png",
+      "seconds": 36.53417046099639,
       "status": "ok",
       "command": [
-        "/tmp/picvec-generic-speed/after",
+        "/home/hidek/git/picvec/target/release/picvec",
+        "/home/hidek/git/picvec/sample/input/cliparts.png",
+        "/tmp/picvec-head-exact/queue10/cliparts.svg",
+        "--threads",
+        "0",
+        "--verbose"
+      ],
+      "bytes": 4001531,
+      "sha256": "47c6281f943b3eb666714131bacb6750e10b3797a6136246e2148936a46db584",
+      "exact": true,
+      "mask_free": true,
+      "execution_threads": 10
+    },
+    {
+      "input": "viewport1.jpg",
+      "seconds": 12.02525415999844,
+      "status": "ok",
+      "command": [
+        "/home/hidek/git/picvec/target/release/picvec",
         "/home/hidek/git/picvec/sample/input/viewport1.jpg",
-        "/tmp/picvec-generic-speed/comparison/07-after/viewport1.svg",
+        "/tmp/picvec-head-exact/queue10/viewport1.svg",
         "--threads",
         "0",
         "--verbose"
@@ -151,12 +151,12 @@
     },
     {
       "input": "wikipedia_logo_1_0.png",
-      "seconds": 17.326231781000388,
+      "seconds": 15.901709869001934,
       "status": "ok",
       "command": [
-        "/tmp/picvec-generic-speed/after",
+        "/home/hidek/git/picvec/target/release/picvec",
         "/home/hidek/git/picvec/sample/input/wikipedia_logo_1_0.png",
-        "/tmp/picvec-generic-speed/comparison/08-after/wikipedia_logo_1_0.svg",
+        "/tmp/picvec-head-exact/queue10/wikipedia_logo_1_0.svg",
         "--threads",
         "0",
         "--verbose"

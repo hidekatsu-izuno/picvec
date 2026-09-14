@@ -356,6 +356,18 @@ pub(crate) fn validate(
         return false;
     };
     let (w, h) = (source.width, source.height);
+    // Complex geometric clips are expensive to set up in every empty band.
+    // Reuse the existing fragment renderer only when there are multiple bands
+    // and clips to cull; ordinary small/unclipped documents keep the direct
+    // renderer. Unsupported SVG contexts also keep the direct renderer.
+    let scenes = (h > 128 && (before.contains("clip-path=") || after.contains("clip-path=")))
+        .then(|| {
+            let ca = crate::svg_fragments::Cache::new(before)?;
+            let cb = crate::svg_fragments::Cache::new(after)?;
+            Some((ca.scene(before)?, cb.scene(after)?))
+        })
+        .flatten();
+
     let mut boundary = vec![false; w * h];
     for i in 0..w * h {
         let (x, y) = (i % w, i / w);
@@ -397,8 +409,13 @@ pub(crate) fn validate(
                         0.0,
                         -((y * scale) as f32),
                     );
-                    resvg::render(&a, transform, &mut pa.as_mut());
-                    resvg::render(&b, transform, &mut pb.as_mut());
+                    if let Some((a, b)) = &scenes {
+                        a.render(scale, y, &mut pa);
+                        b.render(scale, y, &mut pb);
+                    } else {
+                        resvg::render(&a, transform, &mut pa.as_mut());
+                        resvg::render(&b, transform, &mut pb.as_mut());
+                    }
                     let mut tile_increase = vec![0.0_f64; w.div_ceil(64)];
                     for (k, (p, q)) in pa.pixels().iter().zip(pb.pixels()).enumerate() {
                         if p == q {
@@ -486,6 +503,34 @@ mod tests {
             before.replace(".4", ".2"),
         ];
         for after in changed {
+            let mut expected = Summary::default();
+            let result = validate_reference(before, &after, &source, None, &labels, &mut expected);
+            for threads in [1, 4] {
+                let pool = rayon::ThreadPoolBuilder::new()
+                    .num_threads(threads)
+                    .build()
+                    .unwrap();
+                let mut actual = Summary::default();
+                let accepted =
+                    pool.install(|| validate(before, &after, &source, None, &labels, &mut actual));
+                assert_eq!(accepted, result);
+                assert_eq!(format!("{actual:?}"), format!("{expected:?}"));
+            }
+        }
+    }
+
+    #[test]
+    fn clipped_bands_match_full_renderer_with_translucent_and_thin_paint() {
+        let source = Raster::blank(137, 193, [0.5; 3]);
+        let labels: Vec<u32> = (0..137 * 193).map(|i| (i % 137 >= 65) as u32).collect();
+        let before = r##"<svg xmlns="http://www.w3.org/2000/svg" width="137" height="193"><defs><clipPath id="c"><path d="M1 1H135V191H1Z"/></clipPath></defs><rect width="137" height="193" fill="#808080"/><g clip-path="url(#c)"><path d="M2 3H20V12H2Z M110 179H130V188H110Z" fill="#555" fill-opacity=".4"/><path d="M3 96H133" fill="none" stroke="#123" stroke-width=".3" stroke-opacity=".6"/></g></svg>"##;
+        for after in [
+            before.to_owned(),
+            before.replace("#808080", "#818181"),
+            before.replace("#808080", "#eeeeee"),
+            before.replace(".4", ".2"),
+            before.replace("M3 96H133", "M3 97H133"),
+        ] {
             let mut expected = Summary::default();
             let result = validate_reference(before, &after, &source, None, &labels, &mut expected);
             for threads in [1, 4] {

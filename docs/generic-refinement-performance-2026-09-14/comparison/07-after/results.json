@@ -1,0 +1,26 @@
+{
+  "reference_commit": "d77df52794659c0166eb72bc483cc32e49b1bb18",
+  "binary": "/tmp/picvec-generic-speed/after",
+  "binary_sha256": "6bd703b4d01db1fa9937d3d0995d5da03fc9ca96de252fa4a2b194ddd17d59ac",
+  "requested_threads": 0,
+  "runs": [
+    {
+      "input": "viewport1.jpg",
+      "seconds": 12.321121118999145,
+      "status": "ok",
+      "command": [
+        "/tmp/picvec-generic-speed/after",
+        "/home/hidek/git/picvec/sample/input/viewport1.jpg",
+        "/tmp/picvec-generic-speed/comparison/07-after/viewport1.svg",
+        "--threads",
+        "0",
+        "--verbose"
+      ],
+      "bytes": 3088435,
+      "sha256": "148e5ec79b4927522f4a9e8def214061326fd098bfc6b97b64ed5a25a09afd8f",
+      "exact": true,
+      "mask_free": true,
+      "execution_threads": 10
+    }
+  ]
+}

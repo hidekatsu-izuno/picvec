@@ -1,5 +1,7 @@
 # Git最新版SVGに一致する性能修正
 
+この修正を土台にした後続の[汎用的な性能改善と交互比較](generic-refinement-performance-2026-09-14.md)も参照。以下の測定値はその改善前の記録。
+
 品質基準は作業開始時のHEAD `3fa41d2726efb77974a990666f5cd1ab28b85c5f` に登録された `sample/output/*.svg` 全9枚。旧版415d64fの出力への巻き戻しは取りやめ、最新版の塗り・透明度・幾何処理を維持する。再生成結果は見た目だけでなくファイルの全バイトで比較し、完全一致したものだけを `sample/output` に反映する。
 
 最終候補はrelease/diagnostics、自動スレッド数（この環境では10）、各画像300秒の上限で逐次実行する。計測中に別の変換・ビルド・テストを重ねない。6×6のみ `--remove-chroma-key-background` を指定する。CPUなどの条件は[環境JSON](latest-svg-performance-2026-09-14/environment.json)、基準SVGのハッシュは[expected.json](latest-svg-performance-2026-09-14/expected.json)に記録した。

@@ -1,0 +1,154 @@
+[
+  {
+    "input": "boy_and_turtle.png",
+    "seconds": 6.464720265001233,
+    "status": "ok",
+    "command": [
+      "/tmp/picvec-generic-speed/before",
+      "/home/hidek/git/picvec/sample/input/boy_and_turtle.png",
+      "/tmp/picvec-generic-speed/boy-steady/0-before/boy_and_turtle.svg",
+      "--threads",
+      "0",
+      "--verbose"
+    ],
+    "bytes": 98003,
+    "sha256": "bd6883ecd89ddb719000e0b53b973c5bf5684a8b7b81585d4ba0f64adaa8efbc",
+    "exact": true,
+    "mask_free": true,
+    "execution_threads": 10,
+    "version": "before"
+  },
+  {
+    "input": "boy_and_turtle.png",
+    "seconds": 5.902909289005038,
+    "status": "ok",
+    "command": [
+      "/tmp/picvec-generic-speed/after",
+      "/home/hidek/git/picvec/sample/input/boy_and_turtle.png",
+      "/tmp/picvec-generic-speed/boy-steady/1-after/boy_and_turtle.svg",
+      "--threads",
+      "0",
+      "--verbose"
+    ],
+    "bytes": 98003,
+    "sha256": "bd6883ecd89ddb719000e0b53b973c5bf5684a8b7b81585d4ba0f64adaa8efbc",
+    "exact": true,
+    "mask_free": true,
+    "execution_threads": 10,
+    "version": "after"
+  },
+  {
+    "input": "boy_and_turtle.png",
+    "seconds": 5.831744754003012,
+    "status": "ok",
+    "command": [
+      "/tmp/picvec-generic-speed/after",
+      "/home/hidek/git/picvec/sample/input/boy_and_turtle.png",
+      "/tmp/picvec-generic-speed/boy-steady/2-after/boy_and_turtle.svg",
+      "--threads",
+      "0",
+      "--verbose"
+    ],
+    "bytes": 98003,
+    "sha256": "bd6883ecd89ddb719000e0b53b973c5bf5684a8b7b81585d4ba0f64adaa8efbc",
+    "exact": true,
+    "mask_free": true,
+    "execution_threads": 10,
+    "version": "after"
+  },
+  {
+    "input": "boy_and_turtle.png",
+    "seconds": 5.803620225997292,
+    "status": "ok",
+    "command": [
+      "/tmp/picvec-generic-speed/before",
+      "/home/hidek/git/picvec/sample/input/boy_and_turtle.png",
+      "/tmp/picvec-generic-speed/boy-steady/3-before/boy_and_turtle.svg",
+      "--threads",
+      "0",
+      "--verbose"
+    ],
+    "bytes": 98003,
+    "sha256": "bd6883ecd89ddb719000e0b53b973c5bf5684a8b7b81585d4ba0f64adaa8efbc",
+    "exact": true,
+    "mask_free": true,
+    "execution_threads": 10,
+    "version": "before"
+  },
+  {
+    "input": "boy_and_turtle.png",
+    "seconds": 5.796465375002299,
+    "status": "ok",
+    "command": [
+      "/tmp/picvec-generic-speed/before",
+      "/home/hidek/git/picvec/sample/input/boy_and_turtle.png",
+      "/tmp/picvec-generic-speed/boy-steady/4-before/boy_and_turtle.svg",
+      "--threads",
+      "0",
+      "--verbose"
+    ],
+    "bytes": 98003,
+    "sha256": "bd6883ecd89ddb719000e0b53b973c5bf5684a8b7b81585d4ba0f64adaa8efbc",
+    "exact": true,
+    "mask_free": true,
+    "execution_threads": 10,
+    "version": "before"
+  },
+  {
+    "input": "boy_and_turtle.png",
+    "seconds": 5.837355789997673,
+    "status": "ok",
+    "command": [
+      "/tmp/picvec-generic-speed/after",
+      "/home/hidek/git/picvec/sample/input/boy_and_turtle.png",
+      "/tmp/picvec-generic-speed/boy-steady/5-after/boy_and_turtle.svg",
+      "--threads",
+      "0",
+      "--verbose"
+    ],
+    "bytes": 98003,
+    "sha256": "bd6883ecd89ddb719000e0b53b973c5bf5684a8b7b81585d4ba0f64adaa8efbc",
+    "exact": true,
+    "mask_free": true,
+    "execution_threads": 10,
+    "version": "after"
+  },
+  {
+    "input": "boy_and_turtle.png",
+    "seconds": 5.90633256000001,
+    "status": "ok",
+    "command": [
+      "/tmp/picvec-generic-speed/after",
+      "/home/hidek/git/picvec/sample/input/boy_and_turtle.png",
+      "/tmp/picvec-generic-speed/boy-steady/6-after/boy_and_turtle.svg",
+      "--threads",
+      "0",
+      "--verbose"
+    ],
+    "bytes": 98003,
+    "sha256": "bd6883ecd89ddb719000e0b53b973c5bf5684a8b7b81585d4ba0f64adaa8efbc",
+    "exact": true,
+    "mask_free": true,
+    "execution_threads": 10,
+    "version": "after"
+  },
+  {
+    "input": "boy_and_turtle.png",
+    "seconds": 5.848027470005036,
+    "status": "ok",
+    "command": [
+      "/tmp/picvec-generic-speed/before",
+      "/home/hidek/git/picvec/sample/input/boy_and_turtle.png",
+      "/tmp/picvec-generic-speed/boy-steady/7-before/boy_and_turtle.svg",
+      "--threads",
+      "0",
+      "--verbose"
+    ],
+    "bytes": 98003,
+    "sha256": "bd6883ecd89ddb719000e0b53b973c5bf5684a8b7b81585d4ba0f64adaa8efbc",
+    "exact": true,
+    "mask_free": true,
+    "execution_threads": 10,
+    "version": "before"
+  }
+]

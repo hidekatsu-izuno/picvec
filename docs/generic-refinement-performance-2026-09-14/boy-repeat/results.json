@@ -1,0 +1,78 @@
+[
+  {
+    "input": "boy_and_turtle.png",
+    "seconds": 6.416772085998673,
+    "status": "ok",
+    "command": [
+      "/tmp/picvec-generic-speed/after",
+      "/home/hidek/git/picvec/sample/input/boy_and_turtle.png",
+      "/tmp/picvec-generic-speed/boy-repeat/0-after/boy_and_turtle.svg",
+      "--threads",
+      "0",
+      "--verbose"
+    ],
+    "bytes": 98003,
+    "sha256": "bd6883ecd89ddb719000e0b53b973c5bf5684a8b7b81585d4ba0f64adaa8efbc",
+    "exact": true,
+    "mask_free": true,
+    "execution_threads": 10,
+    "version": "after"
+  },
+  {
+    "input": "boy_and_turtle.png",
+    "seconds": 5.877433177003695,
+    "status": "ok",
+    "command": [
+      "/tmp/picvec-generic-speed/before",
+      "/home/hidek/git/picvec/sample/input/boy_and_turtle.png",
+      "/tmp/picvec-generic-speed/boy-repeat/1-before/boy_and_turtle.svg",
+      "--threads",
+      "0",
+      "--verbose"
+    ],
+    "bytes": 98003,
+    "sha256": "bd6883ecd89ddb719000e0b53b973c5bf5684a8b7b81585d4ba0f64adaa8efbc",
+    "exact": true,
+    "mask_free": true,
+    "execution_threads": 10,
+    "version": "before"
+  },
+  {
+    "input": "boy_and_turtle.png",
+    "seconds": 5.873817512998357,
+    "status": "ok",
+    "command": [
+      "/tmp/picvec-generic-speed/before",
+      "/home/hidek/git/picvec/sample/input/boy_and_turtle.png",
+      "/tmp/picvec-generic-speed/boy-repeat/2-before/boy_and_turtle.svg",
+      "--threads",
+      "0",
+      "--verbose"
+    ],
+    "bytes": 98003,
+    "sha256": "bd6883ecd89ddb719000e0b53b973c5bf5684a8b7b81585d4ba0f64adaa8efbc",
+    "exact": true,
+    "mask_free": true,
+    "execution_threads": 10,
+    "version": "before"
+  },
+  {
+    "input": "boy_and_turtle.png",
+    "seconds": 5.899475949998305,
+    "status": "ok",
+    "command": [
+      "/tmp/picvec-generic-speed/after",
+      "/home/hidek/git/picvec/sample/input/boy_and_turtle.png",
+      "/tmp/picvec-generic-speed/boy-repeat/3-after/boy_and_turtle.svg",
+      "--threads",
+      "0",
+      "--verbose"
+    ],
+    "bytes": 98003,
+    "sha256": "bd6883ecd89ddb719000e0b53b973c5bf5684a8b7b81585d4ba0f64adaa8efbc",
+    "exact": true,
+    "mask_free": true,
+    "execution_threads": 10,
+    "version": "after"
+  }
+]

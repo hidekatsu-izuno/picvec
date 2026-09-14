@@ -1,0 +1,280 @@
+picvec stage load-resize: 0.006s (total 0.006s)
+picvec stage edge-roles: 1.616s (total 1.622s)
+picvec stage structural-analysis: 0.402s (total 2.024s)
+picvec stage perceptual-smoothing: 0.763s (total 2.787s)
+picvec segmentation substage setup: 0.022s
+picvec segmentation substage palette: 0.070s (12208 histogram cells, 386 colours)
+picvec segmentation substage initial-components: 0.027s
+picvec segmentation substage small-components: 0.241s
+picvec segmentation substage compact: 0.019s
+picvec segmentation substage antialias: 0.204s
+picvec segmentation substage finalize: 0.054s (total 0.637s)
+picvec stage segmentation: 0.910s (total 3.697s)
+picvec stage boundary-regularization: 0.192s (total 3.889s)
+picvec stage paint-aware-merge: 0.331s (total 4.220s)
+picvec stage thin-paint-ownership: 0.124s (total 4.344s)
+picvec stage paint-topology-preservation: 1.582s (total 5.926s)
+picvec paint substage setup: 0.025s
+picvec paint substage initial: 0.518s (primary solid 0, gain-bound solid 200, low-range solid 17, model search 501)
+picvec paint substage harmonize: 0.652s
+picvec paint substage couple: 0.052s
+picvec stage paint-fitting: 1.284s (total 7.210s)
+picvec layered merge candidates: considered 1913, evidence 1626, seam 34, layered 54, nonfinite 0, face 119, combined 86, accepted 48
+picvec stage source-supported-paint-merge: 2.075s (total 9.285s)
+picvec stage exact-paint-merge: 0.023s (total 9.308s)
+picvec stage layered-paint-simplification: 0.174s (total 9.482s)
+picvec stage residual-shape-refinement: 0.067s (total 9.549s)
+picvec stage interior-shading: 1.451s (total 11.000s)
+picvec stage face-alpha: 0.005s (total 11.005s)
+picvec stage hierarchical-topology: 0.003s (total 11.008s)
+picvec stage shared-geometry: 6.916s (total 17.924s)
+picvec stage paint-preview: 0.043s (total 17.967s)
+picvec structural substage ownership: 0.767s
+picvec structural substage outline-proposals: 0.210s
+picvec structural substage outline-validation: 0.090s
+picvec structural substage colour-patches: 0.130s
+picvec stage structural-selection: 1.197s (total 19.164s)
+picvec stage paint-order-validation: 1.632s (total 20.796s)
+picvec stage covered-hole-simplification: 0.655s (total 21.451s)
+picvec stage final-svg: 0.431s (total 21.883s)
+{
+  "input_width": 1254,
+  "input_height": 1254,
+  "processing_width": 1254,
+  "processing_height": 1254,
+  "output": "/tmp/picvec-generic-speed/comparison/03-before/car.svg",
+  "elapsed_seconds": 22.037435941,
+  "execution_threads": 10,
+  "complexity": {
+    "probe_width": 1024,
+    "probe_height": 1024,
+    "probe_region_count": 47420,
+    "probe_region_density": 45223.234,
+    "edge_density": 0.10312939,
+    "normalized_region_density": 0.7537206,
+    "normalized_edge_density": 0.572941,
+    "complexity": 0.6904477,
+    "target_pixels": 1752358.1,
+    "selected_dimension": 1254
+  },
+  "source_alpha": {
+    "detected": false,
+    "quantization_bits": 0,
+    "mask_paths": 0,
+    "removed_regions": 0
+  },
+  "chroma_key": {
+    "enabled": false,
+    "detected": false,
+    "border_coverage": 0.0,
+    "removed_regions": 0
+  },
+  "adaptive_refinement": {
+    "enabled": true,
+    "source_scale": 1.0,
+    "proposed_regions": 0,
+    "candidate_regions": 0,
+    "prefiltered_for_complexity": 0,
+    "evaluated_regions": 0,
+    "parallel_jobs": 0,
+    "accepted_regions": 0,
+    "rejected_for_quality": 0,
+    "rejected_for_complexity": 0,
+    "rejected_for_budget": 0,
+    "baseline_mean_delta_e": 0.0,
+    "refined_mean_delta_e": 0.0,
+    "estimated_global_delta_e_reduction": 0.0,
+    "added_svg_bytes": 0
+  },
+  "hierarchical_topology": {
+    "nodes": 159007,
+    "leaves": 114864,
+    "unit_leaves": 65090,
+    "represented_pixels": 1572516,
+    "compression_ratio": 13.690243
+  },
+  "edge_roles": {
+    "skeleton_pixels": 25011,
+    "edge_chain_count": 717,
+    "edge_chain_samples": 25299,
+    "boundary_pixels": 6906,
+    "ridge_role_pixels": 4061,
+    "ridge_on_boundary_pixels": 11084,
+    "unknown_pixels": 1030,
+    "visible_ridge_pixels": 3114,
+    "visible_ridge_coverage_pixels": 6241,
+    "dark_boundary_pixels": 27073,
+    "shading_pixels": 2191,
+    "face_barrier_pixels": 19598,
+    "visible_ridge_graph_edges": 58,
+    "visible_ridge_graph_edges_before_join": 77,
+    "dark_boundary_graph_edges": 257,
+    "wide_dark_outline_graph_edges_before_join": 157,
+    "dark_boundary_candidates": 195,
+    "dark_ridge_candidates": 319,
+    "dark_ridge_supported": 87,
+    "profile_ridge_candidates": 240,
+    "profile_ridge_extensions": 147,
+    "visible_ridge_graph_length": 2148.5603,
+    "visible_ridge_median_width": 1.751731,
+    "visible_ridge_width_weighted_length": 3816.32,
+    "dark_boundary_graph_length": 8141.762,
+    "dark_boundary_median_width": 1.2,
+    "gradient_threshold": 0.43718946,
+    "ridge_threshold": 0.65
+  },
+  "segmentation": {
+    "graph_edges": 3142524,
+    "coherent_domains": 5,
+    "coherent_regions_removed": 10,
+    "histogram_cells": 12208,
+    "palette_colours": 386,
+    "initial_regions": 56781,
+    "raw_regions": 4399,
+    "corrected_regions": 2398,
+    "regularized_regions": 699,
+    "merged_regions": 690,
+    "forced_small_region_merges": 282808,
+    "micro_region_merges": 1706,
+    "micro_pixels_reassigned": 61786,
+    "compatible_region_merges": 56186,
+    "paint_aware_region_merge_proposals": 20,
+    "paint_aware_region_merges": 20,
+    "exact_paint_region_merges": 17,
+    "source_supported_paint_merges": 48,
+    "preserved_independent_materials": 941,
+    "antialias_pixels": 26993,
+    "core_sampled_regions": 427,
+    "antialias_split_regions": 2002,
+    "boundary_regularization_passes": 1,
+    "boundary_regularization_moved_pixels": 2022,
+    "boundary_regularization_source_edges": 44347,
+    "thin_paint_examined": 385,
+    "thin_paint_protected": 87,
+    "thin_paint_refined": 57,
+    "thin_paint_preflight_rejected": 52,
+    "thin_paint_reassigned_pixels": 240,
+    "thin_paint_removed_regions": 26,
+    "adaptive_patch_candidate_faces": 140,
+    "adaptive_patch_split_faces": 57,
+    "adaptive_patch_added_regions": 120,
+    "effective_minimum_area": 256,
+    "local_minimum_area": 65,
+    "local_median_area": 256,
+    "local_maximum_area": 256
+  },
+  "structural": {
+    "source_coverage_pixels": 35524,
+    "source_line_pixels": 75248,
+    "skeleton_pixels": 3085,
+    "stroke_count": 129,
+    "underpainted_pixels": 9027,
+    "antialias_unmixed_pixels": 2909,
+    "silhouette_fill_count": 0,
+    "residual_legacy_strokes": 36,
+    "visible_ridge_strokes": 20,
+    "boundary_profile_strokes": 73,
+    "recovered_boundary_strokes": 0,
+    "recovered_alpha_boundary_strokes": 0,
+    "suppressed_ellipse_retraces": 0,
+    "aligned_ellipse_strokes": 1
+  },
+  "ownership": {
+    "structural_strokes": 129,
+    "paint_overlap": 0.3,
+    "overlap_is_underpaint": false,
+    "overlap_is_fill_geometry": true
+  },
+  "paint_order": {
+    "line_regions": 19,
+    "proposed_constraints": 108,
+    "conflicting_constraints": 0,
+    "changed_ranks": 608,
+    "accepted": false,
+    "source_error_increase": 0.0,
+    "rejection": "interior changed at 4x"
+  },
+  "gradients": {
+    "solid_regions": 261,
+    "linear_regions": 217,
+    "radial_regions": 199,
+    "layered_regions": 13,
+    "overlay_layers": 29,
+    "fitted_direction_linear_regions": 197,
+    "fitted_focus_radial_regions": 186,
+    "coupled_linear_regions": 36,
+    "source_supported_paint_merges": 48,
+    "source_supported_boundary_edges_removed": 1520,
+    "maximum_stops": 5,
+    "primary_gate_active": false,
+    "primary_solid_regions": 0,
+    "provable_solid_regions": 217,
+    "gain_bound_solid_regions": 200,
+    "low_range_solid_regions": 17,
+    "gradient_model_search_regions": 501,
+    "coherent_field_regions": 37,
+    "full_fit_regions": 718
+  },
+  "geometry": {
+    "regions": 690,
+    "loops": 870,
+    "empty_regions": 0,
+    "empty_region_pixels": 0,
+    "largest_empty_region": 0,
+    "source_boundary_edges": 155802,
+    "shared_boundary_edges": 75393,
+    "simplified_vertices": 8655,
+    "cubic_segments": 7520,
+    "line_segments": 368,
+    "rectangles": 0,
+    "circles": 0,
+    "ellipses": 0,
+    "covered_holes_removed": 34,
+    "shared_loop_fallbacks": 0,
+    "shared_loop_missing_edges": 0,
+    "shared_loop_discontinuities": 0,
+    "shared_loop_invalid_areas": 0,
+    "adaptive_optimal_polygons": 365,
+    "continuity_faired_masters": 1188,
+    "fitted_ellipse_contours": 8,
+    "fitted_bezier_contours": 6,
+    "regularized_corner_excursions": 8,
+    "regularized_corner_vertices": 216,
+    "shared_curve_downgrades": 0
+  },
+  "optimization": {
+    "input_regions": 690,
+    "primitive_regions": 0,
+    "path_regions": 690,
+    "shared_gradient_regions": 0
+  },
+  "svg": {
+    "objects": 853,
+    "path_subpaths": 952,
+    "path_elements": 795,
+    "rect_elements": 0,
+    "circle_elements": 0,
+    "ellipse_elements": 0,
+    "line_elements": 58,
+    "linear_gradients": 240,
+    "radial_gradients": 236,
+    "structural_strokes": 120,
+    "structural_color_patches": 0,
+    "gradient_stops": 1690,
+    "linear_cubics_to_lines": 67,
+    "redundant_segments_removed": 572,
+    "arc_segments": 779,
+    "merged_arc_segments": 0,
+    "paint_paths_merged": 0,
+    "paint_batches": 0,
+    "alpha_mask_paths": 0,
+    "outline_bands": 2,
+    "outline_color_patches": 18,
+    "outline_paint_regions_removed": 1,
+    "outline_structural_strokes_removed": 9,
+    "invisible_elements_removed": 11,
+    "invisible_strokes_removed": 0,
+    "bytes": 804985
+  }
+}
+wrote /tmp/picvec-generic-speed/comparison/03-before/car.svg (1254x1254, 853 objects, 952 subpaths, 22.037s)

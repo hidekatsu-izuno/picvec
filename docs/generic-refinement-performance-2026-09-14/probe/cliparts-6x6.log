@@ -1,0 +1,2387 @@
+picvec stage load-resize: 0.001s (total 0.001s)
+picvec stage edge-roles: 3.029s (total 3.030s)
+picvec stage structural-analysis: 0.528s (total 3.558s)
+picvec stage perceptual-smoothing: 0.858s (total 4.416s)
+picvec segmentation substage setup: 0.034s
+picvec segmentation substage palette: 0.338s (81633 histogram cells, 2759 colours)
+picvec segmentation substage initial-components: 0.108s
+picvec segmentation substage small-components: 1.433s
+picvec segmentation substage compact: 0.041s
+picvec segmentation substage antialias: 0.343s
+picvec segmentation substage finalize: 0.074s (total 2.372s)
+picvec stage segmentation: 3.149s (total 7.565s)
+picvec stage boundary-regularization: 0.285s (total 7.850s)
+picvec stage paint-aware-merge: 0.398s (total 8.248s)
+picvec stage thin-paint-ownership: 0.682s (total 8.930s)
+picvec stage paint-topology-preservation: 2.177s (total 11.107s)
+picvec paint substage setup: 0.031s
+picvec paint substage initial: 1.957s (primary solid 0, gain-bound solid 3198, low-range solid 33, model search 2593)
+picvec paint substage harmonize: 0.428s
+picvec paint substage couple: 0.073s
+picvec stage paint-fitting: 2.595s (total 13.702s)
+picvec layered merge candidates: considered 12286, evidence 11947, seam 153, layered 41, nonfinite 0, face 94, combined 62, accepted 30
+picvec stage source-supported-paint-merge: 1.391s (total 15.093s)
+picvec stage exact-paint-merge: 0.043s (total 15.135s)
+picvec stage layered-paint-simplification: 1.241s (total 16.376s)
+picvec stage residual-shape-refinement: 1.768s (total 18.144s)
+picvec stage interior-shading: 1.617s (total 19.761s)
+picvec stage face-alpha: 0.015s (total 19.775s)
+picvec stage hierarchical-topology: 0.007s (total 19.783s)
+geometry 1414x1414 topology: 0.638s
+geometry 1414x1414 adaptive: 14.487s
+geometry 1414x1414 tasks: 0.067s
+geometry 1414x1414 fit-chains: 0.909s
+picvec stage shared-geometry: 16.708s (total 36.491s)
+picvec stage paint-preview: 0.185s (total 36.676s)
+selection 1414x1414 residual: 4.215s
+selection 1414x1414 classify: 0.017s
+selection 1414x1414 profiles: 0.045s
+selection 1414x1414 skeleton: 0.119s
+selection 1414x1414 overlap1: 0.018s
+selection 1414x1414 intersections: 0.008s
+selection 1414x1414 continuations: 0.233s
+selection 1414x1414 connections: 0.029s
+selection 1414x1414 junctions: 0.015s
+selection 1414x1414 extension: 0.006s
+selection 1414x1414 tangents: 0.001s
+selection 1414x1414 fit: 0.236s
+picvec structural substage ownership: 4.978s
+picvec structural substage outline-proposals: 0.933s
+picvec structural substage outline-validation: 0.444s
+picvec structural substage colour-patches: 1.572s
+picvec stage structural-selection: 7.927s (total 44.603s)
+picvec stage paint-order-validation: 26.998s (total 71.601s)
+picvec stage covered-hole-simplification: 60.152s (total 131.753s)
+picvec stage final-svg: 4.848s (total 136.601s)
+picvec adaptive candidate 4328 872 464 752: error=11.1084 model_cost=2.7915 priority=6.6486
+picvec adaptive candidate 1703 904 746 675: error=10.6300 model_cost=2.7635 priority=6.3945
+picvec adaptive candidate 4195 1707 725 761: error=10.7638 model_cost=3.0568 priority=6.1565
+picvec adaptive candidate 1702 1716 736 732: error=10.4260 model_cost=2.8710 priority=6.1532
+picvec adaptive candidate 2561 909 698 671: error=8.3605 model_cost=1.9814 priority=5.9394
+picvec adaptive candidate 87 904 680 676: error=8.8815 model_cost=2.2389 priority=5.9357
+picvec adaptive candidate 1772 2551 585 739: error=9.5190 model_cost=2.7076 priority=5.7850
+picvec adaptive candidate 3378 3520 702 298: error=9.1594 model_cost=2.5378 priority=5.7496
+picvec adaptive candidate 912 4118 700 663: error=9.1123 model_cost=2.5971 priority=5.6543
+picvec adaptive candidate 4205 2590 712 681: error=8.7459 model_cost=2.4209 priority=5.6211
+picvec adaptive candidate 2548 1703 732 744: error=9.3408 model_cost=2.8050 priority=5.5772
+picvec adaptive candidate 4188 4125 711 685: error=8.2904 model_cost=2.2287 priority=5.5533
+picvec adaptive candidate 3418 1685 609 784: error=9.8807 model_cost=3.2298 priority=5.4979
+picvec adaptive candidate 2596 2538 601 782: error=10.5028 model_cost=3.8252 priority=5.3700
+picvec adaptive candidate 4267 3331 576 685: error=8.3130 model_cost=2.4466 priority=5.3147
+picvec adaptive candidate 4284 114 538 696: error=7.7861 model_cost=2.2078 priority=5.2401
+picvec adaptive candidate 2630 114 548 694: error=7.1847 model_cost=1.9146 priority=5.1924
+picvec adaptive candidate 881 1726 743 704: error=8.4832 model_cost=2.7210 priority=5.1428
+picvec adaptive candidate 3403 912 685 668: error=7.4794 model_cost=2.1342 priority=5.1198
+picvec adaptive candidate 84 4089 690 725: error=8.1689 model_cost=2.5476 priority=5.1180
+picvec adaptive candidate 2539 4106 681 707: error=7.8674 model_cost=2.3843 priority=5.0951
+picvec adaptive candidate 995 3319 518 690: error=7.3399 model_cost=2.1416 priority=5.0156
+picvec adaptive candidate 3463 114 553 694: error=7.5884 model_cost=2.3112 priority=4.9915
+picvec adaptive candidate 165 114 548 694: error=7.0293 model_cost=2.0331 priority=4.9299
+picvec adaptive candidate 987 114 544 694: error=6.7488 model_cost=1.8865 priority=4.9136
+picvec adaptive candidate 160 1686 558 760: error=8.4634 model_cost=2.9797 priority=4.9030
+picvec adaptive candidate 1807 114 550 694: error=6.8074 model_cost=1.9790 priority=4.8390
+picvec adaptive candidate 87 2584 680 689: error=7.0405 model_cost=2.1431 priority=4.8093
+picvec adaptive candidate 3383 2592 689 709: error=6.9824 model_cost=2.1359 priority=4.7776
+picvec adaptive candidate 3393 4092 641 710: error=7.0351 model_cost=2.2418 priority=4.6986
+picvec adaptive candidate 927 910 677 670: error=6.5068 model_cost=2.0596 priority=4.5339
+picvec adaptive candidate 1755 4138 625 672: error=5.9151 model_cost=1.7387 priority=4.4859
+picvec adaptive candidate 73 3325 690 672: error=7.3554 model_cost=2.7931 priority=4.4011
+picvec adaptive candidate 1749 3325 632 679: error=6.1278 model_cost=2.2295 priority=4.1039
+picvec adaptive candidate 975 2552 564 716: error=6.3679 model_cost=2.5263 priority=4.0064
+picvec adaptive candidate 2529 3392 717 540: error=6.3952 model_cost=2.6353 priority=3.9395
+picvec adaptive processing: source 4320 864 480 768, processing 480 768
+picvec adaptive processing: source 3370 3512 718 314, processing 718 314
+picvec adaptive processing: source 1693 894 766 695, processing 766 695
+picvec stage load-resize: 0.002s (total 0.002s)
+picvec stage load-resize: 0.001s (total 0.001s)
+picvec stage load-resize: 0.002s (total 0.002s)
+picvec adaptive processing: source 77 894 700 696, processing 700 696
+picvec adaptive processing: source 902 4108 720 683, processing 720 683
+picvec stage load-resize: 0.002s (total 0.002s)
+picvec adaptive processing: source 1691 1705 758 754, processing 758 754
+picvec stage load-resize: 0.001s (total 0.001s)
+picvec adaptive processing: source 4195 2580 732 701, processing 732 701
+picvec adaptive processing: source 4184 1696 747 783, processing 747 783
+picvec stage load-resize: 0.001s (total 0.001s)
+picvec stage load-resize: 0.003s (total 0.003s)
+picvec adaptive processing: source 1763 2542 603 757, processing 603 757
+picvec stage load-resize: 0.004s (total 0.004s)
+picvec adaptive processing: source 2551 899 718 691, processing 718 691
+picvec stage load-resize: 0.005s (total 0.005s)
+picvec stage load-resize: 0.002s (total 0.002s)
+picvec stage edge-roles: 0.674s (total 0.675s)
+picvec stage structural-analysis: 0.212s (total 0.887s)
+picvec stage edge-roles: 1.114s (total 1.116s)
+picvec stage perceptual-smoothing: 0.394s (total 1.280s)
+picvec segmentation substage setup: 0.016s
+picvec stage edge-roles: 1.297s (total 1.302s)
+picvec segmentation substage palette: 0.061s (16101 histogram cells, 978 colours)
+picvec segmentation substage initial-components: 0.006s
+picvec stage edge-roles: 1.371s (total 1.372s)
+picvec stage edge-roles: 1.436s (total 1.439s)
+picvec segmentation substage small-components: 0.092s
+picvec stage edge-roles: 1.455s (total 1.456s)
+picvec segmentation substage compact: 0.007s
+picvec segmentation substage antialias: 0.059s
+picvec stage edge-roles: 1.522s (total 1.524s)
+picvec segmentation substage finalize: 0.021s (total 0.263s)
+picvec stage structural-analysis: 0.443s (total 1.559s)
+picvec stage edge-roles: 1.654s (total 1.656s)
+picvec stage edge-roles: 1.727s (total 1.731s)
+picvec stage edge-roles: 1.737s (total 1.740s)
+picvec stage segmentation: 0.514s (total 1.794s)
+picvec stage boundary-regularization: 0.105s (total 1.899s)
+picvec stage structural-analysis: 0.601s (total 1.903s)
+picvec stage paint-aware-merge: 0.166s (total 2.065s)
+picvec stage structural-analysis: 0.698s (total 2.071s)
+picvec stage structural-analysis: 0.556s (total 2.079s)
+picvec stage thin-paint-ownership: 0.094s (total 2.158s)
+picvec stage perceptual-smoothing: 0.654s (total 2.212s)
+picvec stage structural-analysis: 0.787s (total 2.226s)
+picvec segmentation substage setup: 0.027s
+picvec stage structural-analysis: 0.796s (total 2.253s)
+picvec segmentation substage palette: 0.100s (21475 histogram cells, 1166 colours)
+picvec segmentation substage initial-components: 0.017s
+picvec segmentation substage small-components: 0.118s
+picvec segmentation substage compact: 0.012s
+picvec stage structural-analysis: 0.883s (total 2.539s)
+picvec segmentation substage antialias: 0.118s
+picvec stage structural-analysis: 0.898s (total 2.629s)
+picvec segmentation substage finalize: 0.037s (total 0.428s)
+picvec stage perceptual-smoothing: 0.757s (total 2.660s)
+picvec stage structural-analysis: 0.959s (total 2.699s)
+picvec segmentation substage setup: 0.041s
+picvec stage paint-topology-preservation: 0.588s (total 2.746s)
+picvec paint substage setup: 0.016s
+picvec segmentation substage palette: 0.080s (17570 histogram cells, 767 colours)
+picvec segmentation substage initial-components: 0.026s
+picvec stage perceptual-smoothing: 0.805s (total 2.884s)
+picvec stage perceptual-smoothing: 0.837s (total 2.907s)
+picvec segmentation substage setup: 0.034s
+picvec segmentation substage setup: 0.035s
+picvec segmentation substage small-components: 0.177s
+picvec segmentation substage compact: 0.017s
+picvec segmentation substage palette: 0.068s (14391 histogram cells, 778 colours)
+picvec segmentation substage initial-components: 0.018s
+picvec segmentation substage palette: 0.120s (26144 histogram cells, 1264 colours)
+picvec stage perceptual-smoothing: 0.808s (total 3.033s)
+picvec segmentation substage initial-components: 0.026s
+picvec segmentation substage setup: 0.035s
+picvec stage segmentation: 0.891s (total 3.103s)
+picvec stage perceptual-smoothing: 0.850s (total 3.103s)
+picvec segmentation substage small-components: 0.098s
+picvec segmentation substage compact: 0.013s
+picvec segmentation substage setup: 0.034s
+picvec segmentation substage palette: 0.086s (18279 histogram cells, 1113 colours)
+picvec segmentation substage initial-components: 0.014s
+picvec segmentation substage antialias: 0.173s
+picvec segmentation substage palette: 0.083s (17782 histogram cells, 952 colours)
+picvec segmentation substage finalize: 0.055s (total 0.570s)
+picvec stage boundary-regularization: 0.137s (total 3.240s)
+picvec segmentation substage initial-components: 0.019s
+picvec segmentation substage small-components: 0.184s
+picvec segmentation substage compact: 0.022s
+picvec segmentation substage small-components: 0.095s
+picvec segmentation substage compact: 0.010s
+picvec segmentation substage antialias: 0.168s
+picvec segmentation substage finalize: 0.043s (total 0.443s)
+picvec segmentation substage small-components: 0.109s
+picvec segmentation substage compact: 0.013s
+picvec stage perceptual-smoothing: 0.904s (total 3.443s)
+picvec segmentation substage antialias: 0.177s
+picvec stage paint-aware-merge: 0.226s (total 3.466s)
+picvec segmentation substage setup: 0.039s
+picvec segmentation substage antialias: 0.215s
+picvec segmentation substage finalize: 0.053s (total 0.471s)
+picvec segmentation substage finalize: 0.049s (total 0.650s)
+picvec segmentation substage antialias: 0.172s
+picvec segmentation substage finalize: 0.050s (total 0.482s)
+picvec segmentation substage palette: 0.128s (27922 histogram cells, 1305 colours)
+picvec stage perceptual-smoothing: 0.981s (total 3.610s)
+picvec stage thin-paint-ownership: 0.153s (total 3.619s)
+picvec segmentation substage initial-components: 0.035s
+picvec segmentation substage setup: 0.039s
+picvec stage perceptual-smoothing: 0.960s (total 3.659s)
+picvec segmentation substage setup: 0.040s
+picvec segmentation substage palette: 0.168s (32897 histogram cells, 1592 colours)
+picvec paint substage initial: 1.080s (primary solid 0, gain-bound solid 95, low-range solid 7, model search 216)
+picvec segmentation substage initial-components: 0.027s
+picvec segmentation substage small-components: 0.215s
+picvec segmentation substage compact: 0.020s
+picvec segmentation substage palette: 0.190s (37278 histogram cells, 1779 colours)
+picvec segmentation substage initial-components: 0.045s
+picvec stage segmentation: 0.932s (total 3.965s)
+picvec stage segmentation: 1.351s (total 4.011s)
+picvec segmentation substage antialias: 0.194s
+picvec stage segmentation: 1.015s (total 4.118s)
+picvec segmentation substage finalize: 0.057s (total 0.689s)
+picvec segmentation substage small-components: 0.283s
+picvec segmentation substage compact: 0.020s
+picvec stage boundary-regularization: 0.196s (total 4.161s)
+picvec stage segmentation: 1.268s (total 4.175s)
+picvec stage boundary-regularization: 0.195s (total 4.206s)
+picvec segmentation substage small-components: 0.297s
+picvec segmentation substage compact: 0.019s
+picvec stage boundary-regularization: 0.193s (total 4.312s)
+picvec paint substage harmonize: 0.465s
+picvec stage boundary-regularization: 0.176s (total 4.351s)
+picvec segmentation substage antialias: 0.206s
+picvec paint substage couple: 0.071s
+picvec stage paint-fitting: 1.656s (total 4.402s)
+picvec segmentation substage finalize: 0.064s (total 0.807s)
+picvec segmentation substage antialias: 0.189s
+picvec segmentation substage finalize: 0.064s (total 0.844s)
+picvec stage paint-aware-merge: 0.427s (total 4.588s)
+picvec stage segmentation: 1.801s (total 4.685s)
+picvec stage thin-paint-ownership: 0.168s (total 4.756s)
+picvec stage segmentation: 1.350s (total 4.793s)
+picvec stage boundary-regularization: 0.201s (total 4.886s)
+picvec stage paint-aware-merge: 0.561s (total 4.912s)
+picvec stage paint-aware-merge: 0.604s (total 4.915s)
+picvec stage paint-aware-merge: 0.726s (total 4.932s)
+picvec stage boundary-regularization: 0.257s (total 5.050s)
+picvec stage thin-paint-ownership: 0.237s (total 5.153s)
+picvec stage thin-paint-ownership: 0.260s (total 5.192s)
+picvec stage thin-paint-ownership: 0.314s (total 5.227s)
+picvec stage segmentation: 1.677s (total 5.288s)
+picvec stage paint-topology-preservation: 1.678s (total 5.298s)
+picvec paint substage setup: 0.027s
+picvec layered merge candidates: considered 825, evidence 742, seam 9, layered 12, nonfinite 0, face 29, combined 33, accepted 12
+picvec stage segmentation: 1.700s (total 5.359s)
+picvec stage source-supported-paint-merge: 0.963s (total 5.365s)
+picvec stage exact-paint-merge: 0.008s (total 5.373s)
+picvec stage paint-aware-merge: 0.519s (total 5.405s)
+picvec stage layered-paint-simplification: 0.073s (total 5.445s)
+picvec stage residual-shape-refinement: 0.062s (total 5.507s)
+picvec stage boundary-regularization: 0.258s (total 5.546s)
+picvec stage boundary-regularization: 0.236s (total 5.595s)
+picvec stage thin-paint-ownership: 0.277s (total 5.682s)
+picvec stage paint-aware-merge: 0.759s (total 5.810s)
+picvec stage interior-shading: 0.533s (total 6.040s)
+picvec stage face-alpha: 0.003s (total 6.043s)
+picvec stage hierarchical-topology: 0.001s (total 6.044s)
+picvec stage thin-paint-ownership: 0.261s (total 6.071s)
+geometry 718x314 topology: 0.040s
+picvec stage paint-aware-merge: 1.045s (total 6.590s)
+picvec stage paint-aware-merge: 1.026s (total 6.621s)
+picvec stage paint-topology-preservation: 2.092s (total 6.847s)
+picvec stage thin-paint-ownership: 0.285s (total 6.875s)
+picvec paint substage setup: 0.043s
+picvec stage thin-paint-ownership: 0.591s (total 7.212s)
+picvec stage paint-topology-preservation: 2.107s (total 7.334s)
+picvec stage paint-topology-preservation: 1.661s (total 7.342s)
+picvec paint substage setup: 0.034s
+picvec paint substage setup: 0.042s
+picvec stage paint-topology-preservation: 2.253s (total 7.405s)
+picvec paint substage setup: 0.039s
+picvec paint substage initial: 2.201s (primary solid 0, gain-bound solid 109, low-range solid 12, model search 346)
+picvec stage paint-topology-preservation: 2.688s (total 7.880s)
+picvec paint substage setup: 0.033s
+picvec stage paint-topology-preservation: 2.111s (total 8.182s)
+picvec paint substage setup: 0.036s
+geometry 718x314 adaptive: 2.326s
+geometry 718x314 tasks: 0.006s
+picvec paint substage initial: 1.655s (primary solid 0, gain-bound solid 67, low-range solid 15, model search 317)
+geometry 718x314 fit-chains: 0.379s
+picvec stage shared-geometry: 2.803s (total 8.847s)
+picvec stage paint-preview: 0.019s (total 8.866s)
+selection 718x314 residual: 0.043s
+selection 718x314 classify: 0.000s
+selection 718x314 profiles: 0.011s
+selection 718x314 skeleton: 0.016s
+selection 718x314 overlap1: 0.000s
+selection 718x314 intersections: 0.004s
+selection 718x314 continuations: 0.010s
+selection 718x314 connections: 0.006s
+selection 718x314 junctions: 0.007s
+selection 718x314 extension: 0.000s
+selection 718x314 tangents: 0.000s
+selection 718x314 fit: 0.002s
+picvec structural substage ownership: 0.101s
+picvec structural substage outline-proposals: 0.000s
+picvec structural substage outline-validation: 0.000s
+picvec structural substage colour-patches: 0.055s
+picvec stage structural-selection: 0.157s (total 9.023s)
+picvec paint substage initial: 1.653s (primary solid 0, gain-bound solid 88, low-range solid 18, model search 307)
+picvec stage paint-topology-preservation: 2.324s (total 9.200s)
+picvec stage paint-order-validation: 0.196s (total 9.219s)
+picvec paint substage setup: 0.041s
+picvec stage covered-hole-simplification: 0.183s (total 9.402s)
+picvec paint substage initial: 2.082s (primary solid 0, gain-bound solid 97, low-range solid 14, model search 300)
+picvec stage final-svg: 0.080s (total 9.483s)
+picvec stage paint-topology-preservation: 2.859s (total 10.071s)
+picvec paint substage harmonize: 1.501s
+picvec paint substage initial: 2.726s (primary solid 0, gain-bound solid 137, low-range solid 16, model search 543)
+picvec paint substage setup: 0.040s
+picvec paint substage couple: 0.131s
+picvec stage paint-fitting: 3.381s (total 10.228s)
+picvec paint substage harmonize: 3.009s
+picvec paint substage couple: 0.162s
+picvec stage paint-fitting: 5.447s (total 10.745s)
+picvec paint substage initial: 3.156s (primary solid 0, gain-bound solid 52, low-range solid 9, model search 435)
+picvec paint substage harmonize: 2.711s
+picvec paint substage couple: 0.079s
+picvec stage paint-fitting: 4.537s (total 11.943s)
+picvec adaptive evaluated 3378 3520 702 298: baseline=PerceptualScore { mean_delta_e: 4.2444706, p90_delta_e: 12.390707, missing_edge_fraction: 0.76437527, combined: 9.159421 } refined=PerceptualScore { mean_delta_e: 1.202273, p90_delta_e: 2.362761, missing_edge_fraction: 0.3731085, combined: 2.6054528 } boundary_matches=true bytes=206346
+picvec adaptive processing: source 2537 1692 754 766, processing 754 766
+picvec stage load-resize: 0.000s (total 0.000s)
+picvec paint substage harmonize: 2.945s
+picvec paint substage initial: 4.342s (primary solid 0, gain-bound solid 220, low-range solid 16, model search 551)
+picvec paint substage couple: 0.142s
+picvec stage paint-fitting: 5.251s (total 12.586s)
+picvec paint substage harmonize: 2.942s
+picvec paint substage couple: 0.111s
+picvec stage paint-fitting: 5.879s (total 13.221s)
+picvec stage edge-roles: 1.697s (total 1.698s)
+picvec paint substage initial: 4.838s (primary solid 0, gain-bound solid 305, low-range solid 19, model search 669)
+picvec stage structural-analysis: 0.895s (total 2.593s)
+picvec layered merge candidates: considered 1227, evidence 1035, seam 18, layered 41, nonfinite 0, face 99, combined 53, accepted 22
+picvec stage source-supported-paint-merge: 4.094s (total 14.839s)
+picvec stage exact-paint-merge: 0.011s (total 14.850s)
+picvec paint substage initial: 4.864s (primary solid 0, gain-bound solid 400, low-range solid 15, model search 729)
+picvec stage layered-paint-simplification: 0.300s (total 15.151s)
+picvec paint substage harmonize: 4.349s
+picvec stage residual-shape-refinement: 0.531s (total 15.682s)
+picvec paint substage couple: 0.251s
+picvec stage paint-fitting: 7.855s (total 15.736s)
+picvec stage perceptual-smoothing: 0.996s (total 3.589s)
+picvec layered merge candidates: considered 1091, evidence 943, seam 32, layered 27, nonfinite 0, face 68, combined 34, accepted 14
+picvec stage source-supported-paint-merge: 3.197s (total 15.783s)
+picvec stage exact-paint-merge: 0.013s (total 15.796s)
+picvec segmentation substage setup: 0.040s
+picvec stage layered-paint-simplification: 0.130s (total 15.926s)
+picvec segmentation substage palette: 0.144s (30698 histogram cells, 1477 colours)
+picvec segmentation substage initial-components: 0.038s
+picvec stage residual-shape-refinement: 0.077s (total 16.004s)
+picvec segmentation substage small-components: 0.234s
+picvec segmentation substage compact: 0.019s
+picvec layered merge candidates: considered 1108, evidence 942, seam 30, layered 26, nonfinite 0, face 74, combined 42, accepted 20
+picvec stage source-supported-paint-merge: 4.476s (total 16.419s)
+picvec segmentation substage antialias: 0.195s
+picvec stage exact-paint-merge: 0.014s (total 16.433s)
+picvec segmentation substage finalize: 0.065s (total 0.736s)
+picvec stage layered-paint-simplification: 0.088s (total 16.521s)
+picvec stage residual-shape-refinement: 0.032s (total 16.552s)
+picvec stage segmentation: 1.411s (total 5.000s)
+picvec stage boundary-regularization: 0.236s (total 5.236s)
+picvec layered merge candidates: considered 1816, evidence 1526, seam 90, layered 38, nonfinite 0, face 86, combined 87, accepted 27
+picvec stage source-supported-paint-merge: 4.208s (total 17.429s)
+picvec stage exact-paint-merge: 0.020s (total 17.449s)
+picvec stage interior-shading: 1.817s (total 17.499s)
+picvec stage face-alpha: 0.004s (total 17.503s)
+picvec stage hierarchical-topology: 0.001s (total 17.505s)
+picvec stage layered-paint-simplification: 0.057s (total 17.506s)
+picvec stage interior-shading: 1.530s (total 17.533s)
+picvec stage face-alpha: 0.005s (total 17.539s)
+picvec stage hierarchical-topology: 0.002s (total 17.540s)
+picvec stage residual-shape-refinement: 0.049s (total 17.555s)
+geometry 480x768 topology: 0.122s
+geometry 700x696 topology: 0.121s
+picvec stage interior-shading: 1.473s (total 18.025s)
+picvec stage face-alpha: 0.008s (total 18.033s)
+picvec stage hierarchical-topology: 0.002s (total 18.035s)
+geometry 732x701 topology: 0.112s
+picvec paint substage harmonize: 5.627s
+picvec stage paint-aware-merge: 0.953s (total 6.189s)
+picvec paint substage couple: 0.276s
+picvec stage paint-fitting: 10.350s (total 18.532s)
+picvec paint substage harmonize: 4.452s
+picvec stage thin-paint-ownership: 0.252s (total 6.441s)
+picvec stage interior-shading: 1.357s (total 18.912s)
+picvec stage face-alpha: 0.006s (total 18.918s)
+picvec paint substage couple: 0.325s
+picvec stage paint-fitting: 9.718s (total 18.917s)
+picvec stage hierarchical-topology: 0.002s (total 18.920s)
+geometry 720x683 topology: 0.153s
+picvec layered merge candidates: considered 1045, evidence 893, seam 24, layered 30, nonfinite 0, face 51, combined 48, accepted 29
+picvec stage source-supported-paint-merge: 9.624s (total 19.852s)
+picvec stage exact-paint-merge: 0.015s (total 19.867s)
+picvec stage layered-paint-simplification: 0.291s (total 20.158s)
+picvec stage residual-shape-refinement: 0.121s (total 20.279s)
+picvec paint substage harmonize: 5.402s
+picvec paint substage couple: 0.392s
+picvec stage paint-fitting: 10.774s (total 20.845s)
+picvec layered merge candidates: considered 1414, evidence 1093, seam 92, layered 60, nonfinite 0, face 124, combined 72, accepted 33
+picvec stage source-supported-paint-merge: 5.206s (total 20.941s)
+picvec stage exact-paint-merge: 0.014s (total 20.955s)
+picvec stage paint-topology-preservation: 2.428s (total 8.869s)
+picvec paint substage setup: 0.041s
+picvec stage interior-shading: 0.870s (total 21.149s)
+picvec stage face-alpha: 0.006s (total 21.154s)
+picvec stage hierarchical-topology: 0.003s (total 21.157s)
+geometry 718x691 topology: 0.094s
+picvec stage layered-paint-simplification: 1.123s (total 22.078s)
+picvec stage residual-shape-refinement: 1.821s (total 23.899s)
+geometry 700x696 adaptive: 7.046s
+geometry 700x696 tasks: 0.017s
+picvec layered merge candidates: considered 2538, evidence 2203, seam 80, layered 76, nonfinite 0, face 157, combined 75, accepted 23
+picvec stage source-supported-paint-merge: 5.886s (total 24.803s)
+picvec stage exact-paint-merge: 0.019s (total 24.823s)
+picvec stage layered-paint-simplification: 0.303s (total 25.126s)
+picvec layered merge candidates: considered 2073, evidence 1695, seam 86, layered 66, nonfinite 0, face 166, combined 95, accepted 31
+picvec stage source-supported-paint-merge: 6.648s (total 25.180s)
+picvec stage exact-paint-merge: 0.017s (total 25.198s)
+picvec paint substage initial: 4.238s (primary solid 0, gain-bound solid 204, low-range solid 15, model search 582)
+picvec stage residual-shape-refinement: 0.664s (total 25.790s)
+geometry 480x768 adaptive: 8.308s
+geometry 480x768 tasks: 0.019s
+geometry 700x696 fit-chains: 1.759s
+picvec stage shared-geometry: 9.080s (total 26.620s)
+picvec stage paint-preview: 0.035s (total 26.655s)
+selection 700x696 residual: 0.123s
+selection 700x696 classify: 0.001s
+geometry 720x683 adaptive: 7.667s
+selection 700x696 profiles: 0.023s
+selection 700x696 skeleton: 0.016s
+geometry 720x683 tasks: 0.020s
+selection 700x696 overlap1: 0.000s
+picvec stage layered-paint-simplification: 1.625s (total 26.822s)
+selection 700x696 intersections: 0.008s
+selection 700x696 continuations: 0.007s
+picvec stage interior-shading: 2.931s (total 26.829s)
+selection 700x696 connections: 0.004s
+selection 700x696 junctions: 0.011s
+selection 700x696 extension: 0.000s
+selection 700x696 tangents: 0.000s
+picvec stage face-alpha: 0.015s (total 26.845s)
+selection 700x696 fit: 0.002s
+picvec structural substage ownership: 0.196s
+picvec stage hierarchical-topology: 0.002s (total 26.847s)
+picvec structural substage outline-proposals: 0.002s
+picvec structural substage outline-validation: 0.000s
+picvec structural substage colour-patches: 0.095s
+picvec stage structural-selection: 0.293s (total 26.947s)
+geometry 603x757 topology: 0.138s
+geometry 480x768 fit-chains: 1.150s
+picvec stage shared-geometry: 9.721s (total 27.226s)
+picvec stage paint-order-validation: 0.288s (total 27.236s)
+geometry 732x701 adaptive: 9.033s
+geometry 732x701 tasks: 0.017s
+picvec stage paint-preview: 0.039s (total 27.265s)
+picvec layered merge candidates: considered 2901, evidence 2473, seam 94, layered 76, nonfinite 0, face 181, combined 109, accepted 44
+picvec stage source-supported-paint-merge: 6.457s (total 27.302s)
+picvec stage exact-paint-merge: 0.025s (total 27.328s)
+selection 480x768 residual: 0.219s
+selection 480x768 classify: 0.001s
+selection 480x768 profiles: 0.022s
+selection 480x768 skeleton: 0.040s
+selection 480x768 overlap1: 0.001s
+selection 480x768 intersections: 0.006s
+selection 480x768 continuations: 0.013s
+selection 480x768 connections: 0.006s
+selection 480x768 junctions: 0.012s
+selection 480x768 extension: 0.000s
+selection 480x768 tangents: 0.000s
+picvec stage covered-hole-simplification: 0.417s (total 27.653s)
+selection 480x768 fit: 0.083s
+picvec structural substage ownership: 0.406s
+picvec stage final-svg: 0.083s (total 27.736s)
+picvec structural substage outline-proposals: 0.123s
+picvec structural substage outline-validation: 0.085s
+picvec stage layered-paint-simplification: 0.620s (total 27.948s)
+picvec structural substage colour-patches: 0.128s
+picvec stage structural-selection: 0.759s (total 28.024s)
+geometry 718x691 adaptive: 6.888s
+geometry 718x691 tasks: 0.014s
+picvec stage paint-order-validation: 0.373s (total 28.397s)
+geometry 720x683 fit-chains: 1.654s
+picvec stage shared-geometry: 9.675s (total 28.595s)
+picvec stage paint-preview: 0.061s (total 28.655s)
+picvec stage residual-shape-refinement: 0.747s (total 28.694s)
+selection 720x683 residual: 0.212s
+selection 720x683 classify: 0.001s
+selection 720x683 profiles: 0.020s
+geometry 732x701 fit-chains: 1.662s
+selection 720x683 skeleton: 0.035s
+selection 720x683 overlap1: 0.001s
+selection 720x683 intersections: 0.008s
+selection 720x683 continuations: 0.012s
+selection 720x683 connections: 0.008s
+selection 720x683 junctions: 0.018s
+selection 720x683 extension: 0.001s
+selection 720x683 tangents: 0.000s
+picvec stage shared-geometry: 10.964s (total 29.000s)
+selection 720x683 fit: 0.044s
+picvec structural substage ownership: 0.363s
+picvec structural substage outline-proposals: 0.005s
+picvec structural substage outline-validation: 0.000s
+picvec stage paint-preview: 0.039s (total 29.039s)
+picvec stage interior-shading: 3.288s (total 29.079s)
+picvec stage face-alpha: 0.008s (total 29.086s)
+picvec stage hierarchical-topology: 0.003s (total 29.089s)
+picvec paint substage harmonize: 3.736s
+picvec structural substage colour-patches: 0.185s
+picvec stage structural-selection: 0.554s (total 29.209s)
+selection 732x701 residual: 0.185s
+selection 732x701 classify: 0.002s
+selection 732x701 profiles: 0.023s
+selection 732x701 skeleton: 0.019s
+selection 732x701 overlap1: 0.001s
+selection 732x701 intersections: 0.008s
+selection 732x701 continuations: 0.009s
+selection 732x701 connections: 0.009s
+selection 732x701 junctions: 0.022s
+selection 732x701 extension: 0.000s
+selection 732x701 tangents: 0.000s
+geometry 747x783 topology: 0.202s
+selection 732x701 fit: 0.057s
+picvec structural substage ownership: 0.336s
+geometry 718x691 fit-chains: 1.190s
+picvec paint substage couple: 0.303s
+picvec stage paint-fitting: 8.392s (total 17.261s)
+picvec stage shared-geometry: 8.336s (total 29.493s)
+picvec stage paint-preview: 0.037s (total 29.530s)
+picvec stage covered-hole-simplification: 1.162s (total 29.559s)
+picvec structural substage outline-proposals: 0.236s
+selection 718x691 residual: 0.122s
+selection 718x691 classify: 0.001s
+selection 718x691 profiles: 0.024s
+picvec structural substage outline-validation: 0.079s
+selection 718x691 skeleton: 0.019s
+selection 718x691 overlap1: 0.001s
+selection 718x691 intersections: 0.007s
+selection 718x691 continuations: 0.012s
+selection 718x691 connections: 0.006s
+selection 718x691 junctions: 0.017s
+selection 718x691 extension: 0.000s
+selection 718x691 tangents: 0.000s
+picvec stage paint-order-validation: 0.554s (total 29.763s)
+selection 718x691 fit: 0.025s
+picvec structural substage ownership: 0.234s
+picvec structural substage colour-patches: 0.112s
+picvec stage structural-selection: 0.764s (total 29.803s)
+picvec structural substage outline-proposals: 0.263s
+picvec stage final-svg: 0.527s (total 30.086s)
+picvec structural substage outline-validation: 0.067s
+picvec structural substage colour-patches: 0.116s
+picvec stage structural-selection: 0.680s (total 30.210s)
+picvec stage paint-order-validation: 0.566s (total 30.368s)
+picvec stage covered-hole-simplification: 0.849s (total 30.612s)
+picvec stage final-svg: 0.112s (total 30.724s)
+picvec stage paint-order-validation: 0.617s (total 30.828s)
+picvec adaptive evaluated 4328 872 464 752: baseline=PerceptualScore { mean_delta_e: 5.1810675, p90_delta_e: 15.676727, missing_edge_fraction: 0.8354049, combined: 11.108385 } refined=PerceptualScore { mean_delta_e: 1.697622, p90_delta_e: 2.7617223, missing_edge_fraction: 0.2700565, combined: 2.6787882 } boundary_matches=true bytes=424815
+picvec adaptive processing: source 4178 4115 731 705, processing 731 705
+picvec stage load-resize: 0.001s (total 0.001s)
+picvec stage residual-shape-refinement: 4.467s (total 31.289s)
+picvec stage covered-hole-simplification: 1.328s (total 31.696s)
+picvec stage covered-hole-simplification: 1.011s (total 31.839s)
+picvec stage edge-roles: 1.353s (total 1.354s)
+picvec stage final-svg: 0.551s (total 32.247s)
+picvec stage final-svg: 0.517s (total 32.355s)
+picvec stage structural-analysis: 0.643s (total 1.997s)
+picvec stage interior-shading: 4.276s (total 32.970s)
+picvec stage face-alpha: 0.008s (total 32.978s)
+picvec stage hierarchical-topology: 0.003s (total 32.981s)
+geometry 758x754 topology: 0.195s
+geometry 603x757 adaptive: 6.476s
+geometry 603x757 tasks: 0.018s
+picvec adaptive evaluated 87 904 680 676: baseline=PerceptualScore { mean_delta_e: 3.988487, p90_delta_e: 12.251256, missing_edge_fraction: 0.7287234, combined: 8.881493 } refined=PerceptualScore { mean_delta_e: 1.2851443, p90_delta_e: 1.8463461, missing_edge_fraction: 0.26010638, combined: 2.0971725 } boundary_matches=true bytes=327306
+picvec adaptive processing: source 3409 1676 627 802, processing 627 802
+picvec stage load-resize: 0.001s (total 0.001s)
+picvec layered merge candidates: considered 2125, evidence 1744, seam 92, layered 67, nonfinite 0, face 142, combined 105, accepted 42
+picvec stage perceptual-smoothing: 0.895s (total 2.892s)
+picvec stage source-supported-paint-merge: 4.325s (total 21.585s)
+picvec stage exact-paint-merge: 0.019s (total 21.604s)
+picvec segmentation substage setup: 0.033s
+picvec segmentation substage palette: 0.132s (26349 histogram cells, 1481 colours)
+picvec segmentation substage initial-components: 0.022s
+picvec segmentation substage small-components: 0.164s
+picvec segmentation substage compact: 0.010s
+picvec segmentation substage antialias: 0.150s
+picvec stage layered-paint-simplification: 0.527s (total 22.131s)
+picvec segmentation substage finalize: 0.049s (total 0.560s)
+picvec stage interior-shading: 3.049s (total 34.338s)
+picvec stage face-alpha: 0.010s (total 34.348s)
+picvec stage hierarchical-topology: 0.005s (total 34.353s)
+geometry 766x695 topology: 0.176s
+picvec stage edge-roles: 1.349s (total 1.350s)
+picvec stage segmentation: 1.178s (total 4.070s)
+picvec stage residual-shape-refinement: 0.825s (total 22.956s)
+picvec stage boundary-regularization: 0.221s (total 4.291s)
+picvec adaptive evaluated 4205 2590 712 681: baseline=PerceptualScore { mean_delta_e: 3.8828988, p90_delta_e: 12.090997, missing_edge_fraction: 0.72072417, combined: 8.745875 } refined=PerceptualScore { mean_delta_e: 1.3017021, p90_delta_e: 2.2651129, missing_edge_fraction: 0.3170262, combined: 2.4428897 } boundary_matches=true bytes=371744
+picvec adaptive processing: source 2587 2529 619 800, processing 619 800
+picvec stage load-resize: 0.000s (total 0.000s)
+geometry 603x757 fit-chains: 2.088s
+picvec stage structural-analysis: 0.752s (total 2.102s)
+picvec stage shared-geometry: 8.892s (total 35.739s)
+picvec stage paint-aware-merge: 0.636s (total 4.926s)
+picvec stage paint-preview: 0.059s (total 35.798s)
+picvec adaptive evaluated 912 4118 700 663: baseline=PerceptualScore { mean_delta_e: 4.1470256, p90_delta_e: 12.696511, missing_edge_fraction: 0.7225028, combined: 9.112274 } refined=PerceptualScore { mean_delta_e: 1.5053718, p90_delta_e: 2.9074721, missing_edge_fraction: 0.32154882, combined: 2.8050528 } boundary_matches=true bytes=576499
+picvec adaptive processing: source 4258 3322 594 703, processing 594 703
+picvec stage load-resize: 0.000s (total 0.000s)
+selection 603x757 residual: 0.120s
+selection 603x757 classify: 0.001s
+selection 603x757 profiles: 0.024s
+selection 603x757 skeleton: 0.024s
+selection 603x757 overlap1: 0.001s
+selection 603x757 intersections: 0.007s
+selection 603x757 continuations: 0.009s
+selection 603x757 connections: 0.007s
+selection 603x757 junctions: 0.017s
+selection 603x757 extension: 0.000s
+selection 603x757 tangents: 0.000s
+picvec stage thin-paint-ownership: 0.232s (total 5.159s)
+selection 603x757 fit: 0.011s
+picvec structural substage ownership: 0.223s
+picvec structural substage outline-proposals: 0.007s
+picvec structural substage outline-validation: 0.000s
+picvec structural substage colour-patches: 0.152s
+picvec stage structural-selection: 0.382s (total 36.180s)
+picvec stage perceptual-smoothing: 0.894s (total 2.997s)
+picvec segmentation substage setup: 0.038s
+picvec stage paint-order-validation: 0.528s (total 36.708s)
+picvec segmentation substage palette: 0.193s (34781 histogram cells, 1661 colours)
+picvec segmentation substage initial-components: 0.025s
+picvec stage edge-roles: 1.069s (total 1.070s)
+picvec stage edge-roles: 1.454s (total 1.454s)
+picvec segmentation substage small-components: 0.321s
+picvec segmentation substage compact: 0.015s
+geometry 747x783 adaptive: 7.857s
+geometry 747x783 tasks: 0.030s
+picvec stage structural-analysis: 0.346s (total 1.416s)
+picvec segmentation substage antialias: 0.149s
+picvec segmentation substage finalize: 0.048s (total 0.789s)
+picvec stage covered-hole-simplification: 0.691s (total 37.399s)
+picvec stage structural-analysis: 0.532s (total 1.986s)
+picvec stage final-svg: 0.119s (total 37.517s)
+picvec stage perceptual-smoothing: 0.703s (total 2.118s)
+picvec segmentation substage setup: 0.031s
+picvec stage paint-topology-preservation: 2.098s (total 7.257s)
+picvec stage interior-shading: 3.005s (total 25.961s)
+picvec paint substage setup: 0.035s
+picvec stage face-alpha: 0.023s (total 25.984s)
+picvec stage hierarchical-topology: 0.004s (total 25.988s)
+picvec segmentation substage palette: 0.125s (27109 histogram cells, 1136 colours)
+picvec segmentation substage initial-components: 0.025s
+picvec stage segmentation: 1.742s (total 4.739s)
+picvec stage perceptual-smoothing: 0.879s (total 2.866s)
+picvec segmentation substage small-components: 0.193s
+picvec segmentation substage compact: 0.015s
+geometry 754x766 topology: 0.178s
+picvec segmentation substage setup: 0.043s
+picvec stage boundary-regularization: 0.190s (total 4.929s)
+picvec segmentation substage palette: 0.102s (20779 histogram cells, 976 colours)
+picvec segmentation substage antialias: 0.126s
+picvec segmentation substage initial-components: 0.036s
+picvec segmentation substage finalize: 0.037s (total 0.561s)
+picvec segmentation substage small-components: 0.260s
+picvec segmentation substage compact: 0.024s
+picvec segmentation substage antialias: 0.242s
+geometry 747x783 fit-chains: 1.837s
+picvec segmentation substage finalize: 0.049s (total 0.757s)
+picvec stage segmentation: 1.146s (total 3.265s)
+picvec stage shared-geometry: 10.163s (total 39.252s)
+picvec stage boundary-regularization: 0.154s (total 3.418s)
+picvec stage paint-preview: 0.079s (total 39.331s)
+picvec stage paint-aware-merge: 0.993s (total 5.923s)
+picvec stage paint-aware-merge: 0.348s (total 3.767s)
+picvec stage segmentation: 1.429s (total 4.294s)
+picvec stage thin-paint-ownership: 0.380s (total 6.303s)
+picvec stage boundary-regularization: 0.211s (total 4.505s)
+picvec stage thin-paint-ownership: 0.376s (total 4.143s)
+selection 747x783 residual: 0.874s
+selection 747x783 classify: 0.004s
+selection 747x783 profiles: 0.035s
+selection 747x783 skeleton: 0.050s
+selection 747x783 overlap1: 0.005s
+selection 747x783 intersections: 0.009s
+selection 747x783 continuations: 0.017s
+selection 747x783 connections: 0.010s
+selection 747x783 junctions: 0.022s
+selection 747x783 extension: 0.001s
+selection 747x783 tangents: 0.000s
+selection 747x783 fit: 0.089s
+picvec structural substage ownership: 1.119s
+picvec structural substage outline-proposals: 0.004s
+picvec structural substage outline-validation: 0.000s
+picvec structural substage colour-patches: 0.219s
+picvec stage structural-selection: 1.342s (total 40.673s)
+geometry 758x754 adaptive: 7.591s
+picvec paint substage initial: 2.711s (primary solid 0, gain-bound solid 146, low-range solid 5, model search 433)
+geometry 758x754 tasks: 0.034s
+picvec stage paint-aware-merge: 1.112s (total 5.618s)
+picvec stage paint-order-validation: 0.512s (total 41.185s)
+picvec stage thin-paint-ownership: 0.276s (total 5.894s)
+picvec stage paint-topology-preservation: 1.941s (total 8.244s)
+picvec paint substage setup: 0.041s
+picvec stage paint-topology-preservation: 1.983s (total 6.125s)
+picvec paint substage setup: 0.028s
+picvec stage covered-hole-simplification: 0.960s (total 42.144s)
+picvec stage final-svg: 0.168s (total 42.312s)
+picvec adaptive evaluated 2561 909 698 671: baseline=PerceptualScore { mean_delta_e: 3.5617275, p90_delta_e: 10.737295, missing_edge_fraction: 0.82091916, combined: 8.360453 } refined=PerceptualScore { mean_delta_e: 1.3580734, p90_delta_e: 2.4116797, missing_edge_fraction: 0.38827258, combined: 2.7406228 } boundary_matches=true bytes=316653
+picvec adaptive processing: source 4276 106 554 712, processing 554 712
+picvec stage load-resize: 0.000s (total 0.000s)
+geometry 766x695 adaptive: 8.533s
+geometry 766x695 tasks: 0.032s
+geometry 758x754 fit-chains: 2.392s
+picvec stage shared-geometry: 10.488s (total 43.469s)
+picvec stage paint-preview: 0.094s (total 43.562s)
+picvec stage edge-roles: 1.162s (total 1.162s)
+picvec stage paint-topology-preservation: 2.410s (total 8.304s)
+picvec paint substage setup: 0.041s
+picvec stage structural-analysis: 0.402s (total 1.564s)
+selection 758x754 residual: 0.608s
+selection 758x754 classify: 0.002s
+selection 758x754 profiles: 0.030s
+selection 758x754 skeleton: 0.037s
+selection 758x754 overlap1: 0.001s
+selection 758x754 intersections: 0.010s
+selection 758x754 continuations: 0.014s
+selection 758x754 connections: 0.009s
+selection 758x754 junctions: 0.017s
+selection 758x754 extension: 0.001s
+selection 758x754 tangents: 0.000s
+selection 758x754 fit: 0.028s
+picvec structural substage ownership: 0.761s
+picvec structural substage outline-proposals: 0.050s
+picvec structural substage outline-validation: 0.163s
+picvec paint substage harmonize: 3.748s
+picvec stage perceptual-smoothing: 0.711s (total 2.275s)
+picvec structural substage colour-patches: 0.282s
+picvec stage structural-selection: 1.258s (total 44.820s)
+picvec segmentation substage setup: 0.030s
+picvec paint substage couple: 0.188s
+picvec stage paint-fitting: 6.743s (total 13.999s)
+picvec segmentation substage palette: 0.079s (16662 histogram cells, 925 colours)
+picvec segmentation substage initial-components: 0.018s
+picvec segmentation substage small-components: 0.118s
+picvec segmentation substage compact: 0.010s
+geometry 766x695 fit-chains: 1.946s
+picvec segmentation substage antialias: 0.110s
+picvec segmentation substage finalize: 0.044s (total 0.408s)
+picvec stage shared-geometry: 10.937s (total 45.290s)
+picvec stage paint-preview: 0.074s (total 45.364s)
+picvec stage paint-order-validation: 0.634s (total 45.454s)
+picvec paint substage initial: 3.507s (primary solid 0, gain-bound solid 298, low-range solid 3, model search 525)
+geometry 754x766 adaptive: 7.362s
+geometry 754x766 tasks: 0.023s
+selection 766x695 residual: 0.446s
+selection 766x695 classify: 0.002s
+selection 766x695 profiles: 0.023s
+selection 766x695 skeleton: 0.027s
+selection 766x695 overlap1: 0.002s
+selection 766x695 intersections: 0.010s
+selection 766x695 continuations: 0.018s
+picvec stage segmentation: 1.095s (total 3.370s)
+selection 766x695 connections: 0.011s
+selection 766x695 junctions: 0.021s
+selection 766x695 extension: 0.001s
+selection 766x695 tangents: 0.000s
+selection 766x695 fit: 0.059s
+picvec structural substage ownership: 0.622s
+picvec structural substage outline-proposals: 0.006s
+picvec structural substage outline-validation: 0.000s
+picvec stage boundary-regularization: 0.152s (total 3.522s)
+picvec structural substage colour-patches: 0.197s
+picvec stage structural-selection: 0.826s (total 46.190s)
+picvec paint substage initial: 4.440s (primary solid 0, gain-bound solid 438, low-range solid 5, model search 581)
+picvec stage paint-aware-merge: 0.339s (total 3.861s)
+picvec stage thin-paint-ownership: 0.175s (total 4.036s)
+picvec stage covered-hole-simplification: 1.162s (total 46.616s)
+picvec adaptive evaluated 4195 1707 725 761: baseline=PerceptualScore { mean_delta_e: 5.06596, p90_delta_e: 15.292145, missing_edge_fraction: 0.7890703, combined: 10.76375 } refined=PerceptualScore { mean_delta_e: 1.7666574, p90_delta_e: 3.5135968, missing_edge_fraction: 0.37820727, combined: 3.3350565 } boundary_matches=true bytes=841320
+picvec adaptive processing: source 2622 106 564 710, processing 564 710
+picvec stage load-resize: 0.000s (total 0.000s)
+picvec stage final-svg: 0.219s (total 46.835s)
+picvec stage paint-order-validation: 0.671s (total 46.861s)
+geometry 754x766 fit-chains: 1.545s
+picvec paint substage initial: 3.687s (primary solid 0, gain-bound solid 132, low-range solid 18, model search 681)
+picvec stage shared-geometry: 9.401s (total 35.388s)
+picvec stage paint-preview: 0.069s (total 35.457s)
+picvec stage edge-roles: 1.168s (total 1.169s)
+picvec stage paint-topology-preservation: 1.463s (total 5.499s)
+picvec paint substage setup: 0.035s
+selection 754x766 residual: 0.573s
+selection 754x766 classify: 0.003s
+selection 754x766 profiles: 0.031s
+picvec stage structural-analysis: 0.418s (total 1.587s)
+selection 754x766 skeleton: 0.034s
+selection 754x766 overlap1: 0.001s
+selection 754x766 intersections: 0.011s
+selection 754x766 continuations: 0.018s
+selection 754x766 connections: 0.010s
+selection 754x766 junctions: 0.025s
+selection 754x766 extension: 0.001s
+selection 754x766 tangents: 0.000s
+selection 754x766 fit: 0.076s
+picvec structural substage ownership: 0.787s
+picvec structural substage outline-proposals: 0.003s
+picvec structural substage outline-validation: 0.000s
+picvec stage covered-hole-simplification: 1.580s (total 48.441s)
+picvec structural substage colour-patches: 0.200s
+picvec stage structural-selection: 0.990s (total 36.447s)
+picvec stage final-svg: 0.191s (total 48.633s)
+picvec layered merge candidates: considered 1552, evidence 1330, seam 46, layered 49, nonfinite 0, face 96, combined 61, accepted 19
+picvec stage source-supported-paint-merge: 4.030s (total 18.029s)
+picvec stage exact-paint-merge: 0.020s (total 18.050s)
+picvec stage perceptual-smoothing: 0.776s (total 2.363s)
+picvec segmentation substage setup: 0.031s
+picvec segmentation substage palette: 0.086s (14147 histogram cells, 795 colours)
+picvec segmentation substage initial-components: 0.021s
+picvec segmentation substage small-components: 0.101s
+picvec segmentation substage compact: 0.011s
+picvec paint substage harmonize: 2.958s
+picvec segmentation substage antialias: 0.147s
+picvec segmentation substage finalize: 0.051s (total 0.449s)
+picvec stage paint-order-validation: 0.904s (total 37.351s)
+picvec paint substage initial: 1.509s (primary solid 0, gain-bound solid 133, low-range solid 6, model search 282)
+picvec paint substage couple: 0.266s
+picvec stage paint-fitting: 7.774s (total 16.018s)
+picvec paint substage harmonize: 4.129s
+picvec stage segmentation: 0.892s (total 3.255s)
+picvec stage layered-paint-simplification: 1.071s (total 19.121s)
+picvec paint substage couple: 0.272s
+picvec stage paint-fitting: 7.985s (total 14.111s)
+picvec stage boundary-regularization: 0.179s (total 3.433s)
+picvec stage paint-aware-merge: 0.436s (total 3.869s)
+picvec stage covered-hole-simplification: 1.187s (total 38.538s)
+picvec stage thin-paint-ownership: 0.215s (total 4.084s)
+picvec stage final-svg: 0.303s (total 38.841s)
+picvec paint substage harmonize: 1.618s
+picvec paint substage couple: 0.132s
+picvec stage paint-fitting: 3.342s (total 8.841s)
+picvec stage residual-shape-refinement: 2.015s (total 21.136s)
+picvec paint substage harmonize: 4.757s
+picvec paint substage couple: 0.269s
+picvec stage paint-fitting: 8.836s (total 17.140s)
+picvec layered merge candidates: considered 2098, evidence 1843, seam 37, layered 35, nonfinite 0, face 91, combined 71, accepted 56
+picvec stage source-supported-paint-merge: 2.995s (total 17.106s)
+picvec stage exact-paint-merge: 0.019s (total 17.124s)
+picvec stage paint-topology-preservation: 2.430s (total 6.514s)
+picvec paint substage setup: 0.041s
+picvec stage layered-paint-simplification: 0.598s (total 17.723s)
+picvec stage interior-shading: 2.089s (total 23.225s)
+picvec stage face-alpha: 0.021s (total 23.247s)
+picvec stage hierarchical-topology: 0.003s (total 23.250s)
+picvec layered merge candidates: considered 2453, evidence 2162, seam 90, layered 78, nonfinite 0, face 117, combined 54, accepted 30
+picvec stage source-supported-paint-merge: 4.749s (total 20.766s)
+geometry 731x705 topology: 0.183s
+picvec stage exact-paint-merge: 0.019s (total 20.785s)
+picvec stage residual-shape-refinement: 0.962s (total 18.685s)
+picvec paint substage initial: 1.862s (primary solid 0, gain-bound solid 75, low-range solid 7, model search 236)
+picvec layered merge candidates: considered 1065, evidence 937, seam 35, layered 28, nonfinite 0, face 46, combined 31, accepted 16
+picvec stage source-supported-paint-merge: 4.069s (total 12.911s)
+picvec stage exact-paint-merge: 0.014s (total 12.925s)
+picvec stage layered-paint-simplification: 0.199s (total 13.124s)
+picvec stage residual-shape-refinement: 0.064s (total 13.187s)
+picvec stage layered-paint-simplification: 1.498s (total 22.283s)
+picvec stage interior-shading: 1.154s (total 14.341s)
+picvec stage face-alpha: 0.005s (total 14.346s)
+picvec stage hierarchical-topology: 0.002s (total 14.348s)
+geometry 554x712 topology: 0.095s
+picvec paint substage harmonize: 1.887s
+picvec paint substage couple: 0.070s
+picvec stage paint-fitting: 3.910s (total 10.424s)
+picvec stage interior-shading: 3.339s (total 22.024s)
+picvec stage face-alpha: 0.004s (total 22.028s)
+picvec stage hierarchical-topology: 0.002s (total 22.029s)
+geometry 594x703 topology: 0.127s
+picvec layered merge candidates: considered 1912, evidence 1607, seam 61, layered 71, nonfinite 0, face 133, combined 76, accepted 35
+picvec stage source-supported-paint-merge: 5.571s (total 22.711s)
+picvec stage exact-paint-merge: 0.020s (total 22.731s)
+picvec stage residual-shape-refinement: 2.473s (total 24.756s)
+picvec stage layered-paint-simplification: 1.304s (total 24.035s)
+picvec layered merge candidates: considered 851, evidence 691, seam 37, layered 27, nonfinite 0, face 73, combined 40, accepted 10
+picvec stage source-supported-paint-merge: 3.796s (total 14.220s)
+picvec stage exact-paint-merge: 0.014s (total 14.235s)
+picvec adaptive evaluated 1772 2551 585 739: baseline=PerceptualScore { mean_delta_e: 4.4521694, p90_delta_e: 13.229025, missing_edge_fraction: 0.7413027, combined: 9.518994 } refined=PerceptualScore { mean_delta_e: 1.4074782, p90_delta_e: 2.5253515, missing_edge_fraction: 0.35788304, combined: 2.717155 } boundary_matches=true bytes=488775
+picvec adaptive processing: source 870 1715 765 726, processing 765 726
+picvec stage load-resize: 0.001s (total 0.001s)
+picvec stage residual-shape-refinement: 1.525s (total 25.560s)
+geometry 731x705 adaptive: 7.061s
+geometry 731x705 tasks: 0.025s
+geometry 594x703 adaptive: 3.382s
+geometry 594x703 tasks: 0.019s
+picvec stage interior-shading: 3.182s (total 27.938s)
+picvec stage face-alpha: 0.008s (total 27.946s)
+picvec stage hierarchical-topology: 0.003s (total 27.949s)
+geometry 627x802 topology: 0.158s
+picvec stage layered-paint-simplification: 1.251s (total 15.486s)
+picvec stage residual-shape-refinement: 0.206s (total 15.692s)
+geometry 554x712 adaptive: 5.549s
+geometry 594x703 fit-chains: 1.078s
+geometry 554x712 tasks: 0.012s
+picvec stage shared-geometry: 4.756s (total 26.786s)
+picvec stage edge-roles: 1.655s (total 1.655s)
+picvec stage paint-preview: 0.067s (total 26.852s)
+selection 594x703 residual: 0.092s
+selection 594x703 classify: 0.001s
+selection 594x703 profiles: 0.015s
+selection 594x703 skeleton: 0.017s
+selection 594x703 overlap1: 0.000s
+selection 594x703 intersections: 0.010s
+selection 594x703 continuations: 0.013s
+selection 594x703 connections: 0.007s
+selection 594x703 junctions: 0.010s
+selection 594x703 extension: 0.000s
+selection 594x703 tangents: 0.000s
+selection 594x703 fit: 0.010s
+picvec structural substage ownership: 0.177s
+picvec structural substage outline-proposals: 0.017s
+picvec structural substage outline-validation: 0.000s
+picvec structural substage colour-patches: 0.147s
+picvec stage structural-selection: 0.341s (total 27.193s)
+geometry 731x705 fit-chains: 1.937s
+geometry 554x712 fit-chains: 0.813s
+picvec stage interior-shading: 1.111s (total 16.802s)
+picvec stage face-alpha: 0.005s (total 16.808s)
+picvec stage hierarchical-topology: 0.002s (total 16.810s)
+picvec stage shared-geometry: 9.400s (total 32.650s)
+picvec stage shared-geometry: 6.655s (total 21.003s)
+picvec stage paint-preview: 0.035s (total 21.038s)
+picvec stage paint-preview: 0.052s (total 32.702s)
+picvec stage paint-order-validation: 0.522s (total 27.716s)
+geometry 564x710 topology: 0.093s
+picvec stage structural-analysis: 0.995s (total 2.650s)
+selection 731x705 residual: 0.252s
+selection 731x705 classify: 0.002s
+selection 731x705 profiles: 0.028s
+selection 731x705 skeleton: 0.029s
+selection 731x705 overlap1: 0.001s
+selection 554x712 residual: 0.324s
+selection 731x705 intersections: 0.009s
+selection 554x712 classify: 0.003s
+selection 731x705 continuations: 0.015s
+selection 731x705 connections: 0.009s
+selection 554x712 profiles: 0.027s
+selection 731x705 junctions: 0.025s
+selection 731x705 extension: 0.000s
+selection 731x705 tangents: 0.000s
+selection 554x712 skeleton: 0.024s
+selection 554x712 overlap1: 0.001s
+selection 554x712 intersections: 0.008s
+selection 731x705 fit: 0.019s
+picvec structural substage ownership: 0.391s
+selection 554x712 continuations: 0.011s
+selection 554x712 connections: 0.009s
+picvec structural substage outline-proposals: 0.029s
+selection 554x712 junctions: 0.015s
+selection 554x712 extension: 0.000s
+selection 554x712 tangents: 0.000s
+picvec stage interior-shading: 2.950s (total 28.510s)
+picvec stage face-alpha: 0.008s (total 28.519s)
+picvec stage hierarchical-topology: 0.004s (total 28.523s)
+selection 554x712 fit: 0.055s
+picvec structural substage ownership: 0.481s
+picvec structural substage outline-validation: 0.103s
+picvec structural substage colour-patches: 0.130s
+picvec stage structural-selection: 0.653s (total 33.356s)
+geometry 619x800 topology: 0.232s
+picvec stage covered-hole-simplification: 0.786s (total 28.502s)
+picvec structural substage outline-proposals: 0.371s
+picvec structural substage outline-validation: 0.087s
+picvec stage final-svg: 0.129s (total 28.630s)
+picvec stage paint-order-validation: 0.345s (total 33.701s)
+picvec structural substage colour-patches: 0.140s
+picvec stage structural-selection: 1.079s (total 22.117s)
+picvec stage perceptual-smoothing: 1.092s (total 3.742s)
+picvec segmentation substage setup: 0.049s
+picvec segmentation substage palette: 0.193s (30814 histogram cells, 1529 colours)
+picvec segmentation substage initial-components: 0.039s
+picvec stage covered-hole-simplification: 0.728s (total 34.429s)
+picvec segmentation substage small-components: 0.318s
+picvec segmentation substage compact: 0.027s
+picvec stage final-svg: 0.141s (total 34.570s)
+picvec segmentation substage antialias: 0.220s
+picvec segmentation substage finalize: 0.068s (total 0.915s)
+picvec stage paint-order-validation: 1.091s (total 23.208s)
+picvec adaptive evaluated 4267 3331 576 685: baseline=PerceptualScore { mean_delta_e: 3.5628836, p90_delta_e: 11.750437, missing_edge_fraction: 0.6698276, combined: 8.312956 } refined=PerceptualScore { mean_delta_e: 1.0924281, p90_delta_e: 2.1512218, missing_edge_fraction: 0.4362069, combined: 2.660702 } boundary_matches=true bytes=610747
+picvec adaptive processing: source 3393 902 705 688, processing 705 688
+picvec stage load-resize: 0.001s (total 0.001s)
+picvec stage segmentation: 2.099s (total 5.841s)
+picvec stage boundary-regularization: 0.270s (total 6.111s)
+geometry 627x802 adaptive: 5.523s
+geometry 627x802 tasks: 0.027s
+picvec adaptive evaluated 4188 4125 711 685: baseline=PerceptualScore { mean_delta_e: 3.6862636, p90_delta_e: 11.133297, missing_edge_fraction: 0.7260818, combined: 8.290383 } refined=PerceptualScore { mean_delta_e: 1.1980948, p90_delta_e: 2.2286277, missing_edge_fraction: 0.35371178, combined: 2.491729 } boundary_matches=true bytes=494333
+picvec adaptive processing: source 74 4079 710 745, processing 710 745
+picvec stage load-resize: 0.001s (total 0.001s)
+picvec stage covered-hole-simplification: 2.128s (total 25.337s)
+picvec stage edge-roles: 1.565s (total 1.565s)
+picvec stage paint-aware-merge: 1.227s (total 7.337s)
+picvec stage structural-analysis: 0.570s (total 2.136s)
+picvec stage thin-paint-ownership: 0.323s (total 7.660s)
+picvec stage final-svg: 1.091s (total 26.427s)
+geometry 627x802 fit-chains: 1.801s
+picvec stage edge-roles: 1.775s (total 1.776s)
+picvec stage shared-geometry: 7.711s (total 35.660s)
+picvec stage paint-preview: 0.100s (total 35.760s)
+picvec stage perceptual-smoothing: 1.017s (total 3.153s)
+picvec segmentation substage setup: 0.040s
+picvec segmentation substage palette: 0.088s (15633 histogram cells, 1010 colours)
+picvec segmentation substage initial-components: 0.021s
+picvec segmentation substage small-components: 0.107s
+picvec segmentation substage compact: 0.018s
+picvec stage structural-analysis: 0.546s (total 2.323s)
+picvec segmentation substage antialias: 0.176s
+picvec segmentation substage finalize: 0.060s (total 0.512s)
+geometry 564x710 adaptive: 6.377s
+geometry 564x710 tasks: 0.016s
+picvec adaptive evaluated 1703 904 746 675: baseline=PerceptualScore { mean_delta_e: 4.8233113, p90_delta_e: 14.675104, missing_edge_fraction: 0.8631492, combined: 10.62998 } refined=PerceptualScore { mean_delta_e: 1.4811724, p90_delta_e: 2.8044167, missing_edge_fraction: 0.358615, combined: 2.8641393 } boundary_matches=true bytes=689242
+picvec adaptive processing: source 2529 4096 701 727, processing 701 727
+picvec stage load-resize: 0.002s (total 0.002s)
+picvec adaptive evaluated 4284 114 538 696: baseline=PerceptualScore { mean_delta_e: 3.2453806, p90_delta_e: 9.641666, missing_edge_fraction: 0.823, combined: 7.786088 } refined=PerceptualScore { mean_delta_e: 1.1870745, p90_delta_e: 2.091981, missing_edge_fraction: 0.346, combined: 2.408976 } boundary_matches=true bytes=376979
+picvec adaptive processing: source 987 3311 534 706, processing 534 706
+picvec stage load-resize: 0.001s (total 0.001s)
+selection 627x802 residual: 0.868s
+selection 627x802 classify: 0.003s
+selection 627x802 profiles: 0.034s
+selection 627x802 skeleton: 0.037s
+selection 627x802 overlap1: 0.003s
+selection 627x802 intersections: 0.009s
+selection 627x802 continuations: 0.024s
+selection 627x802 connections: 0.015s
+selection 627x802 junctions: 0.021s
+selection 627x802 extension: 0.002s
+selection 627x802 tangents: 0.000s
+selection 627x802 fit: 0.146s
+picvec structural substage ownership: 1.167s
+picvec structural substage outline-proposals: 0.010s
+picvec structural substage outline-validation: 0.000s
+picvec stage segmentation: 1.090s (total 4.243s)
+picvec structural substage colour-patches: 0.237s
+picvec stage structural-selection: 1.415s (total 37.175s)
+picvec stage boundary-regularization: 0.210s (total 4.453s)
+picvec stage perceptual-smoothing: 1.062s (total 3.384s)
+picvec segmentation substage setup: 0.037s
+picvec segmentation substage palette: 0.126s (23027 histogram cells, 1045 colours)
+picvec segmentation substage initial-components: 0.023s
+picvec segmentation substage small-components: 0.203s
+picvec stage paint-aware-merge: 0.471s (total 4.924s)
+picvec segmentation substage compact: 0.021s
+picvec stage edge-roles: 1.100s (total 1.100s)
+picvec stage thin-paint-ownership: 0.201s (total 5.125s)
+picvec segmentation substage antialias: 0.258s
+picvec segmentation substage finalize: 0.057s (total 0.726s)
+picvec stage paint-order-validation: 0.822s (total 37.996s)
+picvec stage edge-roles: 1.538s (total 1.540s)
+geometry 564x710 fit-chains: 1.690s
+picvec stage shared-geometry: 8.294s (total 25.104s)
+picvec stage paint-preview: 0.032s (total 25.136s)
+picvec stage structural-analysis: 0.565s (total 1.666s)
+selection 564x710 residual: 0.168s
+selection 564x710 classify: 0.001s
+selection 564x710 profiles: 0.019s
+selection 564x710 skeleton: 0.020s
+selection 564x710 overlap1: 0.001s
+selection 564x710 intersections: 0.008s
+selection 564x710 continuations: 0.010s
+selection 564x710 connections: 0.007s
+selection 564x710 junctions: 0.015s
+selection 564x710 extension: 0.000s
+selection 564x710 tangents: 0.000s
+selection 564x710 fit: 0.055s
+picvec structural substage ownership: 0.308s
+picvec structural substage outline-proposals: 0.021s
+picvec structural substage outline-validation: 0.000s
+picvec stage paint-topology-preservation: 3.486s (total 11.146s)
+picvec stage segmentation: 1.375s (total 4.759s)
+picvec structural substage colour-patches: 0.090s
+picvec stage structural-selection: 0.419s (total 25.555s)
+picvec paint substage setup: 0.041s
+picvec stage boundary-regularization: 0.230s (total 4.989s)
+picvec stage paint-order-validation: 0.282s (total 25.837s)
+picvec stage structural-analysis: 0.877s (total 2.417s)
+picvec stage perceptual-smoothing: 0.713s (total 2.379s)
+picvec segmentation substage setup: 0.029s
+picvec segmentation substage palette: 0.084s (17337 histogram cells, 1000 colours)
+picvec segmentation substage initial-components: 0.013s
+picvec segmentation substage small-components: 0.084s
+picvec segmentation substage compact: 0.012s
+picvec segmentation substage antialias: 0.166s
+picvec segmentation substage finalize: 0.036s (total 0.424s)
+picvec stage covered-hole-simplification: 0.506s (total 26.343s)
+picvec stage final-svg: 0.092s (total 26.435s)
+picvec stage paint-aware-merge: 0.730s (total 5.719s)
+picvec stage paint-topology-preservation: 1.906s (total 7.031s)
+picvec paint substage setup: 0.042s
+picvec stage covered-hole-simplification: 1.901s (total 39.897s)
+picvec stage segmentation: 0.952s (total 3.331s)
+picvec stage perceptual-smoothing: 0.997s (total 3.414s)
+picvec segmentation substage setup: 0.044s
+picvec stage thin-paint-ownership: 0.407s (total 6.126s)
+picvec stage final-svg: 0.172s (total 40.069s)
+picvec stage boundary-regularization: 0.162s (total 3.493s)
+picvec segmentation substage palette: 0.109s (21583 histogram cells, 1125 colours)
+picvec segmentation substage initial-components: 0.022s
+geometry 619x800 adaptive: 9.588s
+picvec segmentation substage small-components: 0.204s
+picvec segmentation substage compact: 0.020s
+geometry 619x800 tasks: 0.030s
+picvec segmentation substage antialias: 0.207s
+picvec segmentation substage finalize: 0.054s (total 0.661s)
+picvec adaptive evaluated 2548 1703 732 744: baseline=PerceptualScore { mean_delta_e: 4.272983, p90_delta_e: 12.721194, missing_edge_fraction: 0.7764858, combined: 9.340777 } refined=PerceptualScore { mean_delta_e: 1.368023, p90_delta_e: 2.6229095, missing_edge_fraction: 0.34237728, combined: 2.691906 } boundary_matches=true bytes=620875
+picvec adaptive processing: source 3455 106 569 710, processing 569 710
+picvec stage load-resize: 0.000s (total 0.000s)
+picvec stage paint-aware-merge: 0.667s (total 4.160s)
+picvec stage thin-paint-ownership: 0.214s (total 4.374s)
+picvec stage segmentation: 1.371s (total 4.785s)
+picvec stage boundary-regularization: 0.200s (total 4.985s)
+picvec stage edge-roles: 1.222s (total 1.222s)
+picvec adaptive evaluated 1702 1716 736 732: baseline=PerceptualScore { mean_delta_e: 4.803068, p90_delta_e: 15.137589, missing_edge_fraction: 0.7365227, combined: 10.425984 } refined=PerceptualScore { mean_delta_e: 1.6044561, p90_delta_e: 3.1474552, missing_edge_fraction: 0.34594786, combined: 3.0188308 } boundary_matches=true bytes=985769
+picvec adaptive processing: source 157 106 564 710, processing 564 710
+picvec stage load-resize: 0.004s (total 0.004s)
+picvec stage structural-analysis: 0.277s (total 1.499s)
+picvec paint substage initial: 2.377s (primary solid 0, gain-bound solid 141, low-range solid 11, model search 319)
+picvec stage paint-aware-merge: 0.680s (total 5.664s)
+geometry 619x800 fit-chains: 2.012s
+picvec stage shared-geometry: 12.120s (total 40.643s)
+picvec stage thin-paint-ownership: 0.412s (total 6.077s)
+picvec stage paint-preview: 0.077s (total 40.721s)
+picvec stage perceptual-smoothing: 0.726s (total 2.225s)
+picvec stage paint-topology-preservation: 2.895s (total 9.021s)
+picvec segmentation substage setup: 0.032s
+picvec paint substage setup: 0.043s
+picvec segmentation substage palette: 0.078s (16576 histogram cells, 803 colours)
+picvec segmentation substage initial-components: 0.022s
+picvec stage paint-topology-preservation: 2.066s (total 6.440s)
+picvec paint substage setup: 0.025s
+picvec segmentation substage small-components: 0.102s
+picvec segmentation substage compact: 0.011s
+picvec stage edge-roles: 1.131s (total 1.135s)
+selection 619x800 residual: 0.606s
+selection 619x800 classify: 0.002s
+picvec segmentation substage antialias: 0.140s
+selection 619x800 profiles: 0.031s
+selection 619x800 skeleton: 0.022s
+selection 619x800 overlap1: 0.001s
+selection 619x800 intersections: 0.007s
+picvec segmentation substage finalize: 0.042s (total 0.429s)
+selection 619x800 continuations: 0.011s
+selection 619x800 connections: 0.007s
+selection 619x800 junctions: 0.029s
+selection 619x800 extension: 0.001s
+selection 619x800 tangents: 0.000s
+selection 619x800 fit: 0.050s
+picvec structural substage ownership: 0.771s
+picvec paint substage initial: 4.772s (primary solid 0, gain-bound solid 259, low-range solid 21, model search 549)
+picvec structural substage outline-proposals: 0.124s
+picvec stage structural-analysis: 0.388s (total 1.523s)
+picvec structural substage outline-validation: 0.162s
+picvec stage segmentation: 0.866s (total 3.091s)
+picvec stage boundary-regularization: 0.161s (total 3.252s)
+picvec structural substage colour-patches: 0.235s
+picvec stage structural-selection: 1.292s (total 42.013s)
+picvec stage perceptual-smoothing: 0.676s (total 2.199s)
+picvec segmentation substage setup: 0.029s
+picvec segmentation substage palette: 0.065s (12980 histogram cells, 875 colours)
+picvec segmentation substage initial-components: 0.015s
+picvec stage paint-aware-merge: 0.506s (total 3.758s)
+picvec segmentation substage small-components: 0.069s
+picvec segmentation substage compact: 0.008s
+picvec segmentation substage antialias: 0.133s
+picvec stage thin-paint-ownership: 0.213s (total 3.971s)
+picvec segmentation substage finalize: 0.044s (total 0.364s)
+picvec adaptive evaluated 2630 114 548 694: baseline=PerceptualScore { mean_delta_e: 3.1767497, p90_delta_e: 9.365011, missing_edge_fraction: 0.66973126, combined: 7.184736 } refined=PerceptualScore { mean_delta_e: 1.1754371, p90_delta_e: 1.8503406, missing_edge_fraction: 0.35219237, combined: 2.3256602 } boundary_matches=true bytes=264190
+picvec adaptive processing: source 979 106 560 710, processing 560 710
+picvec stage load-resize: 0.001s (total 0.001s)
+picvec stage segmentation: 0.773s (total 2.972s)
+picvec stage paint-order-validation: 1.242s (total 43.254s)
+picvec stage boundary-regularization: 0.168s (total 3.140s)
+picvec paint substage initial: 2.273s (primary solid 0, gain-bound solid 135, low-range solid 2, model search 298)
+picvec stage paint-topology-preservation: 2.760s (total 8.836s)
+picvec paint substage setup: 0.036s
+picvec stage paint-aware-merge: 0.474s (total 3.614s)
+picvec paint substage harmonize: 3.464s
+picvec stage thin-paint-ownership: 0.211s (total 3.825s)
+picvec paint substage couple: 0.195s
+picvec stage paint-fitting: 6.173s (total 13.204s)
+picvec stage edge-roles: 1.172s (total 1.173s)
+picvec stage structural-analysis: 0.384s (total 1.557s)
+picvec stage covered-hole-simplification: 1.485s (total 44.739s)
+picvec stage paint-topology-preservation: 2.051s (total 6.022s)
+picvec paint substage setup: 0.037s
+picvec stage perceptual-smoothing: 0.728s (total 2.285s)
+picvec stage paint-topology-preservation: 1.366s (total 5.191s)
+picvec segmentation substage setup: 0.030s
+picvec paint substage setup: 0.031s
+picvec segmentation substage palette: 0.059s (11544 histogram cells, 720 colours)
+picvec stage final-svg: 0.702s (total 45.441s)
+picvec segmentation substage initial-components: 0.014s
+picvec segmentation substage small-components: 0.064s
+picvec segmentation substage compact: 0.007s
+picvec paint substage initial: 4.545s (primary solid 0, gain-bound solid 111, low-range solid 13, model search 542)
+picvec segmentation substage antialias: 0.106s
+picvec segmentation substage finalize: 0.039s (total 0.320s)
+picvec paint substage harmonize: 2.416s
+picvec paint substage couple: 0.140s
+picvec stage paint-fitting: 4.899s (total 11.339s)
+picvec stage segmentation: 0.733s (total 3.018s)
+picvec stage boundary-regularization: 0.155s (total 3.173s)
+picvec paint substage initial: 0.934s (primary solid 0, gain-bound solid 68, low-range solid 9, model search 212)
+picvec paint substage initial: 1.531s (primary solid 0, gain-bound solid 121, low-range solid 5, model search 278)
+picvec paint substage initial: 3.088s (primary solid 0, gain-bound solid 162, low-range solid 16, model search 430)
+picvec stage paint-aware-merge: 0.368s (total 3.541s)
+picvec adaptive evaluated 3418 1685 609 784: baseline=PerceptualScore { mean_delta_e: 4.351947, p90_delta_e: 13.85738, missing_edge_fraction: 0.7931319, combined: 9.880724 } refined=PerceptualScore { mean_delta_e: 1.3813897, p90_delta_e: 2.945746, missing_edge_fraction: 0.4041209, combined: 3.0122862 } boundary_matches=true bytes=880764
+picvec adaptive processing: source 152 1678 574 776, processing 574 776
+picvec stage load-resize: 0.000s (total 0.000s)
+picvec paint substage harmonize: 5.182s
+picvec stage thin-paint-ownership: 0.259s (total 3.800s)
+picvec paint substage couple: 0.365s
+picvec stage paint-fitting: 10.431s (total 21.578s)
+picvec stage edge-roles: 1.196s (total 1.197s)
+picvec paint substage harmonize: 1.613s
+picvec paint substage couple: 0.104s
+picvec stage paint-fitting: 2.728s (total 7.919s)
+picvec stage structural-analysis: 0.634s (total 1.831s)
+picvec layered merge candidates: considered 1212, evidence 989, seam 25, layered 34, nonfinite 0, face 111, combined 65, accepted 22
+picvec stage source-supported-paint-merge: 4.560s (total 17.764s)
+picvec stage exact-paint-merge: 0.012s (total 17.776s)
+picvec layered merge candidates: considered 1118, evidence 951, seam 18, layered 26, nonfinite 0, face 73, combined 46, accepted 30
+picvec stage source-supported-paint-merge: 2.597s (total 13.936s)
+picvec stage exact-paint-merge: 0.010s (total 13.946s)
+picvec stage layered-paint-simplification: 0.070s (total 14.016s)
+picvec stage paint-topology-preservation: 1.869s (total 5.668s)
+picvec paint substage setup: 0.029s
+picvec stage residual-shape-refinement: 0.055s (total 14.071s)
+picvec stage layered-paint-simplification: 0.249s (total 18.025s)
+picvec stage residual-shape-refinement: 0.170s (total 18.196s)
+picvec paint substage harmonize: 2.508s
+picvec stage perceptual-smoothing: 0.756s (total 2.587s)
+picvec segmentation substage setup: 0.031s
+picvec paint substage couple: 0.112s
+picvec stage paint-fitting: 5.804s (total 14.640s)
+picvec paint substage harmonize: 2.951s
+picvec segmentation substage palette: 0.125s (26523 histogram cells, 1448 colours)
+picvec segmentation substage initial-components: 0.018s
+picvec paint substage couple: 0.137s
+picvec stage paint-fitting: 4.704s (total 10.726s)
+picvec segmentation substage small-components: 0.196s
+picvec segmentation substage compact: 0.015s
+picvec segmentation substage antialias: 0.132s
+picvec segmentation substage finalize: 0.040s (total 0.559s)
+picvec paint substage initial: 1.093s (primary solid 0, gain-bound solid 137, low-range solid 7, model search 194)
+picvec paint substage harmonize: 4.314s
+picvec paint substage couple: 0.141s
+picvec stage paint-fitting: 9.117s (total 18.138s)
+picvec stage segmentation: 1.119s (total 3.706s)
+picvec stage boundary-regularization: 0.162s (total 3.868s)
+picvec stage interior-shading: 1.871s (total 15.943s)
+picvec stage face-alpha: 0.004s (total 15.947s)
+picvec stage hierarchical-topology: 0.002s (total 15.948s)
+picvec layered merge candidates: considered 778, evidence 657, seam 24, layered 15, nonfinite 0, face 49, combined 39, accepted 9
+picvec stage source-supported-paint-merge: 2.636s (total 10.554s)
+picvec stage exact-paint-merge: 0.010s (total 10.564s)
+geometry 534x706 topology: 0.079s
+picvec stage layered-paint-simplification: 0.032s (total 10.596s)
+picvec stage interior-shading: 1.790s (total 19.986s)
+picvec stage face-alpha: 0.004s (total 19.990s)
+picvec stage hierarchical-topology: 0.002s (total 19.991s)
+picvec stage residual-shape-refinement: 0.040s (total 10.636s)
+geometry 705x688 topology: 0.106s
+picvec paint substage harmonize: 1.361s
+picvec paint substage couple: 0.094s
+picvec stage paint-fitting: 2.616s (total 8.285s)
+picvec stage paint-aware-merge: 0.863s (total 4.731s)
+picvec stage interior-shading: 0.768s (total 11.404s)
+picvec stage thin-paint-ownership: 0.208s (total 4.939s)
+picvec stage face-alpha: 0.004s (total 11.408s)
+picvec stage hierarchical-topology: 0.001s (total 11.410s)
+geometry 564x710 topology: 0.086s
+picvec layered merge candidates: considered 2127, evidence 1776, seam 91, layered 70, nonfinite 0, face 129, combined 93, accepted 38
+picvec stage source-supported-paint-merge: 5.687s (total 27.264s)
+picvec stage exact-paint-merge: 0.018s (total 27.283s)
+picvec layered merge candidates: considered 1081, evidence 894, seam 52, layered 23, nonfinite 0, face 66, combined 48, accepted 21
+picvec stage source-supported-paint-merge: 3.841s (total 14.566s)
+picvec stage layered-paint-simplification: 0.502s (total 27.785s)
+picvec stage exact-paint-merge: 0.011s (total 14.578s)
+picvec stage layered-paint-simplification: 0.027s (total 14.604s)
+picvec stage residual-shape-refinement: 0.014s (total 14.619s)
+picvec stage paint-topology-preservation: 2.135s (total 7.075s)
+picvec layered merge candidates: considered 1610, evidence 1358, seam 69, layered 45, nonfinite 0, face 94, combined 66, accepted 23
+picvec stage source-supported-paint-merge: 4.471s (total 19.111s)
+picvec layered merge candidates: considered 823, evidence 700, seam 23, layered 22, nonfinite 0, face 52, combined 33, accepted 15
+picvec stage source-supported-paint-merge: 2.400s (total 10.685s)
+picvec paint substage setup: 0.032s
+picvec stage exact-paint-merge: 0.017s (total 19.128s)
+picvec stage exact-paint-merge: 0.011s (total 10.696s)
+picvec stage layered-paint-simplification: 0.164s (total 10.860s)
+picvec stage residual-shape-refinement: 0.741s (total 28.525s)
+picvec stage residual-shape-refinement: 0.156s (total 11.016s)
+picvec stage layered-paint-simplification: 0.591s (total 19.719s)
+picvec adaptive evaluated 2596 2538 601 782: baseline=PerceptualScore { mean_delta_e: 5.0865417, p90_delta_e: 14.652407, missing_edge_fraction: 0.7842865, combined: 10.502766 } refined=PerceptualScore { mean_delta_e: 1.9245104, p90_delta_e: 3.6627429, missing_edge_fraction: 0.3525819, combined: 3.3888724 } boundary_matches=true bytes=773013
+picvec adaptive processing: source 1799 106 566 710, processing 566 710
+picvec stage load-resize: 0.000s (total 0.000s)
+picvec layered merge candidates: considered 1788, evidence 1464, seam 64, layered 53, nonfinite 0, face 136, combined 81, accepted 43
+picvec stage source-supported-paint-merge: 4.307s (total 22.445s)
+picvec stage exact-paint-merge: 0.017s (total 22.462s)
+picvec stage interior-shading: 1.177s (total 15.795s)
+picvec stage face-alpha: 0.004s (total 15.800s)
+picvec stage hierarchical-topology: 0.001s (total 15.801s)
+geometry 569x710 topology: 0.080s
+geometry 534x706 adaptive: 3.915s
+geometry 534x706 tasks: 0.013s
+picvec stage interior-shading: 0.721s (total 11.736s)
+picvec stage face-alpha: 0.004s (total 11.740s)
+picvec stage hierarchical-topology: 0.001s (total 11.741s)
+geometry 560x710 topology: 0.064s
+picvec stage residual-shape-refinement: 0.782s (total 20.501s)
+picvec stage edge-roles: 1.007s (total 1.007s)
+geometry 534x706 fit-chains: 0.995s
+picvec stage structural-analysis: 0.325s (total 1.332s)
+picvec stage shared-geometry: 5.100s (total 21.049s)
+picvec stage paint-preview: 0.033s (total 21.081s)
+selection 534x706 residual: 0.090s
+selection 534x706 classify: 0.002s
+selection 534x706 profiles: 0.019s
+selection 534x706 skeleton: 0.015s
+selection 534x706 overlap1: 0.000s
+selection 534x706 intersections: 0.007s
+selection 534x706 continuations: 0.008s
+selection 534x706 connections: 0.007s
+selection 534x706 junctions: 0.014s
+selection 534x706 extension: 0.000s
+selection 534x706 tangents: 0.000s
+selection 534x706 fit: 0.003s
+picvec structural substage ownership: 0.168s
+picvec structural substage outline-proposals: 0.001s
+picvec structural substage outline-validation: 0.000s
+picvec structural substage colour-patches: 0.087s
+picvec stage structural-selection: 0.256s (total 21.338s)
+picvec stage layered-paint-simplification: 1.797s (total 24.259s)
+picvec stage paint-order-validation: 0.307s (total 21.644s)
+picvec stage perceptual-smoothing: 0.691s (total 2.023s)
+picvec segmentation substage setup: 0.026s
+picvec segmentation substage palette: 0.071s (14229 histogram cells, 948 colours)
+picvec segmentation substage initial-components: 0.009s
+picvec segmentation substage small-components: 0.077s
+picvec segmentation substage compact: 0.007s
+picvec stage covered-hole-simplification: 0.324s (total 21.969s)
+picvec segmentation substage antialias: 0.113s
+picvec segmentation substage finalize: 0.039s (total 0.343s)
+picvec stage final-svg: 0.074s (total 22.043s)
+picvec stage segmentation: 0.712s (total 2.735s)
+picvec stage interior-shading: 2.003s (total 22.505s)
+picvec stage face-alpha: 0.006s (total 22.510s)
+picvec stage hierarchical-topology: 0.002s (total 22.513s)
+geometry 564x710 adaptive: 5.433s
+geometry 564x710 tasks: 0.011s
+picvec stage boundary-regularization: 0.151s (total 2.887s)
+geometry 701x727 topology: 0.118s
+picvec paint substage initial: 3.673s (primary solid 0, gain-bound solid 240, low-range solid 4, model search 476)
+geometry 705x688 adaptive: 6.487s
+geometry 705x688 tasks: 0.017s
+picvec stage interior-shading: 3.456s (total 31.982s)
+picvec stage face-alpha: 0.008s (total 31.990s)
+picvec stage hierarchical-topology: 0.002s (total 31.992s)
+picvec stage residual-shape-refinement: 1.395s (total 25.654s)
+geometry 765x726 topology: 0.196s
+picvec stage paint-aware-merge: 0.569s (total 3.455s)
+picvec stage thin-paint-ownership: 0.160s (total 3.616s)
+geometry 564x710 fit-chains: 1.377s
+geometry 705x688 fit-chains: 1.137s
+picvec stage shared-geometry: 7.050s (total 18.459s)
+picvec stage paint-preview: 0.025s (total 18.484s)
+selection 564x710 residual: 0.146s
+selection 564x710 classify: 0.001s
+selection 564x710 profiles: 0.019s
+selection 564x710 skeleton: 0.016s
+selection 564x710 overlap1: 0.000s
+selection 564x710 intersections: 0.006s
+selection 564x710 continuations: 0.007s
+picvec stage shared-geometry: 8.056s (total 28.047s)
+selection 564x710 connections: 0.007s
+selection 564x710 junctions: 0.013s
+selection 564x710 extension: 0.000s
+selection 564x710 tangents: 0.000s
+picvec stage paint-preview: 0.036s (total 28.084s)
+selection 564x710 fit: 0.042s
+picvec structural substage ownership: 0.261s
+selection 705x688 residual: 0.209s
+selection 705x688 classify: 0.001s
+picvec structural substage outline-proposals: 0.185s
+selection 705x688 profiles: 0.022s
+selection 705x688 skeleton: 0.022s
+selection 705x688 overlap1: 0.000s
+selection 705x688 intersections: 0.008s
+picvec structural substage outline-validation: 0.058s
+selection 705x688 continuations: 0.009s
+selection 705x688 connections: 0.008s
+selection 705x688 junctions: 0.016s
+selection 705x688 extension: 0.000s
+selection 705x688 tangents: 0.000s
+picvec structural substage colour-patches: 0.063s
+picvec stage structural-selection: 0.568s (total 19.052s)
+selection 705x688 fit: 0.132s
+picvec structural substage ownership: 0.430s
+picvec structural substage outline-proposals: 0.113s
+picvec stage paint-order-validation: 0.257s (total 19.309s)
+picvec structural substage outline-validation: 0.070s
+picvec structural substage colour-patches: 0.098s
+picvec stage structural-selection: 0.711s (total 28.795s)
+geometry 560x710 adaptive: 4.926s
+geometry 560x710 tasks: 0.011s
+picvec stage covered-hole-simplification: 0.416s (total 19.724s)
+picvec stage paint-topology-preservation: 1.924s (total 5.540s)
+picvec paint substage setup: 0.028s
+picvec stage final-svg: 0.067s (total 19.791s)
+picvec stage paint-order-validation: 0.827s (total 29.622s)
+geometry 569x710 adaptive: 5.963s
+geometry 569x710 tasks: 0.013s
+geometry 560x710 fit-chains: 0.909s
+picvec stage shared-geometry: 6.102s (total 17.843s)
+picvec stage paint-preview: 0.028s (total 17.871s)
+picvec stage interior-shading: 3.325s (total 28.979s)
+picvec stage face-alpha: 0.019s (total 28.998s)
+picvec stage hierarchical-topology: 0.003s (total 29.001s)
+selection 560x710 residual: 0.127s
+selection 560x710 classify: 0.001s
+selection 560x710 profiles: 0.020s
+picvec paint substage harmonize: 3.610s
+selection 560x710 skeleton: 0.029s
+selection 560x710 overlap1: 0.000s
+selection 560x710 intersections: 0.009s
+selection 560x710 continuations: 0.012s
+selection 560x710 connections: 0.008s
+selection 560x710 junctions: 0.014s
+selection 560x710 extension: 0.000s
+selection 560x710 tangents: 0.000s
+selection 560x710 fit: 0.051s
+picvec structural substage ownership: 0.272s
+geometry 710x745 topology: 0.238s
+picvec structural substage outline-proposals: 0.070s
+picvec paint substage initial: 1.374s (primary solid 0, gain-bound solid 82, low-range solid 12, model search 234)
+picvec structural substage outline-validation: 0.065s
+picvec paint substage couple: 0.278s
+picvec stage paint-fitting: 7.646s (total 14.721s)
+picvec structural substage colour-patches: 0.084s
+picvec stage structural-selection: 0.492s (total 18.363s)
+picvec stage covered-hole-simplification: 1.210s (total 30.832s)
+geometry 569x710 fit-chains: 1.079s
+picvec stage shared-geometry: 7.273s (total 23.074s)
+picvec stage final-svg: 0.180s (total 31.012s)
+picvec stage paint-preview: 0.038s (total 23.111s)
+selection 569x710 residual: 0.222s
+selection 569x710 classify: 0.001s
+selection 569x710 profiles: 0.019s
+selection 569x710 skeleton: 0.017s
+selection 569x710 overlap1: 0.000s
+selection 569x710 intersections: 0.007s
+selection 569x710 continuations: 0.006s
+selection 569x710 connections: 0.008s
+selection 569x710 junctions: 0.014s
+selection 569x710 extension: 0.000s
+selection 569x710 tangents: 0.000s
+selection 569x710 fit: 0.131s
+picvec structural substage ownership: 0.429s
+picvec structural substage outline-proposals: 0.001s
+picvec structural substage outline-validation: 0.000s
+picvec stage covered-hole-simplification: 0.884s (total 19.247s)
+geometry 701x727 adaptive: 5.019s
+geometry 701x727 tasks: 0.016s
+picvec structural substage colour-patches: 0.099s
+picvec stage structural-selection: 0.529s (total 23.640s)
+picvec stage final-svg: 0.095s (total 19.342s)
+picvec stage paint-order-validation: 0.261s (total 23.902s)
+picvec paint substage harmonize: 1.546s
+picvec paint substage couple: 0.115s
+picvec stage paint-fitting: 3.105s (total 8.645s)
+picvec stage covered-hole-simplification: 0.468s (total 24.370s)
+picvec stage final-svg: 0.083s (total 24.453s)
+picvec adaptive evaluated 995 3319 518 690: baseline=PerceptualScore { mean_delta_e: 3.2630596, p90_delta_e: 9.076787, missing_edge_fraction: 0.7469304, combined: 7.339883 } refined=PerceptualScore { mean_delta_e: 1.2830933, p90_delta_e: 1.6185126, missing_edge_fraction: 0.36630288, combined: 2.3237057 } boundary_matches=true bytes=331901
+picvec adaptive processing: source 77 2574 700 709, processing 700 709
+picvec stage load-resize: 0.000s (total 0.000s)
+picvec adaptive evaluated 165 114 548 694: baseline=PerceptualScore { mean_delta_e: 3.088311, p90_delta_e: 9.4304085, missing_edge_fraction: 0.62247837, combined: 7.0293384 } refined=PerceptualScore { mean_delta_e: 0.8990537, p90_delta_e: 1.7352393, missing_edge_fraction: 0.31340057, combined: 2.0388715 } boundary_matches=true bytes=234899
+picvec adaptive processing: source 3373 2582 709 729, processing 709 729
+picvec stage load-resize: 0.000s (total 0.000s)
+geometry 701x727 fit-chains: 1.485s
+picvec stage shared-geometry: 6.907s (total 29.420s)
+picvec stage paint-preview: 0.042s (total 29.461s)
+geometry 765x726 adaptive: 6.386s
+geometry 765x726 tasks: 0.022s
+selection 701x727 residual: 0.137s
+selection 701x727 classify: 0.001s
+selection 701x727 profiles: 0.024s
+selection 701x727 skeleton: 0.020s
+selection 701x727 overlap1: 0.001s
+selection 701x727 intersections: 0.009s
+selection 701x727 continuations: 0.012s
+selection 701x727 connections: 0.009s
+selection 701x727 junctions: 0.019s
+selection 701x727 extension: 0.000s
+selection 701x727 tangents: 0.000s
+selection 701x727 fit: 0.012s
+picvec structural substage ownership: 0.245s
+picvec structural substage outline-proposals: 0.049s
+picvec structural substage outline-validation: 0.096s
+picvec structural substage colour-patches: 0.118s
+picvec stage structural-selection: 0.509s (total 29.971s)
+picvec stage edge-roles: 1.251s (total 1.251s)
+picvec stage edge-roles: 1.340s (total 1.340s)
+picvec stage paint-order-validation: 0.684s (total 30.655s)
+picvec stage structural-analysis: 0.618s (total 1.870s)
+picvec stage structural-analysis: 0.765s (total 2.105s)
+geometry 765x726 fit-chains: 1.757s
+picvec layered merge candidates: considered 1856, evidence 1545, seam 84, layered 60, nonfinite 0, face 123, combined 71, accepted 33
+picvec stage source-supported-paint-merge: 4.744s (total 19.465s)
+picvec stage exact-paint-merge: 0.013s (total 19.478s)
+picvec stage shared-geometry: 8.600s (total 40.592s)
+picvec stage covered-hole-simplification: 0.864s (total 31.519s)
+picvec stage paint-preview: 0.070s (total 40.663s)
+picvec stage perceptual-smoothing: 0.840s (total 2.710s)
+picvec adaptive evaluated 3463 114 553 694: baseline=PerceptualScore { mean_delta_e: 3.569568, p90_delta_e: 9.279533, missing_edge_fraction: 0.7567717, combined: 7.588434 } refined=PerceptualScore { mean_delta_e: 1.0160459, p90_delta_e: 1.8752949, missing_edge_fraction: 0.39800996, combined: 2.4013684 } boundary_matches=true bytes=303721
+picvec adaptive processing: source 3383 4082 661 730, processing 661 730
+picvec stage load-resize: 0.001s (total 0.001s)
+picvec segmentation substage setup: 0.033s
+picvec stage final-svg: 0.109s (total 31.628s)
+picvec segmentation substage palette: 0.085s (18019 histogram cells, 954 colours)
+picvec segmentation substage initial-components: 0.017s
+picvec segmentation substage small-components: 0.150s
+picvec segmentation substage compact: 0.015s
+picvec stage perceptual-smoothing: 0.890s (total 2.995s)
+picvec segmentation substage setup: 0.037s
+selection 765x726 residual: 0.393s
+selection 765x726 classify: 0.002s
+selection 765x726 profiles: 0.026s
+picvec segmentation substage antialias: 0.141s
+selection 765x726 skeleton: 0.031s
+selection 765x726 overlap1: 0.001s
+selection 765x726 intersections: 0.008s
+picvec segmentation substage palette: 0.081s (16729 histogram cells, 897 colours)
+selection 765x726 continuations: 0.014s
+picvec segmentation substage finalize: 0.038s (total 0.479s)
+selection 765x726 connections: 0.009s
+picvec segmentation substage initial-components: 0.021s
+selection 765x726 junctions: 0.020s
+selection 765x726 extension: 0.001s
+selection 765x726 tangents: 0.000s
+selection 765x726 fit: 0.036s
+picvec structural substage ownership: 0.544s
+picvec structural substage outline-proposals: 0.005s
+picvec structural substage outline-validation: 0.000s
+picvec segmentation substage small-components: 0.113s
+picvec segmentation substage compact: 0.014s
+picvec structural substage colour-patches: 0.182s
+picvec stage structural-selection: 0.732s (total 41.394s)
+picvec segmentation substage antialias: 0.169s
+picvec segmentation substage finalize: 0.044s (total 0.479s)
+picvec stage layered-paint-simplification: 1.004s (total 20.482s)
+picvec stage segmentation: 1.083s (total 3.793s)
+picvec adaptive evaluated 3403 912 685 668: baseline=PerceptualScore { mean_delta_e: 3.1897044, p90_delta_e: 9.524302, missing_edge_fraction: 0.74477863, combined: 7.4794235 } refined=PerceptualScore { mean_delta_e: 1.2092404, p90_delta_e: 2.0901978, missing_edge_fraction: 0.30075186, combined: 2.2824929 } boundary_matches=true bytes=356387
+picvec adaptive processing: source 917 900 697 690, processing 697 690
+picvec stage load-resize: 0.000s (total 0.000s)
+picvec stage paint-order-validation: 0.445s (total 41.840s)
+picvec stage segmentation: 0.857s (total 3.852s)
+picvec stage boundary-regularization: 0.177s (total 3.969s)
+picvec stage edge-roles: 1.253s (total 1.254s)
+picvec stage boundary-regularization: 0.190s (total 4.042s)
+picvec adaptive evaluated 987 114 544 694: baseline=PerceptualScore { mean_delta_e: 3.0235484, p90_delta_e: 7.910226, missing_edge_fraction: 0.7413793, combined: 6.748825 } refined=PerceptualScore { mean_delta_e: 1.2376082, p90_delta_e: 2.2567863, missing_edge_fraction: 0.44043887, combined: 2.7809548 } boundary_matches=true bytes=259262
+picvec adaptive processing: source 1746 4129 643 690, processing 643 690
+picvec stage load-resize: 0.001s (total 0.001s)
+picvec stage paint-aware-merge: 0.348s (total 4.317s)
+geometry 710x745 adaptive: 6.737s
+geometry 710x745 tasks: 0.026s
+picvec stage structural-analysis: 0.578s (total 1.833s)
+picvec stage paint-aware-merge: 0.568s (total 4.609s)
+picvec stage thin-paint-ownership: 0.409s (total 4.726s)
+picvec stage residual-shape-refinement: 1.152s (total 21.634s)
+picvec stage thin-paint-ownership: 0.185s (total 4.795s)
+picvec stage edge-roles: 1.217s (total 1.218s)
+picvec stage perceptual-smoothing: 0.799s (total 2.632s)
+picvec stage edge-roles: 1.107s (total 1.107s)
+picvec stage structural-analysis: 0.327s (total 1.544s)
+picvec segmentation substage setup: 0.035s
+picvec stage covered-hole-simplification: 1.531s (total 43.371s)
+picvec segmentation substage palette: 0.087s (18427 histogram cells, 876 colours)
+picvec segmentation substage initial-components: 0.018s
+picvec stage final-svg: 0.139s (total 43.510s)
+picvec segmentation substage small-components: 0.151s
+picvec segmentation substage compact: 0.013s
+picvec stage structural-analysis: 0.345s (total 1.452s)
+picvec layered merge candidates: considered 850, evidence 684, seam 34, layered 32, nonfinite 0, face 67, combined 45, accepted 20
+picvec stage source-supported-paint-merge: 6.310s (total 14.954s)
+picvec stage exact-paint-merge: 0.012s (total 14.966s)
+picvec segmentation substage antialias: 0.183s
+picvec segmentation substage finalize: 0.051s (total 0.538s)
+picvec stage layered-paint-simplification: 0.112s (total 15.078s)
+picvec stage residual-shape-refinement: 0.079s (total 15.158s)
+picvec stage perceptual-smoothing: 0.822s (total 2.366s)
+picvec segmentation substage setup: 0.038s
+picvec segmentation substage palette: 0.085s (14468 histogram cells, 861 colours)
+picvec segmentation substage initial-components: 0.016s
+picvec stage segmentation: 1.050s (total 3.683s)
+picvec segmentation substage small-components: 0.082s
+picvec segmentation substage compact: 0.015s
+picvec stage perceptual-smoothing: 0.790s (total 2.242s)
+picvec segmentation substage setup: 0.030s
+picvec segmentation substage palette: 0.064s (13276 histogram cells, 676 colours)
+picvec segmentation substage antialias: 0.167s
+picvec stage boundary-regularization: 0.196s (total 3.879s)
+picvec segmentation substage initial-components: 0.014s
+picvec stage paint-topology-preservation: 1.888s (total 6.614s)
+picvec paint substage setup: 0.043s
+picvec segmentation substage finalize: 0.055s (total 0.459s)
+picvec segmentation substage small-components: 0.074s
+picvec segmentation substage compact: 0.010s
+picvec segmentation substage antialias: 0.112s
+picvec segmentation substage finalize: 0.055s (total 0.359s)
+picvec stage interior-shading: 0.896s (total 16.053s)
+picvec stage face-alpha: 0.004s (total 16.057s)
+picvec stage hierarchical-topology: 0.001s (total 16.059s)
+picvec stage segmentation: 0.856s (total 3.223s)
+geometry 566x710 topology: 0.092s
+picvec stage paint-aware-merge: 0.530s (total 4.409s)
+picvec stage segmentation: 0.704s (total 2.946s)
+picvec stage boundary-regularization: 0.207s (total 3.430s)
+geometry 710x745 fit-chains: 2.729s
+picvec stage boundary-regularization: 0.184s (total 3.130s)
+picvec stage thin-paint-ownership: 0.277s (total 4.686s)
+picvec stage paint-topology-preservation: 2.554s (total 7.349s)
+picvec stage shared-geometry: 9.996s (total 38.997s)
+picvec paint substage setup: 0.047s
+picvec stage paint-preview: 0.063s (total 39.060s)
+picvec adaptive evaluated 2539 4106 681 707: baseline=PerceptualScore { mean_delta_e: 3.4259088, p90_delta_e: 9.904074, missing_edge_fraction: 0.78804564, combined: 7.867425 } refined=PerceptualScore { mean_delta_e: 1.2273322, p90_delta_e: 2.1902995, missing_edge_fraction: 0.35666534, combined: 2.4984155 } boundary_matches=true bytes=510375
+picvec adaptive processing: source 63 3315 710 692, processing 710 692
+picvec stage load-resize: 0.000s (total 0.000s)
+picvec stage paint-aware-merge: 0.292s (total 3.422s)
+picvec stage interior-shading: 2.906s (total 24.540s)
+picvec stage face-alpha: 0.015s (total 24.555s)
+picvec stage hierarchical-topology: 0.002s (total 24.556s)
+picvec stage thin-paint-ownership: 0.189s (total 3.611s)
+geometry 574x776 topology: 0.120s
+picvec stage paint-aware-merge: 0.627s (total 4.057s)
+picvec stage thin-paint-ownership: 0.178s (total 4.235s)
+selection 710x745 residual: 0.606s
+selection 710x745 classify: 0.002s
+selection 710x745 profiles: 0.027s
+selection 710x745 skeleton: 0.032s
+selection 710x745 overlap1: 0.001s
+selection 710x745 intersections: 0.011s
+selection 710x745 continuations: 0.012s
+selection 710x745 connections: 0.010s
+selection 710x745 junctions: 0.019s
+selection 710x745 extension: 0.001s
+selection 710x745 tangents: 0.000s
+selection 710x745 fit: 0.018s
+picvec structural substage ownership: 0.743s
+picvec structural substage outline-proposals: 0.081s
+picvec structural substage outline-validation: 0.133s
+picvec structural substage colour-patches: 0.191s
+picvec stage structural-selection: 1.149s (total 40.209s)
+picvec paint substage initial: 2.058s (primary solid 0, gain-bound solid 222, low-range solid 3, model search 373)
+picvec stage edge-roles: 1.380s (total 1.381s)
+picvec stage paint-order-validation: 0.445s (total 40.654s)
+picvec stage paint-topology-preservation: 1.407s (total 5.019s)
+picvec stage paint-topology-preservation: 1.898s (total 6.584s)
+picvec paint substage setup: 0.034s
+picvec paint substage setup: 0.039s
+picvec stage structural-analysis: 0.455s (total 1.835s)
+picvec paint substage initial: 2.307s (primary solid 0, gain-bound solid 63, low-range solid 6, model search 325)
+picvec stage paint-topology-preservation: 1.993s (total 6.227s)
+picvec paint substage setup: 0.036s
+picvec stage covered-hole-simplification: 1.275s (total 41.929s)
+picvec stage perceptual-smoothing: 0.901s (total 2.736s)
+picvec segmentation substage setup: 0.038s
+picvec segmentation substage palette: 0.125s (23800 histogram cells, 1117 colours)
+picvec stage final-svg: 0.196s (total 42.126s)
+picvec segmentation substage initial-components: 0.028s
+picvec paint substage initial: 1.368s (primary solid 0, gain-bound solid 57, low-range solid 5, model search 220)
+picvec segmentation substage small-components: 0.198s
+picvec segmentation substage compact: 0.015s
+picvec segmentation substage antialias: 0.180s
+picvec segmentation substage finalize: 0.040s (total 0.624s)
+picvec stage segmentation: 1.174s (total 3.910s)
+picvec paint substage initial: 2.375s (primary solid 0, gain-bound solid 102, low-range solid 9, model search 383)
+picvec paint substage initial: 1.654s (primary solid 0, gain-bound solid 62, low-range solid 10, model search 288)
+picvec stage boundary-regularization: 0.189s (total 4.098s)
+picvec paint substage harmonize: 3.038s
+picvec paint substage harmonize: 1.230s
+picvec paint substage couple: 0.163s
+picvec stage paint-fitting: 5.354s (total 11.968s)
+geometry 574x776 adaptive: 4.170s
+geometry 574x776 tasks: 0.017s
+picvec paint substage couple: 0.118s
+picvec stage paint-fitting: 2.790s (total 7.809s)
+geometry 566x710 adaptive: 5.151s
+geometry 566x710 tasks: 0.012s
+picvec paint substage harmonize: 2.660s
+picvec paint substage couple: 0.084s
+picvec stage paint-fitting: 5.154s (total 12.503s)
+picvec stage paint-aware-merge: 0.917s (total 5.015s)
+picvec stage thin-paint-ownership: 0.246s (total 5.262s)
+geometry 566x710 fit-chains: 0.809s
+picvec stage shared-geometry: 6.340s (total 22.399s)
+picvec stage paint-preview: 0.024s (total 22.423s)
+selection 566x710 residual: 0.086s
+selection 566x710 classify: 0.001s
+selection 566x710 profiles: 0.022s
+selection 566x710 skeleton: 0.016s
+selection 566x710 overlap1: 0.000s
+selection 566x710 intersections: 0.010s
+selection 566x710 continuations: 0.014s
+selection 566x710 connections: 0.009s
+selection 566x710 junctions: 0.017s
+selection 566x710 extension: 0.000s
+selection 566x710 tangents: 0.000s
+selection 566x710 fit: 0.023s
+picvec structural substage ownership: 0.199s
+picvec structural substage outline-proposals: 0.002s
+picvec structural substage outline-validation: 0.000s
+geometry 574x776 fit-chains: 1.461s
+picvec structural substage colour-patches: 0.093s
+picvec stage structural-selection: 0.294s (total 22.717s)
+picvec paint substage harmonize: 1.851s
+picvec stage shared-geometry: 5.935s (total 30.492s)
+picvec stage paint-preview: 0.058s (total 30.549s)
+picvec paint substage couple: 0.170s
+picvec stage paint-fitting: 4.488s (total 11.072s)
+selection 574x776 residual: 0.314s
+selection 574x776 classify: 0.001s
+selection 574x776 profiles: 0.022s
+selection 574x776 skeleton: 0.016s
+selection 574x776 overlap1: 0.001s
+selection 574x776 intersections: 0.007s
+selection 574x776 continuations: 0.013s
+selection 574x776 connections: 0.007s
+selection 574x776 junctions: 0.016s
+selection 574x776 extension: 0.000s
+selection 574x776 tangents: 0.000s
+selection 574x776 fit: 0.018s
+picvec structural substage ownership: 0.419s
+picvec structural substage outline-proposals: 0.003s
+picvec structural substage outline-validation: 0.000s
+picvec stage covered-hole-simplification: 0.653s (total 23.370s)
+picvec structural substage colour-patches: 0.156s
+picvec stage structural-selection: 0.578s (total 31.127s)
+picvec stage final-svg: 0.066s (total 23.435s)
+picvec adaptive evaluated 84 4089 690 725: baseline=PerceptualScore { mean_delta_e: 3.8221424, p90_delta_e: 10.867838, missing_edge_fraction: 0.7006117, combined: 8.168934 } refined=PerceptualScore { mean_delta_e: 1.3806785, p90_delta_e: 2.8112571, missing_edge_fraction: 0.32385752, combined: 2.7173808 } boundary_matches=true bytes=614735
+picvec adaptive processing: source 1740 3316 650 697, processing 650 697
+picvec stage load-resize: 0.000s (total 0.000s)
+picvec stage paint-order-validation: 0.456s (total 31.584s)
+picvec stage paint-topology-preservation: 2.536s (total 7.797s)
+picvec stage covered-hole-simplification: 0.747s (total 32.331s)
+picvec paint substage setup: 0.034s
+picvec layered merge candidates: considered 1462, evidence 1247, seam 24, layered 40, nonfinite 0, face 82, combined 75, accepted 34
+picvec stage source-supported-paint-merge: 3.573s (total 15.541s)
+picvec stage exact-paint-merge: 0.017s (total 15.558s)
+picvec stage final-svg: 0.122s (total 32.453s)
+picvec stage layered-paint-simplification: 0.068s (total 15.626s)
+picvec stage residual-shape-refinement: 0.017s (total 15.643s)
+picvec stage edge-roles: 1.272s (total 1.272s)
+picvec layered merge candidates: considered 1097, evidence 910, seam 41, layered 35, nonfinite 0, face 62, combined 60, accepted 24
+picvec stage source-supported-paint-merge: 3.572s (total 16.075s)
+picvec paint substage harmonize: 4.350s
+picvec stage exact-paint-merge: 0.018s (total 16.094s)
+picvec paint substage couple: 0.080s
+picvec stage paint-fitting: 6.176s (total 12.404s)
+picvec layered merge candidates: considered 738, evidence 634, seam 16, layered 14, nonfinite 0, face 28, combined 44, accepted 16
+picvec stage source-supported-paint-merge: 4.355s (total 12.164s)
+picvec stage exact-paint-merge: 0.013s (total 12.177s)
+picvec stage structural-analysis: 0.541s (total 1.813s)
+picvec stage layered-paint-simplification: 0.111s (total 12.289s)
+picvec stage layered-paint-simplification: 0.465s (total 16.559s)
+picvec stage residual-shape-refinement: 0.260s (total 12.549s)
+picvec layered merge candidates: considered 1341, evidence 1145, seam 27, layered 26, nonfinite 0, face 50, combined 83, accepted 36
+picvec stage source-supported-paint-merge: 3.083s (total 14.155s)
+picvec stage exact-paint-merge: 0.014s (total 14.168s)
+picvec stage residual-shape-refinement: 0.546s (total 17.105s)
+picvec stage perceptual-smoothing: 0.895s (total 2.707s)
+picvec segmentation substage setup: 0.038s
+picvec segmentation substage palette: 0.087s (14764 histogram cells, 680 colours)
+picvec segmentation substage initial-components: 0.021s
+picvec stage interior-shading: 1.978s (total 17.621s)
+picvec stage face-alpha: 0.021s (total 17.642s)
+picvec segmentation substage small-components: 0.149s
+picvec stage hierarchical-topology: 0.002s (total 17.644s)
+picvec segmentation substage compact: 0.015s
+picvec segmentation substage antialias: 0.151s
+geometry 700x709 topology: 0.121s
+picvec segmentation substage finalize: 0.049s (total 0.513s)
+picvec stage interior-shading: 1.123s (total 13.672s)
+picvec stage face-alpha: 0.004s (total 13.677s)
+picvec stage hierarchical-topology: 0.002s (total 13.679s)
+geometry 643x690 topology: 0.087s
+picvec stage segmentation: 1.016s (total 3.724s)
+picvec stage boundary-regularization: 0.191s (total 3.915s)
+picvec stage paint-aware-merge: 0.415s (total 4.330s)
+picvec stage interior-shading: 1.877s (total 18.982s)
+picvec stage face-alpha: 0.016s (total 18.998s)
+picvec stage hierarchical-topology: 0.002s (total 19.000s)
+geometry 709x729 topology: 0.105s
+picvec stage thin-paint-ownership: 0.277s (total 4.607s)
+picvec paint substage initial: 4.185s (primary solid 0, gain-bound solid 331, low-range solid 12, model search 608)
+picvec stage layered-paint-simplification: 3.056s (total 17.224s)
+picvec stage residual-shape-refinement: 0.289s (total 17.513s)
+picvec stage paint-topology-preservation: 1.916s (total 6.523s)
+picvec paint substage setup: 0.030s
+picvec adaptive evaluated 1807 114 550 694: baseline=PerceptualScore { mean_delta_e: 3.2021854, p90_delta_e: 7.6787443, missing_edge_fraction: 0.7649667, combined: 6.8073816 } refined=PerceptualScore { mean_delta_e: 1.4011103, p90_delta_e: 2.5084872, missing_edge_fraction: 0.37176645, combined: 2.749194 } boundary_matches=true bytes=230196
+picvec adaptive processing: source 967 2544 580 732, processing 580 732
+picvec stage load-resize: 0.000s (total 0.000s)
+picvec layered merge candidates: considered 977, evidence 781, seam 27, layered 33, nonfinite 0, face 91, combined 56, accepted 22
+picvec stage source-supported-paint-merge: 5.932s (total 18.335s)
+picvec stage exact-paint-merge: 0.016s (total 18.351s)
+picvec stage layered-paint-simplification: 0.052s (total 18.403s)
+picvec stage residual-shape-refinement: 0.019s (total 18.423s)
+picvec stage interior-shading: 2.115s (total 19.628s)
+picvec stage face-alpha: 0.006s (total 19.634s)
+picvec stage hierarchical-topology: 0.002s (total 19.636s)
+geometry 661x730 topology: 0.118s
+picvec stage edge-roles: 1.257s (total 1.257s)
+picvec paint substage initial: 1.972s (primary solid 0, gain-bound solid 158, low-range solid 8, model search 308)
+picvec adaptive evaluated 160 1686 558 760: baseline=PerceptualScore { mean_delta_e: 3.783501, p90_delta_e: 10.782241, missing_edge_fraction: 0.8159824, combined: 8.463419 } refined=PerceptualScore { mean_delta_e: 1.3155341, p90_delta_e: 2.5653124, missing_edge_fraction: 0.38929617, combined: 2.7860038 } boundary_matches=true bytes=607334
+picvec adaptive processing: source 2521 3384 733 556, processing 733 556
+picvec stage load-resize: 0.000s (total 0.000s)
+picvec stage structural-analysis: 0.420s (total 1.677s)
+geometry 700x709 adaptive: 5.813s
+geometry 700x709 tasks: 0.013s
+picvec stage interior-shading: 1.679s (total 20.101s)
+picvec stage face-alpha: 0.006s (total 20.107s)
+picvec stage hierarchical-topology: 0.002s (total 20.109s)
+geometry 697x690 topology: 0.104s
+picvec stage perceptual-smoothing: 0.742s (total 2.419s)
+picvec segmentation substage setup: 0.033s
+geometry 700x709 fit-chains: 0.675s
+picvec stage edge-roles: 1.142s (total 1.142s)
+picvec segmentation substage palette: 0.092s (18745 histogram cells, 964 colours)
+picvec stage shared-geometry: 6.751s (total 24.395s)
+picvec segmentation substage initial-components: 0.016s
+picvec stage paint-preview: 0.033s (total 24.428s)
+picvec segmentation substage small-components: 0.123s
+picvec segmentation substage compact: 0.013s
+picvec segmentation substage antialias: 0.132s
+picvec stage structural-analysis: 0.334s (total 1.476s)
+selection 700x709 residual: 0.260s
+selection 700x709 classify: 0.001s
+selection 700x709 profiles: 0.025s
+picvec segmentation substage finalize: 0.049s (total 0.459s)
+selection 700x709 skeleton: 0.022s
+selection 700x709 overlap1: 0.001s
+selection 700x709 intersections: 0.009s
+selection 700x709 continuations: 0.010s
+selection 700x709 connections: 0.007s
+selection 700x709 junctions: 0.017s
+selection 700x709 extension: 0.000s
+selection 700x709 tangents: 0.000s
+geometry 643x690 adaptive: 6.727s
+geometry 643x690 tasks: 0.012s
+selection 700x709 fit: 0.135s
+picvec structural substage ownership: 0.489s
+picvec stage segmentation: 0.917s (total 3.336s)
+picvec paint substage harmonize: 1.995s
+picvec paint substage couple: 0.151s
+picvec stage paint-fitting: 4.199s (total 10.722s)
+picvec stage boundary-regularization: 0.187s (total 3.523s)
+picvec structural substage outline-proposals: 0.481s
+picvec stage perceptual-smoothing: 0.736s (total 2.211s)
+picvec segmentation substage setup: 0.029s
+picvec structural substage outline-validation: 0.095s
+picvec segmentation substage palette: 0.073s (16211 histogram cells, 979 colours)
+picvec segmentation substage initial-components: 0.016s
+geometry 643x690 fit-chains: 0.793s
+picvec structural substage colour-patches: 0.133s
+picvec stage structural-selection: 1.199s (total 25.627s)
+picvec segmentation substage small-components: 0.124s
+picvec stage shared-geometry: 7.724s (total 21.403s)
+picvec segmentation substage compact: 0.012s
+picvec stage paint-preview: 0.024s (total 21.427s)
+geometry 709x729 adaptive: 6.472s
+geometry 709x729 tasks: 0.014s
+picvec stage paint-aware-merge: 0.391s (total 3.914s)
+picvec paint substage harmonize: 6.026s
+picvec segmentation substage antialias: 0.114s
+picvec segmentation substage finalize: 0.047s (total 0.416s)
+selection 643x690 residual: 0.200s
+selection 643x690 classify: 0.001s
+selection 643x690 profiles: 0.024s
+selection 643x690 skeleton: 0.017s
+selection 643x690 overlap1: 0.000s
+selection 643x690 intersections: 0.008s
+selection 643x690 continuations: 0.008s
+selection 643x690 connections: 0.008s
+selection 643x690 junctions: 0.017s
+selection 643x690 extension: 0.000s
+selection 643x690 tangents: 0.000s
+selection 643x690 fit: 0.024s
+picvec structural substage ownership: 0.309s
+picvec structural substage outline-proposals: 0.001s
+picvec structural substage outline-validation: 0.000s
+picvec stage thin-paint-ownership: 0.276s (total 4.190s)
+picvec structural substage colour-patches: 0.077s
+picvec stage structural-selection: 0.386s (total 21.814s)
+picvec paint substage couple: 0.326s
+picvec stage paint-fitting: 10.640s (total 18.437s)
+picvec stage paint-order-validation: 0.368s (total 22.181s)
+picvec stage segmentation: 1.078s (total 3.290s)
+picvec stage boundary-regularization: 0.155s (total 3.445s)
+picvec stage paint-order-validation: 1.164s (total 26.791s)
+picvec stage covered-hole-simplification: 0.391s (total 22.572s)
+picvec stage final-svg: 0.093s (total 22.664s)
+picvec stage paint-aware-merge: 0.481s (total 3.926s)
+picvec stage thin-paint-ownership: 0.177s (total 4.103s)
+geometry 709x729 fit-chains: 1.729s
+picvec stage shared-geometry: 8.479s (total 27.479s)
+picvec stage paint-preview: 0.041s (total 27.519s)
+geometry 661x730 adaptive: 5.154s
+selection 709x729 residual: 0.124s
+selection 709x729 classify: 0.001s
+geometry 661x730 tasks: 0.015s
+selection 709x729 profiles: 0.022s
+selection 709x729 skeleton: 0.019s
+selection 709x729 overlap1: 0.001s
+selection 709x729 intersections: 0.009s
+selection 709x729 continuations: 0.011s
+selection 709x729 connections: 0.010s
+selection 709x729 junctions: 0.021s
+selection 709x729 extension: 0.000s
+selection 709x729 tangents: 0.000s
+selection 709x729 fit: 0.021s
+picvec structural substage ownership: 0.250s
+picvec structural substage outline-proposals: 0.004s
+picvec structural substage outline-validation: 0.000s
+picvec structural substage colour-patches: 0.111s
+picvec stage structural-selection: 0.366s (total 27.885s)
+picvec stage covered-hole-simplification: 1.329s (total 28.120s)
+picvec stage paint-topology-preservation: 2.262s (total 6.452s)
+picvec adaptive evaluated 881 1726 743 704: baseline=PerceptualScore { mean_delta_e: 3.7926443, p90_delta_e: 11.266157, missing_edge_fraction: 0.75666666, combined: 8.483152 } refined=PerceptualScore { mean_delta_e: 1.3709412, p90_delta_e: 2.6998894, missing_edge_fraction: 0.38060606, combined: 2.8386974 } boundary_matches=true bytes=690864
+picvec paint substage setup: 0.032s
+picvec layered merge candidates: considered 1211, evidence 1029, seam 55, layered 24, nonfinite 0, face 61, combined 47, accepted 19
+picvec stage paint-order-validation: 0.389s (total 28.274s)
+picvec stage source-supported-paint-merge: 2.991s (total 13.713s)
+picvec stage exact-paint-merge: 0.014s (total 13.727s)
+picvec paint substage initial: 0.793s (primary solid 0, gain-bound solid 129, low-range solid 6, model search 347)
+geometry 661x730 fit-chains: 1.386s
+picvec stage covered-hole-simplification: 0.781s (total 29.055s)
+picvec stage final-svg: 0.058s (total 29.113s)
+picvec stage shared-geometry: 6.823s (total 26.459s)
+picvec stage paint-topology-preservation: 1.914s (total 6.017s)
+picvec stage paint-preview: 0.040s (total 26.499s)
+picvec paint substage setup: 0.029s
+selection 661x730 residual: 0.351s
+selection 661x730 classify: 0.001s
+selection 661x730 profiles: 0.028s
+selection 661x730 skeleton: 0.021s
+selection 661x730 overlap1: 0.001s
+selection 661x730 intersections: 0.007s
+selection 661x730 continuations: 0.010s
+selection 661x730 connections: 0.007s
+selection 661x730 junctions: 0.020s
+selection 661x730 extension: 0.000s
+selection 661x730 tangents: 0.000s
+selection 661x730 fit: 0.049s
+picvec structural substage ownership: 0.497s
+picvec structural substage outline-proposals: 0.004s
+picvec structural substage outline-validation: 0.080s
+picvec structural substage colour-patches: 0.100s
+picvec stage structural-selection: 0.681s (total 27.180s)
+picvec stage paint-order-validation: 0.479s (total 27.659s)
+geometry 697x690 adaptive: 6.600s
+geometry 697x690 tasks: 0.015s
+picvec stage final-svg: 2.692s (total 30.812s)
+picvec paint substage initial: 1.788s (primary solid 0, gain-bound solid 171, low-range solid 4, model search 330)
+geometry 697x690 fit-chains: 0.334s
+picvec stage shared-geometry: 7.207s (total 27.316s)
+picvec stage paint-preview: 0.033s (total 27.349s)
+selection 697x690 residual: 0.315s
+selection 697x690 classify: 0.001s
+selection 697x690 profiles: 0.022s
+selection 697x690 skeleton: 0.019s
+selection 697x690 overlap1: 0.001s
+selection 697x690 intersections: 0.009s
+selection 697x690 continuations: 0.007s
+selection 697x690 connections: 0.007s
+selection 697x690 junctions: 0.020s
+selection 697x690 extension: 0.000s
+selection 697x690 tangents: 0.000s
+selection 697x690 fit: 0.081s
+picvec structural substage ownership: 0.485s
+picvec stage covered-hole-simplification: 1.369s (total 29.028s)
+picvec stage final-svg: 0.132s (total 29.159s)
+picvec paint substage harmonize: 2.974s
+picvec paint substage harmonize: 1.099s
+picvec structural substage outline-proposals: 0.518s
+picvec paint substage couple: 0.124s
+picvec stage paint-fitting: 3.958s (total 10.409s)
+picvec structural substage outline-validation: 0.078s
+picvec paint substage couple: 0.132s
+picvec stage paint-fitting: 3.080s (total 9.098s)
+picvec structural substage colour-patches: 0.088s
+picvec stage structural-selection: 1.169s (total 28.518s)
+picvec adaptive evaluated 1755 4138 625 672: baseline=PerceptualScore { mean_delta_e: 2.6787884, p90_delta_e: 6.1758375, missing_edge_fraction: 0.7464366, combined: 5.9150996 } refined=PerceptualScore { mean_delta_e: 1.0395025, p90_delta_e: 2.2458925, missing_edge_fraction: 0.32333082, combined: 2.3361256 } boundary_matches=true bytes=194904
+picvec stage paint-order-validation: 0.394s (total 28.912s)
+picvec stage layered-paint-simplification: 4.586s (total 18.313s)
+picvec stage residual-shape-refinement: 0.441s (total 18.754s)
+picvec layered merge candidates: considered 2387, evidence 1912, seam 136, layered 84, nonfinite 0, face 197, combined 111, accepted 31
+picvec stage source-supported-paint-merge: 7.330s (total 25.767s)
+picvec stage exact-paint-merge: 0.017s (total 25.784s)
+picvec stage covered-hole-simplification: 0.826s (total 29.738s)
+picvec stage final-svg: 0.265s (total 30.003s)
+picvec stage layered-paint-simplification: 0.716s (total 26.500s)
+picvec stage interior-shading: 1.126s (total 19.879s)
+picvec stage face-alpha: 0.005s (total 19.884s)
+picvec stage hierarchical-topology: 0.003s (total 19.887s)
+picvec stage residual-shape-refinement: 0.360s (total 26.859s)
+geometry 650x697 topology: 0.080s
+picvec adaptive evaluated 3393 4092 641 710: baseline=PerceptualScore { mean_delta_e: 3.1964686, p90_delta_e: 8.003596, missing_edge_fraction: 0.7984072, combined: 7.0350714 } refined=PerceptualScore { mean_delta_e: 1.2535073, p90_delta_e: 2.420066, missing_edge_fraction: 0.3031359, combined: 2.4415126 } boundary_matches=true bytes=377408
+picvec adaptive evaluated 3383 2592 689 709: baseline=PerceptualScore { mean_delta_e: 3.1350896, p90_delta_e: 8.804575, missing_edge_fraction: 0.68324965, combined: 6.9823694 } refined=PerceptualScore { mean_delta_e: 1.0682371, p90_delta_e: 1.7432821, missing_edge_fraction: 0.2788681, combined: 2.0146239 } boundary_matches=true bytes=348900
+picvec layered merge candidates: considered 1282, evidence 1036, seam 70, layered 37, nonfinite 0, face 82, combined 76, accepted 18
+picvec stage source-supported-paint-merge: 3.395s (total 12.492s)
+picvec stage exact-paint-merge: 0.012s (total 12.504s)
+picvec stage layered-paint-simplification: 0.048s (total 12.552s)
+picvec stage residual-shape-refinement: 0.094s (total 12.646s)
+picvec layered merge candidates: considered 1325, evidence 1039, seam 29, layered 51, nonfinite 0, face 112, combined 114, accepted 31
+picvec stage source-supported-paint-merge: 4.421s (total 14.830s)
+picvec stage exact-paint-merge: 0.010s (total 14.840s)
+picvec stage interior-shading: 1.199s (total 13.844s)
+picvec stage face-alpha: 0.004s (total 13.848s)
+picvec stage hierarchical-topology: 0.001s (total 13.850s)
+picvec stage layered-paint-simplification: 0.456s (total 15.296s)
+geometry 733x556 topology: 0.057s
+picvec adaptive evaluated 87 2584 680 689: baseline=PerceptualScore { mean_delta_e: 2.8735836, p90_delta_e: 8.46096, missing_edge_fraction: 0.7876683, combined: 7.0405016 } refined=PerceptualScore { mean_delta_e: 1.0308087, p90_delta_e: 2.0499508, missing_edge_fraction: 0.3260964, combined: 2.2621334 } boundary_matches=true bytes=402865
+picvec stage interior-shading: 3.036s (total 29.896s)
+picvec stage face-alpha: 0.006s (total 29.902s)
+picvec stage hierarchical-topology: 0.002s (total 29.904s)
+picvec stage residual-shape-refinement: 0.550s (total 15.845s)
+geometry 710x692 topology: 0.093s
+geometry 650x697 adaptive: 3.449s
+geometry 650x697 tasks: 0.007s
+geometry 650x697 fit-chains: 0.111s
+picvec stage shared-geometry: 3.724s (total 23.611s)
+picvec stage paint-preview: 0.022s (total 23.633s)
+selection 650x697 residual: 0.034s
+selection 650x697 classify: 0.001s
+selection 650x697 profiles: 0.007s
+selection 650x697 skeleton: 0.015s
+selection 650x697 overlap1: 0.000s
+selection 650x697 intersections: 0.003s
+selection 650x697 continuations: 0.006s
+selection 650x697 connections: 0.002s
+selection 650x697 junctions: 0.003s
+selection 650x697 extension: 0.000s
+selection 650x697 tangents: 0.000s
+selection 650x697 fit: 0.005s
+picvec structural substage ownership: 0.076s
+picvec structural substage outline-proposals: 0.422s
+picvec structural substage outline-validation: 0.061s
+picvec structural substage colour-patches: 0.075s
+picvec stage structural-selection: 0.636s (total 24.268s)
+geometry 733x556 adaptive: 1.992s
+geometry 733x556 tasks: 0.007s
+geometry 733x556 fit-chains: 0.189s
+picvec stage shared-geometry: 2.338s (total 16.187s)
+picvec stage paint-preview: 0.029s (total 16.216s)
+selection 733x556 residual: 0.062s
+selection 733x556 classify: 0.001s
+selection 733x556 profiles: 0.007s
+selection 733x556 skeleton: 0.014s
+selection 733x556 overlap1: 0.000s
+selection 733x556 intersections: 0.003s
+selection 733x556 continuations: 0.011s
+selection 733x556 connections: 0.003s
+selection 733x556 junctions: 0.004s
+selection 733x556 extension: 0.000s
+selection 733x556 tangents: 0.000s
+selection 733x556 fit: 0.013s
+picvec structural substage ownership: 0.119s
+picvec stage paint-order-validation: 0.652s (total 24.921s)
+picvec structural substage outline-proposals: 0.106s
+picvec structural substage outline-validation: 0.064s
+picvec structural substage colour-patches: 0.060s
+picvec stage structural-selection: 0.349s (total 16.565s)
+picvec stage paint-order-validation: 0.179s (total 16.744s)
+picvec stage covered-hole-simplification: 0.427s (total 25.348s)
+picvec stage covered-hole-simplification: 0.122s (total 16.866s)
+picvec stage final-svg: 0.020s (total 16.887s)
+picvec stage interior-shading: 2.441s (total 18.287s)
+picvec stage final-svg: 0.153s (total 25.501s)
+picvec stage face-alpha: 0.009s (total 18.296s)
+picvec stage hierarchical-topology: 0.001s (total 18.297s)
+geometry 580x732 topology: 0.070s
+geometry 710x692 adaptive: 3.469s
+geometry 710x692 tasks: 0.017s
+geometry 710x692 fit-chains: 0.207s
+picvec stage shared-geometry: 3.940s (total 33.844s)
+picvec stage paint-preview: 0.043s (total 33.887s)
+selection 710x692 residual: 0.092s
+selection 710x692 classify: 0.001s
+selection 710x692 profiles: 0.007s
+selection 710x692 skeleton: 0.016s
+selection 710x692 overlap1: 0.002s
+selection 710x692 intersections: 0.002s
+selection 710x692 continuations: 0.008s
+selection 710x692 connections: 0.003s
+selection 710x692 junctions: 0.004s
+selection 710x692 extension: 0.000s
+selection 710x692 tangents: 0.000s
+selection 710x692 fit: 0.051s
+picvec structural substage ownership: 0.189s
+picvec structural substage outline-proposals: 0.033s
+picvec structural substage outline-validation: 0.082s
+picvec structural substage colour-patches: 0.101s
+picvec stage structural-selection: 0.405s (total 34.292s)
+picvec adaptive evaluated 927 910 677 670: baseline=PerceptualScore { mean_delta_e: 2.969327, p90_delta_e: 7.6357965, missing_edge_fraction: 0.70541334, combined: 6.506756 } refined=PerceptualScore { mean_delta_e: 1.0468855, p90_delta_e: 1.9492985, missing_edge_fraction: 0.29542592, combined: 2.1370957 } boundary_matches=true bytes=294068
+picvec stage paint-order-validation: 0.314s (total 34.606s)
+picvec stage covered-hole-simplification: 0.212s (total 34.818s)
+picvec stage final-svg: 0.113s (total 34.930s)
+geometry 580x732 adaptive: 3.001s
+geometry 580x732 tasks: 0.011s
+geometry 580x732 fit-chains: 0.246s
+picvec stage shared-geometry: 3.413s (total 21.710s)
+picvec stage paint-preview: 0.037s (total 21.747s)
+selection 580x732 residual: 0.040s
+selection 580x732 classify: 0.001s
+selection 580x732 profiles: 0.007s
+selection 580x732 skeleton: 0.011s
+selection 580x732 overlap1: 0.000s
+selection 580x732 intersections: 0.002s
+selection 580x732 continuations: 0.009s
+selection 580x732 connections: 0.002s
+selection 580x732 junctions: 0.004s
+selection 580x732 extension: 0.000s
+selection 580x732 tangents: 0.000s
+selection 580x732 fit: 0.011s
+picvec structural substage ownership: 0.090s
+picvec structural substage outline-proposals: 0.043s
+picvec structural substage outline-validation: 0.050s
+picvec structural substage colour-patches: 0.084s
+picvec stage structural-selection: 0.268s (total 22.015s)
+picvec stage paint-order-validation: 0.158s (total 22.173s)
+picvec stage covered-hole-simplification: 0.183s (total 22.356s)
+picvec stage final-svg: 0.111s (total 22.467s)
+picvec adaptive evaluated 2529 3392 717 540: baseline=PerceptualScore { mean_delta_e: 2.672192, p90_delta_e: 7.2697225, missing_edge_fraction: 0.7616, combined: 6.3951755 } refined=PerceptualScore { mean_delta_e: 0.9076316, p90_delta_e: 1.579038, missing_edge_fraction: 0.35306665, combined: 2.0992494 } boundary_matches=true bytes=383548
+picvec adaptive evaluated 73 3325 690 672: baseline=PerceptualScore { mean_delta_e: 3.194566, p90_delta_e: 9.2425585, missing_edge_fraction: 0.7402773, combined: 7.35541 } refined=PerceptualScore { mean_delta_e: 1.174019, p90_delta_e: 2.3847897, missing_edge_fraction: 0.37707135, combined: 2.6134386 } boundary_matches=true bytes=739559
+picvec adaptive evaluated 1749 3325 632 679: baseline=PerceptualScore { mean_delta_e: 2.4738684, p90_delta_e: 6.3624306, missing_edge_fraction: 0.8231899, combined: 6.127783 } refined=PerceptualScore { mean_delta_e: 1.0162457, p90_delta_e: 1.879786, missing_edge_fraction: 0.39559287, combined: 2.3960035 } boundary_matches=true bytes=383436
+picvec adaptive evaluated 975 2552 564 716: baseline=PerceptualScore { mean_delta_e: 2.7736065, p90_delta_e: 7.428452, missing_edge_fraction: 0.716143, combined: 6.367933 } refined=PerceptualScore { mean_delta_e: 1.0733908, p90_delta_e: 1.9464643, missing_edge_fraction: 0.37919825, combined: 2.3992062 } boundary_matches=true bytes=403403
+{
+  "input_width": 5016,
+  "input_height": 5016,
+  "processing_width": 1414,
+  "processing_height": 1414,
+  "output": "/tmp/picvec-generic-speed/probe/cliparts-6x6.svg",
+  "elapsed_seconds": 291.040528887,
+  "execution_threads": 10,
+  "complexity": {
+    "probe_width": 1024,
+    "probe_height": 1024,
+    "probe_region_count": 114186,
+    "probe_region_density": 108896.26,
+    "edge_density": 0.36541843,
+    "normalized_region_density": 1.0,
+    "normalized_edge_density": 1.0,
+    "complexity": 1.0,
+    "target_pixels": 2000000.0,
+    "selected_dimension": 1414
+  },
+  "source_alpha": {
+    "detected": false,
+    "quantization_bits": 0,
+    "mask_paths": 0,
+    "removed_regions": 0
+  },
+  "chroma_key": {
+    "enabled": true,
+    "detected": true,
+    "key_color": [
+      1,
+      255,
+      0
+    ],
+    "border_coverage": 0.9237926,
+    "removed_regions": 46
+  },
+  "adaptive_refinement": {
+    "enabled": true,
+    "source_scale": 3.5473833,
+    "proposed_regions": 36,
+    "candidate_regions": 36,
+    "prefiltered_for_complexity": 0,
+    "evaluated_regions": 36,
+    "parallel_jobs": 10,
+    "accepted_regions": 36,
+    "rejected_for_quality": 0,
+    "rejected_for_complexity": 0,
+    "rejected_for_budget": 0,
+    "baseline_mean_delta_e": 2.5045545,
+    "refined_mean_delta_e": 0.9949002,
+    "estimated_global_delta_e_reduction": 1.5096543,
+    "added_svg_bytes": 16917135
+  },
+  "hierarchical_topology": {
+    "nodes": 538721,
+    "leaves": 386128,
+    "unit_leaves": 239532,
+    "represented_pixels": 1999396,
+    "compression_ratio": 5.1780653
+  },
+  "edge_roles": {
+    "skeleton_pixels": 123585,
+    "edge_chain_count": 2860,
+    "edge_chain_samples": 123376,
+    "boundary_pixels": 9795,
+    "ridge_role_pixels": 27139,
+    "ridge_on_boundary_pixels": 83628,
+    "unknown_pixels": 109,
+    "visible_ridge_pixels": 6893,
+    "visible_ridge_coverage_pixels": 16987,
+    "dark_boundary_pixels": 161682,
+    "shading_pixels": 2548,
+    "face_barrier_pixels": 118775,
+    "visible_ridge_graph_edges": 225,
+    "visible_ridge_graph_edges_before_join": 240,
+    "dark_boundary_graph_edges": 1481,
+    "wide_dark_outline_graph_edges_before_join": 1644,
+    "dark_boundary_candidates": 163,
+    "dark_ridge_candidates": 1649,
+    "dark_ridge_supported": 910,
+    "profile_ridge_candidates": 1062,
+    "profile_ridge_extensions": 974,
+    "visible_ridge_graph_length": 4702.145,
+    "visible_ridge_median_width": 2.0,
+    "visible_ridge_width_weighted_length": 10553.274,
+    "dark_boundary_graph_length": 43313.297,
+    "dark_boundary_median_width": 2.0,
+    "gradient_threshold": 1.0,
+    "ridge_threshold": 0.65
+  },
+  "segmentation": {
+    "graph_edges": 3995964,
+    "coherent_domains": 2,
+    "coherent_regions_removed": 5,
+    "histogram_cells": 81633,
+    "palette_colours": 2759,
+    "initial_regions": 178489,
+    "raw_regions": 18822,
+    "corrected_regions": 12647,
+    "regularized_regions": 6652,
+    "merged_regions": 5847,
+    "forced_small_region_merges": 1551716,
+    "micro_region_merges": 6129,
+    "micro_pixels_reassigned": 136243,
+    "compatible_region_merges": 191802,
+    "paint_aware_region_merge_proposals": 23,
+    "paint_aware_region_merges": 23,
+    "exact_paint_region_merges": 11,
+    "source_supported_paint_merges": 30,
+    "preserved_independent_materials": 5249,
+    "antialias_pixels": 56500,
+    "core_sampled_regions": 1365,
+    "antialias_split_regions": 6181,
+    "boundary_regularization_passes": 1,
+    "boundary_regularization_moved_pixels": 4057,
+    "boundary_regularization_source_edges": 98989,
+    "thin_paint_examined": 4346,
+    "thin_paint_protected": 417,
+    "thin_paint_refined": 869,
+    "thin_paint_preflight_rejected": 787,
+    "thin_paint_reassigned_pixels": 6819,
+    "thin_paint_removed_regions": 695,
+    "adaptive_patch_candidate_faces": 161,
+    "adaptive_patch_split_faces": 49,
+    "adaptive_patch_added_regions": 94,
+    "effective_minimum_area": 325,
+    "local_minimum_area": 26,
+    "local_median_area": 266,
+    "local_maximum_area": 325
+  },
+  "structural": {
+    "source_coverage_pixels": 189787,
+    "source_line_pixels": 128442,
+    "skeleton_pixels": 21621,
+    "stroke_count": 1501,
+    "underpainted_pixels": 23538,
+    "antialias_unmixed_pixels": 6243,
+    "silhouette_fill_count": 0,
+    "residual_legacy_strokes": 576,
+    "visible_ridge_strokes": 188,
+    "boundary_profile_strokes": 490,
+    "recovered_boundary_strokes": 5,
+    "recovered_alpha_boundary_strokes": 0,
+    "suppressed_ellipse_retraces": 14,
+    "aligned_ellipse_strokes": 56
+  },
+  "ownership": {
+    "structural_strokes": 1501,
+    "paint_overlap": 0.3,
+    "overlap_is_underpaint": false,
+    "overlap_is_fill_geometry": true
+  },
+  "paint_order": {
+    "line_regions": 44,
+    "proposed_constraints": 438,
+    "conflicting_constraints": 349,
+    "changed_ranks": 1265,
+    "accepted": true,
+    "source_error_increase": -0.0005222801,
+    "rejection": null
+  },
+  "gradients": {
+    "solid_regions": 4038,
+    "linear_regions": 1121,
+    "radial_regions": 636,
+    "layered_regions": 52,
+    "overlay_layers": 109,
+    "fitted_direction_linear_regions": 828,
+    "fitted_focus_radial_regions": 522,
+    "coupled_linear_regions": 17,
+    "source_supported_paint_merges": 30,
+    "source_supported_boundary_edges_removed": 871,
+    "maximum_stops": 5,
+    "primary_gate_active": false,
+    "primary_solid_regions": 0,
+    "provable_solid_regions": 3231,
+    "gain_bound_solid_regions": 3198,
+    "low_range_solid_regions": 33,
+    "gradient_model_search_regions": 2593,
+    "coherent_field_regions": 64,
+    "full_fit_regions": 5824
+  },
+  "geometry": {
+    "regions": 5847,
+    "loops": 7157,
+    "empty_regions": 0,
+    "empty_region_pixels": 0,
+    "largest_empty_region": 0,
+    "source_boundary_edges": 562520,
+    "shared_boundary_edges": 278432,
+    "simplified_vertices": 60472,
+    "cubic_segments": 51558,
+    "line_segments": 2720,
+    "rectangles": 0,
+    "circles": 0,
+    "ellipses": 0,
+    "covered_holes_removed": 404,
+    "shared_loop_fallbacks": 0,
+    "shared_loop_missing_edges": 0,
+    "shared_loop_discontinuities": 0,
+    "shared_loop_invalid_areas": 0,
+    "adaptive_optimal_polygons": 1572,
+    "continuity_faired_masters": 11818,
+    "fitted_ellipse_contours": 115,
+    "fitted_bezier_contours": 115,
+    "regularized_corner_excursions": 7,
+    "regularized_corner_vertices": 173,
+    "shared_curve_downgrades": 3
+  },
+  "optimization": {
+    "input_regions": 5847,
+    "primitive_regions": 0,
+    "path_regions": 5847,
+    "shared_gradient_regions": 2
+  },
+  "svg": {
+    "objects": 29282,
+    "path_subpaths": 30722,
+    "path_elements": 27515,
+    "rect_elements": 21,
+    "circle_elements": 1,
+    "ellipse_elements": 0,
+    "line_elements": 1745,
+    "linear_gradients": 8869,
+    "radial_gradients": 6446,
+    "structural_strokes": 2870,
+    "structural_color_patches": 7,
+    "gradient_stops": 57524,
+    "linear_cubics_to_lines": 4708,
+    "redundant_segments_removed": 14182,
+    "arc_segments": 21282,
+    "merged_arc_segments": 30,
+    "paint_paths_merged": 111,
+    "paint_batches": 72,
+    "alpha_mask_paths": 0,
+    "outline_bands": 70,
+    "outline_color_patches": 359,
+    "outline_paint_regions_removed": 74,
+    "outline_structural_strokes_removed": 118,
+    "invisible_elements_removed": 507,
+    "invisible_strokes_removed": 0,
+    "bytes": 22110137
+  }
+}
+wrote /tmp/picvec-generic-speed/probe/cliparts-6x6.svg (1414x1414, 29282 objects, 30722 subpaths, 291.041s)

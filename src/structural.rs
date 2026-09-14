@@ -1871,6 +1871,75 @@ fn residual_line_masks(
             bytes,
         );
     }
+    select_residual_components(&represented, source_lines, width, height)
+}
+
+fn select_residual_components(
+    represented: &[bool],
+    source_lines: &[bool],
+    width: usize,
+    height: usize,
+) -> (Vec<bool>, Vec<bool>) {
+    let mut selected = vec![false; source_lines.len()];
+    let mut measured = vec![false; source_lines.len()];
+    for component in connected_components(source_lines, width, height) {
+        let mut missing_area = 0_usize;
+        for &index in &component {
+            if !represented[index] {
+                missing_area += 1;
+            }
+        }
+        if missing_area < 3
+            || (missing_area < 8 && missing_area as f32 / (component.len().max(1) as f32) < 0.12)
+        {
+            continue;
+        }
+        let component_residual: Vec<usize> = component
+            .iter()
+            .copied()
+            .filter(|&index| {
+                // We query only this connected component. A source-line pixel
+                // one axial step away necessarily belongs to the same component,
+                // so the radius-one disk dilation can be queried locally. No
+                // full-image scratch mask or dilation is needed per component.
+                let (x, y) = (index % width, index / width);
+                [
+                    Some(index),
+                    (x > 0).then(|| index - 1),
+                    (x + 1 < width).then(|| index + 1),
+                    (y > 0).then(|| index - width),
+                    (y + 1 < height).then(|| index + width),
+                ]
+                .into_iter()
+                .flatten()
+                .any(|j| source_lines[j] && !represented[j])
+            })
+            .collect();
+        for &index in &component_residual {
+            measured[index] = true;
+        }
+        if component_residual.len() as f32 / component.len().max(1) as f32 >= 0.75 {
+            for &index in &component {
+                selected[index] = true;
+            }
+        } else {
+            for index in component_residual {
+                selected[index] = true;
+            }
+        }
+    }
+    remove_small_components(&mut selected, width, height, 3);
+    remove_small_components(&mut measured, width, height, 3);
+    (selected, measured)
+}
+
+#[cfg(test)]
+fn select_residual_components_reference(
+    represented: &[bool],
+    source_lines: &[bool],
+    width: usize,
+    height: usize,
+) -> (Vec<bool>, Vec<bool>) {
     let mut selected = vec![false; source_lines.len()];
     let mut measured = vec![false; source_lines.len()];
     for component in connected_components(source_lines, width, height) {
@@ -5083,6 +5152,49 @@ mod tests {
         let selected = super::select_missing(&source, &paint, &candidates);
         assert!(selected.strokes.is_empty());
     }
+    #[test]
+    fn local_residual_dilation_matches_full_image_components() {
+        let mut state = 17u64;
+        for (width, height) in [(1, 1), (1, 41), (47, 1), (17, 29), (63, 49)] {
+            for density in [0, 1, 3, 7, 10] {
+                for _ in 0..5 {
+                    let mut random = || {
+                        state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                        (state >> 32) as usize
+                    };
+                    let source: Vec<_> = (0..width * height)
+                        .map(|_| random() % 10 < density)
+                        .collect();
+                    let represented: Vec<_> =
+                        (0..width * height).map(|_| random() % 4 != 0).collect();
+                    assert_eq!(
+                        select_residual_components(&represented, &source, width, height),
+                        select_residual_components_reference(&represented, &source, width, height),
+                        "{width}x{height}, density={density}"
+                    );
+                }
+            }
+        }
+        // A diagonal contact joins a component but must not enter the axial
+        // radius-one dilation. Include separate neighbours and edge pixels.
+        let (w, h) = (19, 17);
+        let mut source = vec![false; w * h];
+        for i in 0..17 {
+            source[i * w + i] = true;
+        }
+        for x in 0..19 {
+            source[x] = true;
+            source[16 * w + x] = true;
+        }
+        for period in 2..9 {
+            let represented: Vec<_> = (0..w * h).map(|i| i % period != 0).collect();
+            assert_eq!(
+                select_residual_components(&represented, &source, w, h),
+                select_residual_components_reference(&represented, &source, w, h)
+            );
+        }
+    }
+
     use super::*;
 
     #[test]
