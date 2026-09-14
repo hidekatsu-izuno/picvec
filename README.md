@@ -121,3 +121,17 @@ evaluation background by default.
 
 See [the evaluator guide](scripts/picvec_eval/README.md) for NCNN/PyTorch setup,
 model paths, source/reference matching, caching and reproducibility controls.
+<!-- 
+## Publish
+
+```sh
+1. Update to vX.X.X on cargo.toml and README.md.
+
+2. Run commnads
+cargo test
+cargo publish --dry-run
+git tag vX.X.X
+git push origin --tags
+cargo publish
+```
+-->

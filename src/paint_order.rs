@@ -20,6 +20,7 @@ pub struct Summary {
     pub rejection: Option<String>,
 }
 
+#[cfg(feature = "diagnostics")]
 #[derive(Serialize)]
 pub(crate) struct Evidence {
     area: usize,
@@ -35,7 +36,9 @@ pub(crate) struct Evidence {
 
 pub(crate) struct Proposal {
     pub ranks: Vec<usize>,
+    #[cfg(any(test, feature = "diagnostics"))]
     pub lines: Vec<bool>,
+    #[cfg(feature = "diagnostics")]
     pub evidence: Vec<Evidence>,
     pub summary: Summary,
 }
@@ -235,6 +238,7 @@ pub(crate) fn propose(
     let proposed_constraints = constraints.len();
     let (ranks, conflicts) = order_graph(baseline, &fixed, constraints);
     let changed_ranks = ranks.iter().zip(baseline).filter(|(a, b)| a != b).count();
+    #[cfg(feature = "diagnostics")]
     let evidence = (0..n)
         .map(|id| {
             let ws = &widths[id];
@@ -261,7 +265,9 @@ pub(crate) fn propose(
         .collect();
     Proposal {
         ranks,
+        #[cfg(feature = "diagnostics")]
         evidence,
+        #[cfg(any(test, feature = "diagnostics"))]
         lines: lines.clone(),
         summary: Summary {
             line_regions: lines.iter().filter(|&&v| v).count(),
