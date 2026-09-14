@@ -1,0 +1,12 @@
+   Compiling picvec v0.2.0 (/home/hidek/git/picvec)
+    Finished `release` profile [optimized] target(s) in 1m 52s
+     Running unittests src/lib.rs (target/release/deps/picvec-6b5e74faeffdbf96)
+
+running 4 tests
+test svg_fragments::tests::emitted_core_fragments_match_full_renderer ... ignored, reads an explicitly supplied emitted SVG
+test svg_fragments::tests::unsupported_document_context_falls_back ... ok
+test svg_fragments::tests::clip_references_keep_inherited_attributes_of_visible_strokes ... ok
+test svg_fragments::tests::cached_fragments_preserve_clips_strokes_filters_and_changed_definitions ... ok
+
+test result: ok. 3 passed; 0 failed; 1 ignored; 0 measured; 439 filtered out; finished in 0.09s
+

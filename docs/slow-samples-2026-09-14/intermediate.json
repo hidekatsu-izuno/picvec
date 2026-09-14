@@ -1,0 +1,62 @@
+{
+  "binary": "/tmp/picvec-slow-four/candidate",
+  "binary_sha256": "2738d051b1e93b6112fed11d66a31cea77b476f3c83f439901ede648c0ea60c9",
+  "results": [
+    {
+      "input": "booster-layout.jpg",
+      "seconds": 300.06564286899993,
+      "status": "timeout",
+      "command": [
+        "/tmp/picvec-slow-four/candidate",
+        "/home/hidek/git/picvec/sample/input/booster-layout.jpg",
+        "/tmp/picvec-slow-four/candidate-run/booster-layout.svg",
+        "--threads",
+        "4",
+        "--verbose"
+      ]
+    },
+    {
+      "input": "cliparts-6x6.png",
+      "seconds": 300.03550654300034,
+      "status": "timeout",
+      "command": [
+        "/tmp/picvec-slow-four/candidate",
+        "/home/hidek/git/picvec/sample/input/cliparts-6x6.png",
+        "/tmp/picvec-slow-four/candidate-run/cliparts-6x6.svg",
+        "--threads",
+        "4",
+        "--verbose",
+        "--remove-chroma-key-background"
+      ]
+    },
+    {
+      "input": "vectorization-stress-still-life.png",
+      "seconds": 159.93063239599996,
+      "status": "ok",
+      "command": [
+        "/tmp/picvec-slow-four/candidate",
+        "/home/hidek/git/picvec/sample/input/vectorization-stress-still-life.png",
+        "/tmp/picvec-slow-four/candidate-run/vectorization-stress-still-life.svg",
+        "--threads",
+        "4",
+        "--verbose"
+      ],
+      "bytes": 15213528,
+      "sha256": "369d1fb7fed9cdb7bb915e489bb60f3ea662185646fd3d527f5144b8ee71a374",
+      "matches_saved_svg": true
+    },
+    {
+      "input": "viewport2.jpg",
+      "seconds": 300.0262964550002,
+      "status": "timeout",
+      "command": [
+        "/tmp/picvec-slow-four/candidate",
+        "/home/hidek/git/picvec/sample/input/viewport2.jpg",
+        "/tmp/picvec-slow-four/candidate-run/viewport2.svg",
+        "--threads",
+        "4",
+        "--verbose"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,44 @@
+[
+  {
+    "version": "725a082",
+    "path": "/tmp/picvec-perf/baseline",
+    "exists": true,
+    "sha256": "e7cab41ea5becbfbdca2bb2a880f9f386a04166c150828b52f81e78e079d568d"
+  },
+  {
+    "version": "first-optimization",
+    "path": "/tmp/picvec-perf/candidate-final",
+    "exists": true,
+    "sha256": "9826caa01b9c52a7a292ca5f09c2201ad6331c4ba562c56486563d2eca7b1644"
+  },
+  {
+    "version": "9e67747",
+    "path": "/tmp/picvec-visibility-perf/candidate",
+    "exists": true,
+    "sha256": "21b0a9c644093e41e7fbec6f8a6dfff96cc8b8a2aef757cbec2929acd30aeae5"
+  },
+  {
+    "version": "b83a8cd",
+    "path": "/tmp/picvec-paint-perf/candidate",
+    "exists": true,
+    "sha256": "a6ae42f17b8df23c68182a62cac9efbb67c1c8d4ca848bd1cd5e19ceb7d4557d"
+  },
+  {
+    "version": "49167ba",
+    "path": "/tmp/picvec-hole-perf/candidate",
+    "exists": true,
+    "sha256": "e14e956dd63b9542f71a8ac41fb554f6ca27124903d9af3030d1c358b002871e"
+  },
+  {
+    "version": "494bef1",
+    "path": "/tmp/picvec-parallel/candidate",
+    "exists": true,
+    "sha256": "e78dca191d6eca59f51586a20c246612e049040190e22b596631b17c099b3d6c"
+  },
+  {
+    "version": "3fa41d2",
+    "path": "/tmp/picvec-algorithm/candidate-final",
+    "exists": true,
+    "sha256": "23e51c3edb440e23805c53fa8c9e02ab6a577adcdd5502218630c7fe3f481865"
+  }
+]

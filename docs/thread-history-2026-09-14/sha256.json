@@ -1,0 +1,12 @@
+{
+  "withdrawn-changes-vs-3fa41d2.patch": "104f0c31a83822fdd82176864d2938de42a9ad4e4abf9348887ebcea302ba31e",
+  "incremental-adaptive-refinement.md": "96097a1253fddf08509ede0c052768cff544272815abbdc7c691c266a4078346",
+  "picvec-rollback-second-regenerate.log": "ac27fcf83da94afb77a8b8a026f1b5cc82cbf878e6e1c82c4e3b946858630465",
+  "incremental-adaptive-refinement.json": "504b8eff536755847b2ebcf1fdd6486b932bbb885e9d3577c8d902772a813501",
+  "picvec-rollback-regenerate.log": "70e3088bbb28d7de140f8fd127efd793b179a7fb745e88e1fa57d758b8196ec6",
+  "picvec-rollback-expected.json": "d0fdb82c0711ea688c461947ef69179dec501ef6fd0a9e36487eeb88248ff4ce",
+  "booster-layout-performance-fix.md": "2ac57778be8f4bff3852d8e043969ff7ea451edd3a3adc09ed209722189effba",
+  "booster-layout-performance-investigation.json": "117d7b803425802b4b5b1c8dc63fa19bbfcfa54a7e97ba8c89e93d19bf8a880f",
+  "booster-layout-performance-fix.json": "c68ce2a51a663b12b26f95f07dc5a123db62b665361bb4510cab012814e4eb2f",
+  "booster-layout-performance-investigation.md": "21e7660ee93868e7a9edf441c42bc1505ec558255f808355f611283ec325d8af"
+}

@@ -1,0 +1,1825 @@
+diff --git a/scripts/benchmark_exact.py b/scripts/benchmark_exact.py
+index c206d5c66ec4c466a7d78f65b34ca09f162163f0..6b4a48c2ed939eb3ab614fa2d9aca863b3307daf 100644
+--- a/scripts/benchmark_exact.py
++++ b/scripts/benchmark_exact.py
+@@ -9,6 +9,7 @@ from __future__ import annotations
+ import argparse
+ import hashlib
+ import json
++import math
+ from pathlib import Path
+ import re
+ import statistics
+@@ -21,22 +22,25 @@ CASES = {
+     "car": ("sample/input/car.png", []),
+     "boy": ("sample/input/boy_and_turtle.png", []),
+     "photo": ("sample/input/viewport2.jpg", []),
++    "photo-small": ("sample/input/viewport1.jpg", []),
+     "wiki": ("sample/input/wikipedia_logo_1_0.png", []),
+     "alpha": ("src/test-data/cube-alpha.png", []),
+     "key": ("src/test-data/round-buttons-source.png", ["--remove-chroma-key-background"]),
+     "adaptive": ("sample/input/cliparts-6x6.png", ["--remove-chroma-key-background"]),
++    "adaptive-small": ("sample/input/cliparts.png", ["--max-dimension", "512"]),
+     "car-3passes": ("sample/input/car.png", ["--paint-merge-passes", "3"]),
+     "car-quality": ("sample/input/car.png", ["--quality-metrics"]),
+ }
+ 
+ 
+-def run(binary: Path, case: str, output: Path, threads: int) -> dict:
++def run(binary: Path, case: str, output: Path, threads: int,
++        timeout: float | None = None) -> dict:
+     source, options = CASES[case]
+     command = [str(binary), str(ROOT / source), str(output),
+                "--threads", str(threads), "--verbose", *options]
+     started = time.perf_counter()
+     with output.with_suffix(".log").open("w") as log:
+-        subprocess.run(command, cwd=ROOT, stdout=log, stderr=log, check=True)
++        subprocess.run(command, cwd=ROOT, stdout=log, stderr=log, check=True, timeout=timeout)
+     elapsed = time.perf_counter() - started
+     log = output.with_suffix(".log").read_text()
+     summary, _ = json.JSONDecoder().raw_decode(log[log.index("{\n"):])
+@@ -61,9 +65,15 @@ def main() -> None:
+                         default=["car", "wiki", "boy", "alpha"])
+     parser.add_argument("--repeats", type=int, default=3)
+     parser.add_argument("--threads", type=int, default=4)
++    parser.add_argument("--timeout-seconds", type=float,
++                        help="Optional time limit per conversion; a timeout fails the comparison")
+     args = parser.parse_args()
+     if args.repeats < 1 or args.threads < 1:
+         parser.error("repeats and threads must be positive")
++    if args.timeout_seconds is not None and (
++        not math.isfinite(args.timeout_seconds) or args.timeout_seconds <= 0
++    ):
++        parser.error("timeout must be positive and finite")
+     binaries = {"baseline": args.baseline.resolve(), "candidate": args.candidate.resolve()}
+     for binary in binaries.values():
+         if not binary.is_file():
+@@ -85,7 +95,7 @@ def main() -> None:
+             pair = {}
+             for version in order:
+                 output = args.output_dir / f"{case}-{repeat}-{version}.svg"
+-                trial = run(binaries[version], case, output, args.threads)
++                trial = run(binaries[version], case, output, args.threads, args.timeout_seconds)
+                 records.append({"case": case, "repeat": repeat, "version": version, **trial})
+                 pair[version] = trial
+                 result_path.write_text(json.dumps(report, indent=2) + "\n")
+diff --git a/src/geometry.rs b/src/geometry.rs
+index 178782f7ae214a7af1671435577ffcba7440080e..8d0d2544ce9d5264e8af2147a3bc5a1041162c24 100644
+--- a/src/geometry.rs
++++ b/src/geometry.rs
+@@ -2204,8 +2204,14 @@ fn fit_cubic_recursive(
+     right_tangent: Point,
+     tolerance_squared: f32,
+ ) -> Vec<CurveSegment> {
+-    fit_cubic_with_budget(points, left_tangent, right_tangent, tolerance_squared, usize::MAX)
+-        .expect("an unrestricted fit cannot exceed its segment budget")
++    fit_cubic_with_budget(
++        points,
++        left_tangent,
++        right_tangent,
++        tolerance_squared,
++        usize::MAX,
++    )
++    .expect("an unrestricted fit cannot exceed its segment budget")
+ }
+ 
+ // Preserve the exact split tree, but stop once it cannot beat a caller's
+@@ -7856,28 +7862,6 @@ fn follows_alpha_rim(points: &[Point], matte: &crate::chroma::AlphaMatte) -> boo
+     near * 100 >= points.len() * 98
+ }
+ 
+-pub(crate) fn build_with_paint_overlap(
+-    segmentation: &Segmentation,
+-    topology: &HierarchicalTopology,
+-    source: &Raster,
+-    matte: Option<&crate::chroma::AlphaMatte>,
+-    overlap: f32,
+-    opaque: &[bool],
+-    order: Option<&[usize]>,
+-    excluded: &[bool],
+-) -> (Vec<RegionGeometry>, GeometrySummary) {
+-    build_internal(
+-        segmentation,
+-        Some(topology),
+-        Some(source),
+-        matte,
+-        overlap.max(0.0),
+-        opaque,
+-        order,
+-        excluded,
+-    )
+-}
+-
+ // Reverse the shared-boundary ownership once. Scanning every chain for every
+ // region is quadratic, although only incident chains can satisfy membership.
+ fn chains_by_owner(chain_owners: &[BTreeSet<usize>], count: usize) -> Vec<Vec<usize>> {
+@@ -7900,324 +7884,392 @@ fn build_internal(
+     order: Option<&[usize]>,
+     excluded: &[bool],
+ ) -> (Vec<RegionGeometry>, GeometrySummary) {
+-    let count = segmentation.regions.len();
+-    let order_ranks = order
+-        .map(Vec::from)
+-        .unwrap_or_else(|| paint_order_ranks(segmentation));
+-    let stride = segmentation.width + 1;
+-    let (edges, shared) = region_boundary_edges(segmentation, stride, topology);
+-    let pair_edges = pair_boundary_edges(segmentation, stride, topology);
+-    let source_edges = edges.iter().map(Vec::len).sum();
+-    let (shared_chains, shared_lookup, positions, shared_report) =
+-        build_shared_chains(segmentation, source, excluded, stride, &edges, &pair_edges);
+-    let mut chain_owners = vec![BTreeSet::new(); shared_chains.len()];
+-    for (owner, boundary) in edges.iter().enumerate() {
+-        for edge in boundary {
+-            if let Some(&(chain, _, _)) = shared_lookup.get(&EdgeKey::new(edge.start, edge.end)) {
+-                chain_owners[chain].insert(owner);
+-            }
+-        }
+-    }
+-    let incident_chains = chains_by_owner(&chain_owners, count);
+-    let mut endpoint_degree = HashMap::<(i64, i64), usize>::new();
+-    let mut endpoint_order = Vec::<(i64, i64)>::new();
+-    for chain in &shared_chains {
+-        if chain.closed || chain.points.len() < 2 {
+-            continue;
++    PreparedGeometry::new(segmentation, topology, source, matte, excluded)
++        .build(overlap, opaque, order)
++}
++
++/// Shared source-fitted curves are independent of paint order. Keep their
++/// immutable inputs borrowed while assembling either ordering, so validation
++/// can reuse the exact masters without caching order-dependent overlap.
++pub(crate) struct PreparedGeometry<'a> {
++    segmentation: &'a Segmentation,
++    matte: Option<&'a crate::chroma::AlphaMatte>,
++    edges: Vec<Vec<GridEdge>>,
++    shared_chains: Vec<SharedChain>,
++    shared_lookup: EdgeChainLookup,
++    positions: VertexPositions,
++    chain_owners: Vec<BTreeSet<usize>>,
++    incident_chains: Vec<Vec<usize>>,
++    summary: GeometrySummary,
++    alpha_contours: Vec<Vec<Point>>,
++}
++
++impl<'a> PreparedGeometry<'a> {
++    pub(crate) fn new(
++        segmentation: &'a Segmentation,
++        topology: Option<&HierarchicalTopology>,
++        source: Option<&Raster>,
++        matte: Option<&'a crate::chroma::AlphaMatte>,
++        excluded: &[bool],
++    ) -> Self {
++        let count = segmentation.regions.len();
++        let stride = segmentation.width + 1;
++        let (edges, shared) = region_boundary_edges(segmentation, stride, topology);
++        let pair_edges = pair_boundary_edges(segmentation, stride, topology);
++        let source_edges = edges.iter().map(Vec::len).sum();
++        let (shared_chains, shared_lookup, positions, shared_report) =
++            build_shared_chains(segmentation, source, excluded, stride, &edges, &pair_edges);
++        let mut chain_owners = vec![BTreeSet::new(); shared_chains.len()];
++        for (owner, boundary) in edges.iter().enumerate() {
++            for edge in boundary {
++                if let Some(&(chain, _, _)) = shared_lookup.get(&EdgeKey::new(edge.start, edge.end))
++                {
++                    chain_owners[chain].insert(owner);
++                }
++            }
+         }
+-        for point in [chain.points[0], chain.points[chain.points.len() - 1]] {
+-            let key = (
+-                (point.x * 10_000.0).round() as i64,
+-                (point.y * 10_000.0).round() as i64,
+-            );
+-            if !endpoint_degree.contains_key(&key) {
+-                endpoint_order.push(key);
++        let incident_chains = chains_by_owner(&chain_owners, count);
++        let mut endpoint_degree = HashMap::<(i64, i64), usize>::new();
++        let mut endpoint_order = Vec::<(i64, i64)>::new();
++        for chain in &shared_chains {
++            if chain.closed || chain.points.len() < 2 {
++                continue;
++            }
++            for point in [chain.points[0], chain.points[chain.points.len() - 1]] {
++                let key = (
++                    (point.x * 10_000.0).round() as i64,
++                    (point.y * 10_000.0).round() as i64,
++                );
++                if !endpoint_degree.contains_key(&key) {
++                    endpoint_order.push(key);
++                }
++                *endpoint_degree.entry(key).or_default() += 1;
+             }
+-            *endpoint_degree.entry(key).or_default() += 1;
+         }
+-    }
+-    let paint_junctions = endpoint_order
+-        .into_iter()
+-        .filter_map(|(x, y)| {
+-            let degree = endpoint_degree[&(x, y)];
+-            (degree > 2).then_some(Point {
+-                x: x as f32 / 10_000.0,
+-                y: y as f32 / 10_000.0,
+-            })
+-        })
+-        .collect::<Vec<_>>();
+-    let canvas_corners = [
+-        Point { x: 0.0, y: 0.0 },
+-        Point {
+-            x: segmentation.width as f32,
+-            y: 0.0,
+-        },
+-        Point {
+-            x: segmentation.width as f32,
+-            y: segmentation.height as f32,
+-        },
+-        Point {
+-            x: 0.0,
+-            y: segmentation.height as f32,
+-        },
+-    ];
+-    // Python's shared-half-edge graph accepts the one canonical curve after
+-    // its source-corridor check; it never estimates a curved face's area from
+-    // only the curve endpoints.  The former Rust-only stabilization did just
+-    // that and downgraded hundreds of valid shallow cubics to pixel-grid
+-    // polylines.  Topology is already exact because both faces reference the
+-    // same de Casteljau intervals.
+-    let mut summary = GeometrySummary {
+-        regions: count,
+-        source_boundary_edges: source_edges,
+-        shared_boundary_edges: shared / 2,
+-        paint_junctions,
+-        ..shared_report
+-    };
+-    let alpha_contours = matte.map(|m| m.isocontours(0.5)).unwrap_or_default();
+-    let contour_bounds = |points: &[Point]| {
+-        points.iter().fold(
+-            [
+-                f32::INFINITY,
+-                f32::INFINITY,
+-                f32::NEG_INFINITY,
+-                f32::NEG_INFINITY,
+-            ],
+-            |b, p| [b[0].min(p.x), b[1].min(p.y), b[2].max(p.x), b[3].max(p.y)],
+-        )
+-    };
+-    let mut geometries = Vec::with_capacity(count);
+-    for (region, region_edges) in edges.iter().enumerate().take(count) {
+-        // For a long strip, 2 * area / perimeter estimates its width.
+-        // Narrow faces need the old half-width coverage on both shared sides
+-        // to retain highlights/rims; this is not a semantic line classifier.
+-        // Perimeter squared / area also identifies long strokes and rings
+-        // independently of scale. Neither measure changes the paint order.
+-        // Every face puts full overlap underneath later owners; only narrow
+-        // or elongated faces receive half-width padding against earlier ones.
+-        let area = segmentation.regions[region].area as f32;
+-        let perimeter = region_edges.len().max(1) as f32;
+-        let narrow = 2.0 * area / perimeter <= 4.0 || perimeter * perimeter >= 64.0 * area;
+-        let overlap_chains: HashSet<usize> = incident_chains[region]
+-            .iter()
+-            .map(|&chain| (chain, &chain_owners[chain]))
+-            .filter(|(_, owners)| {
+-                overlap > 0.0
+-                    && owners.len() == 2
+-                    && owners.contains(&region)
+-                    && opaque.get(region).copied().unwrap_or(false)
+-                    && owners.iter().all(|&other| {
+-                        other == region
+-                            || ((order_ranks[other] > order_ranks[region])
+-                                && opaque.get(other).copied().unwrap_or(false))
+-                    })
+-            })
+-            .map(|(chain, _)| chain)
+-            .collect();
+-        // With an explicit order, keep the upper contour on the fitted shared
+-        // boundary. Only the lower face receives hidden overlap.
+-        let width_chains: HashSet<usize> = incident_chains[region]
+-            .iter()
+-            .map(|&chain| (chain, &chain_owners[chain]))
+-            .filter(|(_, owners)| {
+-                order.is_none()
+-                    && narrow
+-                    && overlap > 0.0
+-                    && owners.len() == 2
+-                    && owners.contains(&region)
+-                    && opaque.get(region).copied().unwrap_or(false)
+-                    && owners.iter().all(|&other| {
+-                        other == region
+-                            || (order_ranks[other] < order_ranks[region]
+-                                && opaque.get(other).copied().unwrap_or(false))
+-                    })
++        let paint_junctions = endpoint_order
++            .into_iter()
++            .filter_map(|(x, y)| {
++                let degree = endpoint_degree[&(x, y)];
++                (degree > 2).then_some(Point {
++                    x: x as f32 / 10_000.0,
++                    y: y as f32 / 10_000.0,
++                })
+             })
+-            .map(|(chain, _)| chain)
+-            .collect();
+-        let traced = trace_region_vertex_loops(region_edges, stride);
+-        let mut loops = Vec::<Vec<Point>>::new();
+-        let mut data = String::new();
+-        let mut occlusion_data = String::new();
+-        let mut removed_hole = false;
+-        let mut covered_hole_paths = Vec::new();
+-        for vertices in traced {
+-            let source_points: Vec<Point> = vertices
++            .collect::<Vec<_>>();
++        let summary = GeometrySummary {
++            regions: count,
++            source_boundary_edges: source_edges,
++            shared_boundary_edges: shared / 2,
++            paint_junctions,
++            ..shared_report
++        };
++        Self {
++            segmentation,
++            matte,
++            edges,
++            shared_chains,
++            shared_lookup,
++            positions,
++            chain_owners,
++            incident_chains,
++            summary,
++            alpha_contours: matte.map(|m| m.isocontours(0.5)).unwrap_or_default(),
++        }
++    }
++
++    pub(crate) fn build(
++        &self,
++        overlap: f32,
++        opaque: &[bool],
++        order: Option<&[usize]>,
++    ) -> (Vec<RegionGeometry>, GeometrySummary) {
++        let Self {
++            segmentation,
++            matte,
++            edges,
++            shared_chains,
++            shared_lookup,
++            positions,
++            chain_owners,
++            incident_chains,
++            summary,
++            alpha_contours,
++        } = self;
++        let matte = *matte;
++        let overlap = overlap.max(0.0);
++        let count = segmentation.regions.len();
++        let stride = segmentation.width + 1;
++        let order_ranks = order
++            .map(Vec::from)
++            .unwrap_or_else(|| paint_order_ranks(segmentation));
++        let canvas_corners = [
++            Point { x: 0.0, y: 0.0 },
++            Point {
++                x: segmentation.width as f32,
++                y: 0.0,
++            },
++            Point {
++                x: segmentation.width as f32,
++                y: segmentation.height as f32,
++            },
++            Point {
++                x: 0.0,
++                y: segmentation.height as f32,
++            },
++        ];
++        // Python's shared-half-edge graph accepts the one canonical curve after
++        // its source-corridor check; it never estimates a curved face's area from
++        // only the curve endpoints.  The former Rust-only stabilization did just
++        // that and downgraded hundreds of valid shallow cubics to pixel-grid
++        // polylines.  Topology is already exact because both faces reference the
++        // same de Casteljau intervals.
++        let mut summary = summary.clone();
++        let contour_bounds = |points: &[Point]| {
++            points.iter().fold(
++                [
++                    f32::INFINITY,
++                    f32::INFINITY,
++                    f32::NEG_INFINITY,
++                    f32::NEG_INFINITY,
++                ],
++                |b, p| [b[0].min(p.x), b[1].min(p.y), b[2].max(p.x), b[3].max(p.y)],
++            )
++        };
++        let mut geometries = Vec::with_capacity(count);
++        for (region, region_edges) in edges.iter().enumerate().take(count) {
++            // For a long strip, 2 * area / perimeter estimates its width.
++            // Narrow faces need the old half-width coverage on both shared sides
++            // to retain highlights/rims; this is not a semantic line classifier.
++            // Perimeter squared / area also identifies long strokes and rings
++            // independently of scale. Neither measure changes the paint order.
++            // Every face puts full overlap underneath later owners; only narrow
++            // or elongated faces receive half-width padding against earlier ones.
++            let area = segmentation.regions[region].area as f32;
++            let perimeter = region_edges.len().max(1) as f32;
++            let narrow = 2.0 * area / perimeter <= 4.0 || perimeter * perimeter >= 64.0 * area;
++            let overlap_chains: HashSet<usize> = incident_chains[region]
+                 .iter()
+-                .map(|&value| point_from_vertex(value, stride))
++                .map(|&chain| (chain, &chain_owners[chain]))
++                .filter(|(_, owners)| {
++                    overlap > 0.0
++                        && owners.len() == 2
++                        && owners.contains(&region)
++                        && opaque.get(region).copied().unwrap_or(false)
++                        && owners.iter().all(|&other| {
++                            other == region
++                                || ((order_ranks[other] > order_ranks[region])
++                                    && opaque.get(other).copied().unwrap_or(false))
++                        })
++                })
++                .map(|(chain, _)| chain)
+                 .collect();
+-            let raw_points: Vec<Point> = vertices
++            // With an explicit order, keep the upper contour on the fitted shared
++            // boundary. Only the lower face receives hidden overlap.
++            let width_chains: HashSet<usize> = incident_chains[region]
+                 .iter()
+-                .map(|&value| {
+-                    positions
+-                        .get(&value)
+-                        .copied()
+-                        .unwrap_or_else(|| point_from_vertex(value, stride))
++                .map(|&chain| (chain, &chain_owners[chain]))
++                .filter(|(_, owners)| {
++                    order.is_none()
++                        && narrow
++                        && overlap > 0.0
++                        && owners.len() == 2
++                        && owners.contains(&region)
++                        && opaque.get(region).copied().unwrap_or(false)
++                        && owners.iter().all(|&other| {
++                            other == region
++                                || (order_ranks[other] < order_ranks[region]
++                                    && opaque.get(other).copied().unwrap_or(false))
++                        })
+                 })
++                .map(|(chain, _)| chain)
+                 .collect();
+-            let source_area = signed_area(&source_points);
+-            if source_area.abs() < 0.5 {
+-                continue;
+-            }
+-            let supported_hole = source_area < 0.0
+-                && (opaque.is_empty() || opaque.get(region).copied().unwrap_or(false))
+-                && hole_is_covered_by_later_regions(
+-                    &source_points,
+-                    region,
+-                    segmentation,
+-                    &order_ranks,
+-                    opaque,
+-                );
+-            let candidate_hole = overlap > 0.0
+-                && !opaque.is_empty()
+-                && opaque.get(region).copied().unwrap_or(false)
+-                && supported_hole;
+-            let covered_hole =
+-                overlap == 0.0 && matte.is_none() && opaque.is_empty() && supported_hole;
+-            if covered_hole {
+-                summary.covered_holes_removed += 1;
+-                removed_hole = true;
+-            }
+-            // This complete contour follows the transparent exterior. It does
+-            // not need the junctions introduced by tiny RGB rim fragments.
+-            if matte.is_some_and(|matte| follows_alpha_rim(&source_points, matte)) {
+-                let bounds = contour_bounds(&source_points);
+-                let contour = alpha_contours.iter().find(|contour| {
+-                    let other = contour_bounds(contour);
+-                    (0..4).all(|i| (bounds[i] - other[i]).abs() <= 2.0)
+-                        && (signed_area(contour).abs() - source_area.abs()).abs()
+-                            <= source_area.abs() * 0.03
+-                });
+-                let path = fitted_alpha_contour_path_data(
+-                    contour.map_or(source_points.as_slice(), Vec::as_slice),
+-                );
+-                summary.cubic_segments += path.matches("C ").count();
+-                summary.line_segments += path.matches("L ").count();
+-                data.push_str(&path);
+-                if !covered_hole {
+-                    occlusion_data.push_str(&path);
+-                    if candidate_hole {
+-                        covered_hole_paths.push(path.clone());
+-                    }
++            let traced = trace_region_vertex_loops(region_edges, stride);
++            let mut loops = Vec::<Vec<Point>>::new();
++            let mut data = String::new();
++            let mut occlusion_data = String::new();
++            let mut removed_hole = false;
++            let mut covered_hole_paths = Vec::new();
++            for vertices in traced {
++                let source_points: Vec<Point> = vertices
++                    .iter()
++                    .map(|&value| point_from_vertex(value, stride))
++                    .collect();
++                let raw_points: Vec<Point> = vertices
++                    .iter()
++                    .map(|&value| {
++                        positions
++                            .get(&value)
++                            .copied()
++                            .unwrap_or_else(|| point_from_vertex(value, stride))
++                    })
++                    .collect();
++                let source_area = signed_area(&source_points);
++                if source_area.abs() < 0.5 {
++                    continue;
+                 }
+-                loops.push(source_points);
+-                continue;
+-            }
+-            match shared_region_loop(
+-                &vertices,
+-                &shared_chains,
+-                &shared_lookup,
+-                &mut summary.cubic_segments,
+-                &mut summary.line_segments,
+-                None,
+-            ) {
+-                Ok((points, path)) => {
+-                    loops.push(points);
++                let supported_hole = source_area < 0.0
++                    && (opaque.is_empty() || opaque.get(region).copied().unwrap_or(false))
++                    && hole_is_covered_by_later_regions(
++                        &source_points,
++                        region,
++                        segmentation,
++                        &order_ranks,
++                        opaque,
++                    );
++                let candidate_hole = overlap > 0.0
++                    && !opaque.is_empty()
++                    && opaque.get(region).copied().unwrap_or(false)
++                    && supported_hole;
++                let covered_hole =
++                    overlap == 0.0 && matte.is_none() && opaque.is_empty() && supported_hole;
++                if covered_hole {
++                    summary.covered_holes_removed += 1;
++                    removed_hole = true;
++                }
++                // This complete contour follows the transparent exterior. It does
++                // not need the junctions introduced by tiny RGB rim fragments.
++                if matte.is_some_and(|matte| follows_alpha_rim(&source_points, matte)) {
++                    let bounds = contour_bounds(&source_points);
++                    let contour = alpha_contours.iter().find(|contour| {
++                        let other = contour_bounds(contour);
++                        (0..4).all(|i| (bounds[i] - other[i]).abs() <= 2.0)
++                            && (signed_area(contour).abs() - source_area.abs()).abs()
++                                <= source_area.abs() * 0.03
++                    });
++                    let path = fitted_alpha_contour_path_data(
++                        contour.map_or(source_points.as_slice(), Vec::as_slice),
++                    );
++                    summary.cubic_segments += path.matches("C ").count();
++                    summary.line_segments += path.matches("L ").count();
+                     data.push_str(&path);
+                     if !covered_hole {
+-                        let expanded = if overlap_chains.is_empty() && width_chains.is_empty() {
+-                            path.clone()
+-                        } else {
+-                            shared_region_loop(
+-                                &vertices,
+-                                &shared_chains,
+-                                &shared_lookup,
+-                                &mut 0,
+-                                &mut 0,
+-                                Some((&overlap_chains, &width_chains, overlap)),
+-                            )
+-                            .map(|(_, path)| path)
+-                            .unwrap_or_else(|_| path.clone())
+-                        };
+-                        occlusion_data.push_str(&expanded);
++                        occlusion_data.push_str(&path);
+                         if candidate_hole {
+-                            covered_hole_paths.push(expanded);
++                            covered_hole_paths.push(path.clone());
+                         }
+                     }
++                    loops.push(source_points);
+                     continue;
+                 }
+-                Err(SharedLoopFailure::MissingEdge) => summary.shared_loop_missing_edges += 1,
+-                Err(SharedLoopFailure::Discontinuous) => summary.shared_loop_discontinuities += 1,
+-                Err(SharedLoopFailure::Empty) => summary.shared_loop_invalid_areas += 1,
+-            }
+-            summary.shared_loop_fallbacks += 1;
+-            let simplified = preserve_closed_points(
+-                simplify_grid_closed(&raw_points, std::f32::consts::FRAC_1_SQRT_2),
+-                &raw_points,
+-                &canvas_corners,
+-            );
+-            let simplified_area = signed_area(&simplified);
+-            let points = if simplified.len() >= 3
+-                && simplified_area.signum() == source_area.signum()
+-                && simplified_area.abs() >= 0.05 * source_area.abs()
+-            {
+-                simplified
+-            } else {
+-                let positioned = remove_collinear(&raw_points);
+-                let positioned_area = signed_area(&positioned);
+-                if positioned.len() >= 3
+-                    && positioned_area.signum() == source_area.signum()
+-                    && positioned_area.abs() >= 0.05 * source_area.abs()
+-                {
+-                    positioned
+-                } else {
+-                    remove_collinear(&source_points)
+-                }
+-            };
+-            if points.len() >= 3 {
+-                let path = closed_path_data(
+-                    &points,
++                match shared_region_loop(
++                    &vertices,
++                    &shared_chains,
++                    &shared_lookup,
+                     &mut summary.cubic_segments,
+                     &mut summary.line_segments,
++                    None,
++                ) {
++                    Ok((points, path)) => {
++                        loops.push(points);
++                        data.push_str(&path);
++                        if !covered_hole {
++                            let expanded = if overlap_chains.is_empty() && width_chains.is_empty() {
++                                path.clone()
++                            } else {
++                                shared_region_loop(
++                                    &vertices,
++                                    &shared_chains,
++                                    &shared_lookup,
++                                    &mut 0,
++                                    &mut 0,
++                                    Some((&overlap_chains, &width_chains, overlap)),
++                                )
++                                .map(|(_, path)| path)
++                                .unwrap_or_else(|_| path.clone())
++                            };
++                            occlusion_data.push_str(&expanded);
++                            if candidate_hole {
++                                covered_hole_paths.push(expanded);
++                            }
++                        }
++                        continue;
++                    }
++                    Err(SharedLoopFailure::MissingEdge) => summary.shared_loop_missing_edges += 1,
++                    Err(SharedLoopFailure::Discontinuous) => {
++                        summary.shared_loop_discontinuities += 1
++                    }
++                    Err(SharedLoopFailure::Empty) => summary.shared_loop_invalid_areas += 1,
++                }
++                summary.shared_loop_fallbacks += 1;
++                let simplified = preserve_closed_points(
++                    simplify_grid_closed(&raw_points, std::f32::consts::FRAC_1_SQRT_2),
++                    &raw_points,
++                    &canvas_corners,
+                 );
+-                data.push_str(&path);
+-                if !covered_hole {
+-                    occlusion_data.push_str(&path);
+-                    if candidate_hole {
+-                        covered_hole_paths.push(path.clone());
++                let simplified_area = signed_area(&simplified);
++                let points = if simplified.len() >= 3
++                    && simplified_area.signum() == source_area.signum()
++                    && simplified_area.abs() >= 0.05 * source_area.abs()
++                {
++                    simplified
++                } else {
++                    let positioned = remove_collinear(&raw_points);
++                    let positioned_area = signed_area(&positioned);
++                    if positioned.len() >= 3
++                        && positioned_area.signum() == source_area.signum()
++                        && positioned_area.abs() >= 0.05 * source_area.abs()
++                    {
++                        positioned
++                    } else {
++                        remove_collinear(&source_points)
++                    }
++                };
++                if points.len() >= 3 {
++                    let path = closed_path_data(
++                        &points,
++                        &mut summary.cubic_segments,
++                        &mut summary.line_segments,
++                    );
++                    data.push_str(&path);
++                    if !covered_hole {
++                        occlusion_data.push_str(&path);
++                        if candidate_hole {
++                            covered_hole_paths.push(path.clone());
++                        }
+                     }
++                    loops.push(points);
+                 }
+-                loops.push(points);
+-            }
+-        }
+-        loops.sort_by(|a, b| signed_area(b).abs().total_cmp(&signed_area(a).abs()));
+-        if loops.is_empty() {
+-            summary.empty_regions += 1;
+-            summary.empty_region_pixels += segmentation.regions[region].area;
+-            summary.largest_empty_region = summary
+-                .largest_empty_region
+-                .max(segmentation.regions[region].area);
+-        }
+-        summary.loops += loops.len();
+-        summary.simplified_vertices += loops.iter().map(Vec::len).sum::<usize>();
+-        // Keep the one-face-per-region shared path intact here.  The Python
+-        // pipeline recognizes exact primitives only after the structural
+-        // layer has been composited, as part of the final render-gated SVG
+-        // optimization.  Recognizing raster rectangles at this stage changes
+-        // both the serialized geometry and the optimizer's candidate tree.
+-        let primitive = None;
+-        geometries.push(RegionGeometry {
+-            region: region as u32,
+-            loops,
+-            path_data: data,
+-            occlusion_path_data: (removed_hole
+-                || !overlap_chains.is_empty()
+-                || !width_chains.is_empty()
+-                || !covered_hole_paths.is_empty())
+-            .then_some(occlusion_data),
+-            covered_hole_paths,
+-            primitive,
++            }
++            loops.sort_by(|a, b| signed_area(b).abs().total_cmp(&signed_area(a).abs()));
++            if loops.is_empty() {
++                summary.empty_regions += 1;
++                summary.empty_region_pixels += segmentation.regions[region].area;
++                summary.largest_empty_region = summary
++                    .largest_empty_region
++                    .max(segmentation.regions[region].area);
++            }
++            summary.loops += loops.len();
++            summary.simplified_vertices += loops.iter().map(Vec::len).sum::<usize>();
++            // Keep the one-face-per-region shared path intact here.  The Python
++            // pipeline recognizes exact primitives only after the structural
++            // layer has been composited, as part of the final render-gated SVG
++            // optimization.  Recognizing raster rectangles at this stage changes
++            // both the serialized geometry and the optimizer's candidate tree.
++            let primitive = None;
++            geometries.push(RegionGeometry {
++                region: region as u32,
++                loops,
++                path_data: data,
++                occlusion_path_data: (removed_hole
++                    || !overlap_chains.is_empty()
++                    || !width_chains.is_empty()
++                    || !covered_hole_paths.is_empty())
++                .then_some(occlusion_data),
++                covered_hole_paths,
++                primitive,
++            });
++        }
++        // Serialize in the same order used to decide which boundaries are hidden,
++        // before any render-dependent structural selection.
++        geometries.sort_by(|left, right| {
++            let left_region = left.region as usize;
++            let right_region = right.region as usize;
++            order_ranks[left_region]
++                .cmp(&order_ranks[right_region])
++                .then_with(|| left_region.cmp(&right_region))
+         });
++        (geometries, summary)
+     }
+-    // Serialize in the same order used to decide which boundaries are hidden,
+-    // before any render-dependent structural selection.
+-    geometries.sort_by(|left, right| {
+-        let left_region = left.region as usize;
+-        let right_region = right.region as usize;
+-        order_ranks[left_region]
+-            .cmp(&order_ranks[right_region])
+-            .then_with(|| left_region.cmp(&right_region))
+-    });
+-    (geometries, summary)
+ }
+ 
+ /// Preserve the accepted master instead of refitting it from a tessellation.
+@@ -8491,34 +8543,134 @@ pub(crate) fn inset_outline(
+ mod tests {
+     use super::*;
+ 
++    #[test]
++    fn shared_preparation_does_not_retain_overlap_or_order_from_previous_builds() {
++        let (width, height) = (32, 24);
++        let labels: Vec<u32> = (0..width * height)
++            .map(|i| {
++                let boundary = 12 + i / width / 4;
++                if i % width < boundary {
++                    0
++                } else if i % width < boundary + 3 {
++                    1
++                } else {
++                    2
++                }
++            })
++            .collect();
++        let colours = [[0.2; 3], [0.05; 3], [0.8; 3]];
++        let source = Raster::new(
++            width,
++            height,
++            labels.iter().map(|&id| colours[id as usize]).collect(),
++        );
++        let segmentation = Segmentation {
++            width,
++            height,
++            labels: labels.clone(),
++            canonical: source.clone(),
++            paint_keys: vec![0, 1, 2],
++            paint_samples: vec![true; labels.len()],
++            regions: (0..3)
++                .map(|id| RegionStats {
++                    id,
++                    area: labels.iter().filter(|&&label| label == id).count(),
++                    min_x: 0,
++                    min_y: 0,
++                    max_x: width,
++                    max_y: height,
++                    mean_rgb: colours[id as usize],
++                    mean_lab: rgb_to_oklab(colours[id as usize]),
++                })
++                .collect(),
++            summary: SegmentationSummary::default(),
++        };
++        let topology = HierarchicalTopology::build(&segmentation);
++        let matte = crate::chroma::AlphaMatte::from_u8(
++            width,
++            height,
++            labels
++                .iter()
++                .map(|&id| if id == 2 { 128 } else { 255 })
++                .collect(),
++        );
++        for alpha in [None, Some(&matte)] {
++            let prepared =
++                PreparedGeometry::new(&segmentation, Some(&topology), Some(&source), alpha, &[]);
++            for (overlap, opaque, order) in [
++                (0.6, [true; 3], Some([2, 0, 1])),
++                (0.0, [true, true, false], Some([0, 1, 2])),
++                (0.6, [true; 3], None),
++                (0.6, [true; 3], Some([2, 0, 1])),
++            ] {
++                let order = order.as_ref().map(|r| r.as_slice());
++                let reused = prepared.build(overlap, &opaque, order);
++                let fresh = build_internal(
++                    &segmentation,
++                    Some(&topology),
++                    Some(&source),
++                    alpha,
++                    overlap,
++                    &opaque,
++                    order,
++                    &[],
++                );
++                assert_eq!(format!("{reused:?}"), format!("{fresh:?}"));
++            }
++        }
++    }
++
+     #[test]
+     fn incident_chain_index_matches_the_complete_ownership_scan() {
+-        let owners: Vec<BTreeSet<usize>> = (0..64).map(|mask| {
+-            (0..6).filter(|&owner| mask & (1 << owner) != 0).collect()
+-        }).collect();
++        let owners: Vec<BTreeSet<usize>> = (0..64)
++            .map(|mask| (0..6).filter(|&owner| mask & (1 << owner) != 0).collect())
++            .collect();
+         let indexed = chains_by_owner(&owners, 6);
+         for (owner, chains) in indexed.iter().enumerate() {
+-            let scanned: Vec<usize> = owners.iter().enumerate()
+-                .filter(|(_, set)| set.contains(&owner)).map(|(chain, _)| chain).collect();
++            let scanned: Vec<usize> = owners
++                .iter()
++                .enumerate()
++                .filter(|(_, set)| set.contains(&owner))
++                .map(|(chain, _)| chain)
++                .collect();
+             assert_eq!(*chains, scanned);
+         }
+     }
+ 
+-
+     #[test]
+     fn segment_budget_preserves_every_competitive_cubic_fit() {
+         for count in [2, 17, 129, 513] {
+             for amplitude in [0.0_f32, 1.0, 12.0] {
+-                let points: Vec<Point> = (0..count).map(|i| Point {
+-                    x: i as f32 * 0.35,
+-                    y: amplitude * ((i as f32 * 0.17).sin() + 0.2 * (i as f32 * 1.3).cos()),
+-                }).collect();
+-                let left = normalized(Point { x: points[1].x - points[0].x, y: points[1].y - points[0].y });
+-                let right = normalized(Point { x: points[count - 2].x - points[count - 1].x, y: points[count - 2].y - points[count - 1].y });
++                let points: Vec<Point> = (0..count)
++                    .map(|i| Point {
++                        x: i as f32 * 0.35,
++                        y: amplitude * ((i as f32 * 0.17).sin() + 0.2 * (i as f32 * 1.3).cos()),
++                    })
++                    .collect();
++                let left = normalized(Point {
++                    x: points[1].x - points[0].x,
++                    y: points[1].y - points[0].y,
++                });
++                let right = normalized(Point {
++                    x: points[count - 2].x - points[count - 1].x,
++                    y: points[count - 2].y - points[count - 1].y,
++                });
+                 for tolerance in [0.1_f32, 0.75, 1.25] {
+                     let complete = fit_cubic_recursive(&points, left, right, tolerance * tolerance);
+-                    for budget in [0, 1, complete.len().saturating_sub(1), complete.len(), complete.len() + 3] {
+-                        let limited = fit_cubic_with_budget(&points, left, right, tolerance * tolerance, budget);
++                    for budget in [
++                        0,
++                        1,
++                        complete.len().saturating_sub(1),
++                        complete.len(),
++                        complete.len() + 3,
++                    ] {
++                        let limited = fit_cubic_with_budget(
++                            &points,
++                            left,
++                            right,
++                            tolerance * tolerance,
++                            budget,
++                        );
+                         if complete.len() > budget {
+                             assert!(limited.is_none());
+                         } else {
+diff --git a/src/gradient.rs b/src/gradient.rs
+index 5da7bf9b6c401b5318dd0f5da222ae9824ce992f..fe1b01c70d5049632de1b073d7af8cdfc39ecf23 100644
+--- a/src/gradient.rs
++++ b/src/gradient.rs
+@@ -3443,17 +3443,19 @@ fn fit_residual_paint(
+     // Residual outliers on an incident edge must not buy a broad shadow
+     // by worsening nearby samples. Keep this evidence tied
+     // to the original base so several small overlays cannot accumulate drift.
+-    let supported: Vec<_> = validation_samples
++    // Most candidates fail on an early validation pixel. Evaluate immutable
++    // source/base evidence only when reached, and share it across candidates.
++    let supported: Vec<std::cell::OnceCell<(Oklab, f32)>> = validation_samples
+         .iter()
+-        .map(|&i| {
+-            let target = rgb_to_oklab(source.pixels[i]);
+-            let error = delta_e_ok(target, rgb_to_oklab(paint_at(&base, i, source.width)));
+-            (i, target, error)
+-        })
++        .map(|_| std::cell::OnceCell::new())
+         .collect();
+     // Colour-only residual fitting can improve a biased base while adding
+     // circular extrema to a smooth ramp. Validate spatial colour changes too.
+-    let observed: HashSet<_> = validation_samples.iter().copied().collect();
++    let observed: HashSet<_> = validation_samples
++        .iter()
++        .filter(|_| preserve_shape)
++        .copied()
++        .collect();
+     let difference = |a: Oklab, b: Oklab| Oklab {
+         l: b.l - a.l,
+         a: b.a - a.a,
+@@ -3683,7 +3685,15 @@ fn fit_residual_paint(
+                         };
+                         let mse = paint_rgb_mse_with(source, samples, &mut candidate_at);
+                         if best.as_ref().is_none_or(|(best_mse, _)| mse < *best_mse)
+-                            && supported.iter().all(|&(i, target, error)| {
++                            && validation_samples.iter().zip(&supported).all(|(&i, cell)| {
++                                let &(target, error) = cell.get_or_init(|| {
++                                    let target = rgb_to_oklab(source.pixels[i]);
++                                    let error = delta_e_ok(
++                                        target,
++                                        rgb_to_oklab(paint_at(&original_base, i, source.width)),
++                                    );
++                                    (target, error)
++                                });
+                                 delta_e_ok(target, rgb_to_oklab(candidate_at(i))) <= error + 1.0
+                             })
+                             && slopes.iter().all(|&(i, j, target, original)| {
+@@ -6879,18 +6889,27 @@ fn merge_source_supported_paints_round(
+                 paints[left].clone(),
+                 paints[right].clone(),
+             ]);
+-            for base in layered_bases
++            // The bases are independent, but selection is order-sensitive on
++            // tied scores. Fit concurrently in the existing pool, then reduce
++            // in the original order without changing the greedy merge order.
++            let layered_bases: Vec<_> = layered_bases
+                 .into_iter()
+                 .filter(|paint| !matches!(paint, Paint::Layered { .. }))
+-            {
+-                let (layered, layered_stats) = fit_layered_residual_paint_validated(
+-                    source,
+-                    &layered_samples,
+-                    &layered_validation,
+-                    combined_bounds,
+-                    base,
+-                    3,
+-                );
++                .collect();
++            let layered_fits: Vec<_> = layered_bases
++                .into_par_iter()
++                .map(|base| {
++                    fit_layered_residual_paint_validated(
++                        source,
++                        &layered_samples,
++                        &layered_validation,
++                        combined_bounds,
++                        base,
++                        3,
++                    )
++                })
++                .collect();
++            for (layered, layered_stats) in layered_fits {
+                 let layered_score = objective(layered_stats)
+                     .max(objective(paint_stats(
+                         source,
+@@ -7611,21 +7630,22 @@ fn refit_single_residual_field(
+     if samples.len() < 6 {
+         return None;
+     }
+-    let observations: Vec<_> = samples
++    let observations: Vec<(_, std::cell::OnceCell<(Oklab, f32)>)> = samples
+         .iter()
+         .chain(validation)
+-        .map(|&i| {
+-            let target = rgb_to_oklab(source.pixels[i]);
+-            (
+-                i,
+-                target,
+-                delta_e_ok(target, rgb_to_oklab(paint_at(original, i, source.width))),
+-            )
+-        })
++        .map(|&i| (i, std::cell::OnceCell::new()))
+         .collect();
+     let acceptable = |candidate: &Paint| {
+         let mut increase = 0.0;
+-        for &(i, target, before) in &observations {
++        for (i, cell) in &observations {
++            let i = *i;
++            let &(target, before) = cell.get_or_init(|| {
++                let target = rgb_to_oklab(source.pixels[i]);
++                (
++                    target,
++                    delta_e_ok(target, rgb_to_oklab(paint_at(original, i, source.width))),
++                )
++            });
+             let after = delta_e_ok(target, rgb_to_oklab(paint_at(candidate, i, source.width)));
+             if after > before + 1.5 {
+                 return false;
+diff --git a/src/pipeline.rs b/src/pipeline.rs
+index 31b131ac509a0dbb6476b2354b1f4b52d5513e85..dfb1fc9cd5a8b5afafb3cced985449baff235d06 100644
+--- a/src/pipeline.rs
++++ b/src/pipeline.rs
+@@ -1024,8 +1024,8 @@ fn vectorize_inner(
+     let processing_height = processing.height;
+     let source_scale = (input_width as f32 / processing_width.max(1) as f32)
+         .max(input_height as f32 / processing_height.max(1) as f32);
+-    let retain_adaptive_source = config.adaptive_refinement
+-        && source_scale >= config.adaptive_min_source_scale;
++    let retain_adaptive_source =
++        config.adaptive_refinement && source_scale >= config.adaptive_min_source_scale;
+     let adaptive_source = retain_adaptive_source.then_some(source);
+     let adaptive_reference = retain_adaptive_source.then_some(source_reference);
+     let adaptive_matte = if retain_adaptive_source {
+@@ -1659,20 +1659,23 @@ fn vectorize_processing(
+         &baseline_order,
+     );
+     // Finalize ordering before deciding and fitting hidden overlap.
+-    let (mut geometry, mut geometry_report) = crate::geometry::build_with_paint_overlap(
++    let prepared_geometry = crate::geometry::PreparedGeometry::new(
+         &segmentation,
+-        &topology,
+-        &geometry_edge_reference,
++        Some(&topology),
++        Some(&geometry_edge_reference),
+         if source_alpha { chroma_matte } else { None },
+-        config.shared_boundary_overlap,
+-        &overlap_opaque,
+-        (order_proposal.summary.changed_ranks > 0).then_some(order_proposal.ranks.as_slice()),
+         if variable_opacity {
+             &excluded_regions
+         } else {
+             &[]
+         },
+     );
++    let (mut geometry, mut geometry_report) = prepared_geometry.build(
++        config.shared_boundary_overlap,
++        &overlap_opaque,
++        (order_proposal.summary.changed_ranks > 0).then_some(order_proposal.ranks.as_slice()),
++    );
++    let prepared_geometry = (order_proposal.summary.changed_ranks > 0).then_some(prepared_geometry);
+     if let Some(alpha) = &mut face_alpha {
+         for (band, colour) in std::mem::take(&mut alpha.bands) {
+             let region = paints.len() as u32;
+@@ -1892,21 +1895,10 @@ fn vectorize_processing(
+     if order_proposal.summary.changed_ranks > 0 {
+         // The old ordering is only a validation reference, never an input to
+         // the ordered geometry's expansion decisions.
+-        let (mut reference_geometry, reference_geometry_report) =
+-            crate::geometry::build_with_paint_overlap(
+-                &segmentation,
+-                &topology,
+-                &geometry_edge_reference,
+-                if source_alpha { chroma_matte } else { None },
+-                config.shared_boundary_overlap,
+-                &overlap_opaque,
+-                None,
+-                if variable_opacity {
+-                    &excluded_regions
+-                } else {
+-                    &[]
+-                },
+-            );
++        let (mut reference_geometry, reference_geometry_report) = prepared_geometry
++            .as_ref()
++            .unwrap()
++            .build(config.shared_boundary_overlap, &overlap_opaque, None);
+         reference_geometry.extend(
+             geometry
+                 .iter()
+@@ -1945,6 +1937,7 @@ fn vectorize_processing(
+         }
+         report_progress(config, "paint-order-validation", started, &mut checkpoint);
+     }
++    drop(prepared_geometry);
+     #[cfg(feature = "diagnostics")]
+     if let Ok(prefix) = std::env::var("PICVEC_PIPELINE_DIAGNOSTICS") {
+         let _ = fs::write(
+diff --git a/src/segment_micro.rs b/src/segment_micro.rs
+index d6dfa93f8d74a9d6db1f355c18e515cf841437c8..8850a3bdb6a655e04c26b5d983d93140213d7837 100644
+--- a/src/segment_micro.rs
++++ b/src/segment_micro.rs
+@@ -30,6 +30,7 @@ pub(crate) fn absorb_micro_regions(
+         }
+         let mut changes = Vec::new();
+         let mut material_unions = vec![false; count];
++        let mut parent_slots = vec![usize::MAX; count];
+         for (id, component) in pixels.iter().enumerate() {
+             if component.is_empty() {
+                 continue;
+@@ -119,11 +120,13 @@ pub(crate) fn absorb_micro_regions(
+             // direct contacts separate for ordinary same-material merging.
+             // Nonincident paints are evidence only for partial coverage below.
+             let incident = contacts.clone();
+-            for y in region.min_y.saturating_sub(radius)..(region.max_y + radius).min(h) {
+-                for x in region.min_x.saturating_sub(radius)..(region.max_x + radius).min(w) {
+-                    let other = labels[y * w + x] as usize;
+-                    if !large && neutral && other != id && segmentation.regions[other].area > 128 {
+-                        contacts.insert(other);
++            if !large && neutral {
++                for y in region.min_y.saturating_sub(radius)..(region.max_y + radius).min(h) {
++                    for x in region.min_x.saturating_sub(radius)..(region.max_x + radius).min(w) {
++                        let other = labels[y * w + x] as usize;
++                        if other != id && segmentation.regions[other].area > 128 {
++                            contacts.insert(other);
++                        }
+                     }
+                 }
+             }
+@@ -153,28 +156,39 @@ pub(crate) fn absorb_micro_regions(
+             let mut edge_parents = Vec::new();
+             let mut repeated = Vec::new();
+             let mut same_material = Vec::new();
+-            for parent in contacts {
+-                let mut samples = Vec::new();
+-                let mut core = Vec::new();
+-                for y in region.min_y.saturating_sub(radius)..(region.max_y + radius).min(h) {
+-                    for x in region.min_x.saturating_sub(radius)..(region.max_x + radius).min(w) {
+-                        let j = y * w + x;
+-                        if labels[j] as usize != parent || (opacity(j) - a).abs() > 1.5 / 255.0 {
+-                            continue;
+-                        }
+-                        samples.push(j);
+-                        if x > 0
+-                            && x + 1 < w
+-                            && y > 0
+-                            && y + 1 < h
+-                            && [j - 1, j + 1, j - w, j + w]
+-                                .iter()
+-                                .all(|&k| labels[k] as usize == parent)
+-                        {
+-                            core.push(j);
+-                        }
++            // Visit the local window once, distributing its pixels to the
++            // incident owners. Keep both parent order and row-major sample
++            // order identical to scanning the whole window for each parent.
++            let mut parent_samples = vec![(Vec::new(), Vec::new()); contacts.len()];
++            for (slot, &parent) in contacts.iter().enumerate() {
++                parent_slots[parent] = slot;
++            }
++            for y in region.min_y.saturating_sub(radius)..(region.max_y + radius).min(h) {
++                for x in region.min_x.saturating_sub(radius)..(region.max_x + radius).min(w) {
++                    let j = y * w + x;
++                    let parent = labels[j] as usize;
++                    let slot = parent_slots[parent];
++                    if slot == usize::MAX || (opacity(j) - a).abs() > 1.5 / 255.0 {
++                        continue;
++                    }
++                    let (samples, core) = &mut parent_samples[slot];
++                    samples.push(j);
++                    if x > 0
++                        && x + 1 < w
++                        && y > 0
++                        && y + 1 < h
++                        && [j - 1, j + 1, j - w, j + w]
++                            .iter()
++                            .all(|&k| labels[k] as usize == parent)
++                    {
++                        core.push(j);
+                     }
+                 }
++            }
++            for &parent in &contacts {
++                parent_slots[parent] = usize::MAX;
++            }
++            for (parent, (samples, core)) in contacts.into_iter().zip(parent_samples) {
+                 let selected = if core.len() >= 3 { &core } else { &samples };
+                 if selected.len() < 3 {
+                     continue;
+diff --git a/src/visibility.rs b/src/visibility.rs
+index 35e3878e236d212d0d5a7194b2f90c1078a15539..708ca84d9c37fd362ca17f52b2d6aa751123a210 100644
+--- a/src/visibility.rs
++++ b/src/visibility.rs
+@@ -10,8 +10,11 @@ use std::collections::HashMap;
+ 
+ const TILE: usize = 64;
+ const PREFIX: &str = "picvec-visibility-";
++// Each entry owns a baseline and a prefix framebuffer. Together they use at
++// most the previous cache's 128 pixmaps (32 MiB at 4x), plus one scratch tile.
++const CACHE_TILES: usize = 128 / 2;
+ 
+-#[derive(Default, Debug)]
++#[derive(Default, Debug, PartialEq, Eq)]
+ pub(crate) struct Removed {
+     pub shapes: usize,
+     pub strokes: usize,
+@@ -85,6 +88,33 @@ struct Draw<'a> {
+     candidate: Option<usize>,
+     bounds: [f32; 4],
+ }
++
++// Match Tree::node_by_id's search scope, including nodes inside isolated
++// groups, without restarting a full tree traversal for every candidate.
++fn missing_candidates(group: &usvg::Group, count: usize) -> Vec<bool> {
++    fn visit(group: &usvg::Group, missing: &mut [bool]) {
++        for node in group.children() {
++            if let Some(suffix) = node.id().strip_prefix(PREFIX) {
++                if let Ok(id) = suffix.parse::<usize>() {
++                    // Existing noncanonical IDs such as "01" or "+1" must
++                    // not count as the generated ID "1".
++                    if suffix == id.to_string() {
++                        if let Some(missing) = missing.get_mut(id) {
++                            *missing = false;
++                        }
++                    }
++                }
++            }
++            if let Node::Group(group) = node {
++                visit(group, missing);
++            }
++        }
++    }
++    let mut missing = vec![true; count];
++    visit(group, &mut missing);
++    missing
++}
++
+ fn collect<'a>(group: &'a usvg::Group, draws: &mut Vec<Draw<'a>>) {
+     for node in group.children() {
+         let candidate = node.id().strip_prefix(PREFIX).and_then(|s| s.parse().ok());
+@@ -110,33 +140,153 @@ fn collect<'a>(group: &'a usvg::Group, draws: &mut Vec<Draw<'a>>) {
+     }
+ }
+ 
+-fn draw_tile(
+-    draws: &[Draw<'_>],
+-    members: &[usize],
+-    active: &[bool],
+-    skip: Option<usize>,
++#[derive(Clone, Copy)]
++struct TileView {
+     x: usize,
+     y: usize,
+     w: usize,
+     h: usize,
+     scale: usize,
+-) -> Pixmap {
+-    let mut pixmap = Pixmap::new((w * scale) as u32, (h * scale) as u32).unwrap();
+-    for &i in members {
+-        if !active[i] || Some(i) == skip {
+-            continue;
++}
++
++impl TileView {
++    fn blank(self) -> Pixmap {
++        Pixmap::new((self.w * self.scale) as u32, (self.h * self.scale) as u32).unwrap()
++    }
++
++    fn render(
++        self,
++        draws: &[Draw<'_>],
++        members: &[usize],
++        active: &[bool],
++        skip: Option<usize>,
++        pixels: &mut Pixmap,
++    ) {
++        for &i in members {
++            if !active[i] || Some(i) == skip {
++                continue;
++            }
++            let node = draws[i].node;
++            let b = node.abs_layer_bounding_box().unwrap();
++            let transform = Transform::from_scale(self.scale as f32, self.scale as f32)
++                .pre_translate(b.x() - self.x as f32, b.y() - self.y as f32);
++            resvg::render_node(node, transform, &mut pixels.as_mut());
++        }
++    }
++}
++
++struct TileRaster {
++    baseline: Pixmap,
++    prefix: Pixmap,
++    // First member not yet included in prefix. Candidates are visited in
++    // increasing draw order, so accepted removals never invalidate a prefix.
++    next: usize,
++}
++
++impl TileRaster {
++    fn new(
++        view: TileView,
++        draws: &[Draw<'_>],
++        members: &[usize],
++        active: &[bool],
++        candidate: usize,
++    ) -> Self {
++        let next = members.partition_point(|&i| i < candidate);
++        let mut prefix = view.blank();
++        view.render(draws, &members[..next], active, None, &mut prefix);
++        let mut baseline = prefix.clone();
++        view.render(draws, &members[next..], active, None, &mut baseline);
++        Self {
++            baseline,
++            prefix,
++            next,
++        }
++    }
++
++    fn unchanged_without(
++        &mut self,
++        view: TileView,
++        draws: &[Draw<'_>],
++        members: &[usize],
++        active: &[bool],
++        candidate: usize,
++    ) -> bool {
++        let end = self.next + members[self.next..].partition_point(|&i| i < candidate);
++        view.render(
++            draws,
++            &members[self.next..end],
++            active,
++            None,
++            &mut self.prefix,
++        );
++        self.next = end;
++        // Clone the exact framebuffer, then execute the original suffix.
++        // Compositing a separately rendered suffix would change alpha rounding.
++        let mut after = self.prefix.clone();
++        view.render(draws, &members[end..], active, Some(candidate), &mut after);
++        self.baseline.data() == after.data()
++    }
++}
++
++struct CacheEntry {
++    raster: TileRaster,
++    last_used: u64,
++}
++
++struct TileCache {
++    entries: HashMap<(usize, usize), CacheEntry>,
++    capacity: usize,
++    clock: u64,
++}
++
++impl TileCache {
++    fn new(capacity: usize) -> Self {
++        assert!(capacity > 0 && capacity <= CACHE_TILES);
++        Self {
++            entries: HashMap::new(),
++            capacity,
++            clock: 0,
++        }
++    }
++
++    fn get_or_insert(
++        &mut self,
++        key: (usize, usize),
++        create: impl FnOnce() -> TileRaster,
++    ) -> &mut TileRaster {
++        self.clock += 1;
++        if !self.entries.contains_key(&key) {
++            if self.entries.len() == self.capacity {
++                // At most 64 entries: a bounded scan on misses avoids an
++                // unbounded access-history queue or an additional LRU index.
++                let oldest = *self
++                    .entries
++                    .iter()
++                    .min_by_key(|(_, v)| v.last_used)
++                    .unwrap()
++                    .0;
++                // Free both pixmaps before allocating their replacements.
++                self.entries.remove(&oldest);
++            }
++            self.entries.insert(
++                key,
++                CacheEntry {
++                    raster: create(),
++                    last_used: self.clock,
++                },
++            );
+         }
+-        let node = draws[i].node;
+-        let b = node.abs_layer_bounding_box().unwrap();
+-        // render_node subtracts its absolute bounding-box origin internally.
+-        let transform = Transform::from_scale(scale as f32, scale as f32)
+-            .pre_translate(b.x() - x as f32, b.y() - y as f32);
+-        resvg::render_node(node, transform, &mut pixmap.as_mut());
++        let entry = self.entries.get_mut(&key).unwrap();
++        entry.last_used = self.clock;
++        &mut entry.raster
+     }
+-    pixmap
+ }
+ 
+ pub(crate) fn prune(document: &str, width: usize, height: usize) -> (String, Removed) {
++    prune_cached(document, width, height, CACHE_TILES)
++}
++
++fn prune_cached(document: &str, width: usize, height: usize, capacity: usize) -> (String, Removed) {
+     // A <use> can render the same source element again through a filter or
+     // transform. Removing its source would alter both instances; do not treat
+     // those instances as independently removable draw operations.
+@@ -176,10 +326,8 @@ pub(crate) fn prune(document: &str, width: usize, height: usize) -> (String, Rem
+         }
+     }
+     let mut active = vec![true; draws.len()];
+-    let mut removed: Vec<_> = (0..candidates.len())
+-        .map(|i| tree.node_by_id(&format!("{PREFIX}{i}")).is_none())
+-        .collect();
+-    let mut baseline = HashMap::<(usize, usize), Pixmap>::new();
++    let mut removed = missing_candidates(tree.root(), candidates.len());
++    let mut cache = TileCache::new(capacity);
+     for (i, draw) in draws.iter().enumerate() {
+         let Some(candidate) = draw.candidate else {
+             continue;
+@@ -191,15 +339,11 @@ pub(crate) fn prune(document: &str, width: usize, height: usize) -> (String, Rem
+                 let y = tile / columns * TILE;
+                 let w = TILE.min(width - x);
+                 let h = TILE.min(height - y);
+-                // Bound the scratch cache independently of source dimensions.
+-                if baseline.len() >= 128 {
+-                    baseline.clear();
+-                }
+-                let before = baseline.entry((tile, scale)).or_insert_with(|| {
+-                    draw_tile(&draws, &tiles[tile], &active, None, x, y, w, h, scale)
++                let view = TileView { x, y, w, h, scale };
++                let raster = cache.get_or_insert((tile, scale), || {
++                    TileRaster::new(view, &draws, &tiles[tile], &active, i)
+                 });
+-                let after = draw_tile(&draws, &tiles[tile], &active, Some(i), x, y, w, h, scale);
+-                if before.data() != after.data() {
++                if !raster.unchanged_without(view, &draws, &tiles[tile], &active, i) {
+                     unchanged = false;
+                     break 'scales;
+                 }
+@@ -233,9 +377,197 @@ pub(crate) fn prune(document: &str, width: usize, height: usize) -> (String, Rem
+     (output, report)
+ }
+ 
++#[cfg(test)]
++#[path = "visibility_reference.rs"]
++mod reference;
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
++
++    fn layered_scene() -> String {
++        let mut svg = String::from(
++            r##"<svg xmlns="http://www.w3.org/2000/svg" width="160" height="80"><defs><linearGradient id="g"><stop stop-color="#315a91" stop-opacity="0.3"/><stop offset="1" stop-color="#ef9021" stop-opacity="0.8"/></linearGradient><clipPath id="c"><circle cx="63.5" cy="35" r="29"/></clipPath></defs><rect id="fixed" width="160" height="80" fill="#254a81"/><rect x="3" y="3" width="12" height="12" fill="red"/><rect x="2" y="2" width="20" height="20" fill="#254a81"/><rect x="2" y="2" width="20" height="20" fill="#254a81"/><g clip-path="url(#c)"><rect x="10" y="4" width="110" height="70" fill="url(#g)"/></g>"##,
++        );
++        for i in 0..36 {
++            let x = (i * 17 % 150) as f32 + 0.13;
++            let y = (i * 13 % 68) as f32 + 0.37;
++            svg.push_str(&format!(r##"<rect x="{x}" y="{y}" width="19.8" height="10.6" fill="#985c31" fill-opacity="0.17"/><path d="M{x} {y}l14 6" fill="none" stroke="#1246ab" stroke-opacity="0.31" stroke-width="0.13"/>"##));
++        }
++        svg.push_str("</svg>");
++        svg
++    }
++
++    #[test]
++    fn indexed_presence_matches_recursive_lookup_even_inside_isolated_groups() {
++        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><defs><clipPath id="c"><circle cx="32" cy="32" r="20"/></clipPath></defs><rect id="picvec-visibility-0" width="10" height="10"/><g clip-path="url(#c)"><rect id="picvec-visibility-1" width="64" height="64"/></g><path id="picvec-visibility-2" d="M0 0H20"/><rect id="picvec-visibility-03" x="3" width="5" height="5"/><rect id="picvec-visibility-+4" x="4" width="5" height="5"/><rect id="picvec-visibility-99" width="5" height="5"/></svg>"##;
++        let tree = usvg::Tree::from_str(svg, &usvg::Options::default()).unwrap();
++        let indexed = missing_candidates(tree.root(), 8);
++        let scanned: Vec<_> = (0..8)
++            .map(|i| tree.node_by_id(&format!("{PREFIX}{i}")).is_none())
++            .collect();
++        assert_eq!(indexed, scanned);
++        assert!(!indexed[0] && !indexed[1]);
++        assert!(indexed[3] && indexed[4]);
++    }
++
++    #[test]
++    fn incremental_framebuffers_match_full_redraw_at_every_candidate() {
++        let (svg, _) = annotate(&layered_scene());
++        let tree = usvg::Tree::from_str(&svg, &usvg::Options::default()).unwrap();
++        let mut draws = Vec::new();
++        collect(tree.root(), &mut draws);
++        let members: Vec<_> = (0..draws.len()).collect();
++        for scale in [1, 4, 8] {
++            for (x, y, w, h) in [(0, 0, 64, 64), (64, 0, 64, 64), (128, 64, 32, 16)] {
++                let view = TileView { x, y, w, h, scale };
++                let mut active = vec![true; draws.len()];
++                let mut raster = TileRaster::new(view, &draws, &members, &active, 0);
++                for i in 0..draws.len() {
++                    let before =
++                        reference::draw_tile(&draws, &members, &active, None, x, y, w, h, scale);
++                    let after =
++                        reference::draw_tile(&draws, &members, &active, Some(i), x, y, w, h, scale);
++                    assert_eq!(raster.baseline.data(), before.data());
++                    let unchanged = raster.unchanged_without(view, &draws, &members, &active, i);
++                    assert_eq!(unchanged, before.data() == after.data());
++                    let prefix = reference::draw_tile(
++                        &draws,
++                        &members[..i],
++                        &active,
++                        None,
++                        x,
++                        y,
++                        w,
++                        h,
++                        scale,
++                    );
++                    assert_eq!(raster.prefix.data(), prefix.data());
++                    // Include consecutive removals, then advance through only
++                    // the retained nodes on the next visit to this tile.
++                    if unchanged {
++                        active[i] = false;
++                    }
++                }
++            }
++        }
++    }
++
++    #[test]
++    fn lru_evicts_only_the_cold_entry_and_stays_within_the_pixmap_budget() {
++        let mut cache = TileCache::new(3);
++        let create = || TileRaster {
++            baseline: Pixmap::new(256, 256).unwrap(),
++            prefix: Pixmap::new(256, 256).unwrap(),
++            next: 0,
++        };
++        for i in 0..3 {
++            cache.get_or_insert((i, 4), create);
++        }
++        cache.get_or_insert((0, 4), || panic!("hot entry was lost"));
++        cache.get_or_insert((3, 4), create);
++        assert_eq!(cache.entries.len(), 3);
++        assert!(!cache.entries.contains_key(&(1, 4)));
++        for key in [(0, 4), (2, 4), (3, 4)] {
++            cache.get_or_insert(key, || panic!("unrelated entry was evicted"));
++        }
++        for i in 4..140 {
++            cache.get_or_insert((i, 4), create);
++        }
++        let bytes: usize = cache
++            .entries
++            .values()
++            .map(|v| v.raster.baseline.data().len() + v.raster.prefix.data().len())
++            .sum();
++        assert_eq!(bytes, cache.capacity * 2 * 256 * 256 * 4);
++        assert!(CACHE_TILES * 2 * 256 * 256 * 4 <= 32 * 1024 * 1024);
++    }
++
++    #[test]
++    fn eviction_and_transparency_preserve_the_reference_removal_decisions() {
++        let width = (CACHE_TILES + 5) * TILE;
++        let mut wide = format!(
++            r##"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="72"><rect id="fixed" width="{width}" height="72" fill="#125641"/>"##
++        );
++        // Cross the cache limit, then return to tiles with retained and
++        // removed candidates at both scales, including partial edge tiles.
++        for pass in 0..3 {
++            for i in 0..CACHE_TILES + 5 {
++                let x = i * TILE + 1;
++                let opacity = if pass == 2 { 0.2 } else { 1.0 };
++                if pass == 0 {
++                    // Fully covered interior mark; the fractional outer rims
++                    // themselves must stay because their AA accumulates.
++                    wide.push_str(&format!(
++                        r##"<rect x="{}" y="10" width="4" height="4" fill="#ff0077"/>"##,
++                        x + 5
++                    ));
++                }
++                wide.push_str(&format!(r##"<rect x="{x}" y="3.25" width="66" height="64.5" fill="#192581" fill-opacity="{opacity}"/>"##));
++            }
++        }
++        wide.push_str("</svg>");
++        for (svg, w, h) in [(layered_scene(), 160, 80), (wide, width, 72)] {
++            let expected = reference::prune(&svg, w, h);
++            assert!(expected.1.shapes > 0, "fixture {w}x{h} needs covered marks");
++            for capacity in [1, 3, CACHE_TILES] {
++                let actual = prune_cached(&svg, w, h, capacity);
++                assert_eq!(actual, expected);
++            }
++            for scale in [1, 4] {
++                assert_eq!(image(&svg, scale), image(&expected.0, scale));
++            }
++        }
++    }
++
++    #[test]
++    #[ignore = "stage benchmark; set PICVEC_VISIBILITY_BENCH_INPUTS and PICVEC_VISIBILITY_BENCH_OUTPUT"]
++    fn benchmark_emitted_svgs_against_full_redraw_reference() {
++        let paths = std::env::var_os("PICVEC_VISIBILITY_BENCH_INPUTS").unwrap();
++        let output = std::env::var_os("PICVEC_VISIBILITY_BENCH_OUTPUT").unwrap();
++        let repeats = std::env::var("PICVEC_VISIBILITY_BENCH_REPEATS")
++            .map(|v| v.parse::<usize>().unwrap())
++            .unwrap_or(3);
++        assert!(repeats > 0);
++        let mut rows = Vec::new();
++        for path in std::env::split_paths(&paths) {
++            let svg = std::fs::read_to_string(&path).unwrap();
++            let tree = usvg::Tree::from_str(&svg, &usvg::Options::default()).unwrap();
++            let (w, h) = (
++                tree.size().width().ceil() as usize,
++                tree.size().height().ceil() as usize,
++            );
++            drop(tree);
++            let measure = |reference_version| {
++                let start = std::time::Instant::now();
++                let result = if reference_version {
++                    reference::prune(&svg, w, h)
++                } else {
++                    prune(&svg, w, h)
++                };
++                (result, start.elapsed().as_secs_f64())
++            };
++            for repeat in 0..repeats {
++                let (baseline, candidate) = if repeat % 2 == 0 {
++                    (measure(true), measure(false))
++                } else {
++                    let candidate = measure(false);
++                    (measure(true), candidate)
++                };
++                assert_eq!(baseline.0, candidate.0);
++                eprintln!(
++                    "visibility {} trial {}: {:.3}s -> {:.3}s",
++                    path.display(),
++                    repeat + 1,
++                    baseline.1,
++                    candidate.1
++                );
++                rows.push(serde_json::json!({"input": path, "repeat": repeat, "baseline_seconds": baseline.1, "candidate_seconds": candidate.1, "input_bytes": svg.len(), "output_bytes": candidate.0.0.len(), "removed_shapes": candidate.0.1.shapes, "outputs_equal": true}));
++                std::fs::write(&output, serde_json::to_vec_pretty(&rows).unwrap()).unwrap();
++            }
++        }
++    }
++
+     fn image(svg: &str, scale: u32) -> Vec<u8> {
+         let tree = usvg::Tree::from_str(svg, &usvg::Options::default()).unwrap();
+         let mut p = Pixmap::new(
+diff --git a/src/visibility_reference.rs b/src/visibility_reference.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..1751e536b5de18c998d7a82ddd403c0e13ea4e7d
+--- /dev/null
++++ b/src/visibility_reference.rs
+@@ -0,0 +1,126 @@
++//! Test-only reference: the original full redraw and clear-all cache.
++//! Keep this independent of the incremental renderer for exact comparisons.
++use super::*;
++
++pub(super) fn draw_tile(
++    draws: &[Draw<'_>],
++    members: &[usize],
++    active: &[bool],
++    skip: Option<usize>,
++    x: usize,
++    y: usize,
++    w: usize,
++    h: usize,
++    scale: usize,
++) -> Pixmap {
++    let mut pixmap = Pixmap::new((w * scale) as u32, (h * scale) as u32).unwrap();
++    for &i in members {
++        if !active[i] || Some(i) == skip {
++            continue;
++        }
++        let node = draws[i].node;
++        let b = node.abs_layer_bounding_box().unwrap();
++        // render_node subtracts its absolute bounding-box origin internally.
++        let transform = Transform::from_scale(scale as f32, scale as f32)
++            .pre_translate(b.x() - x as f32, b.y() - y as f32);
++        resvg::render_node(node, transform, &mut pixmap.as_mut());
++    }
++    pixmap
++}
++
++pub(super) fn prune(document: &str, width: usize, height: usize) -> (String, Removed) {
++    // A <use> can render the same source element again through a filter or
++    // transform. Removing its source would alter both instances; do not treat
++    // those instances as independently removable draw operations.
++    if document.contains("<use ") {
++        return (document.into(), Removed::default());
++    }
++    let (annotated, candidates) = annotate(document);
++    if candidates.is_empty() {
++        return (document.into(), Removed::default());
++    }
++    let Ok(tree) = usvg::Tree::from_str(&annotated, &usvg::Options::default()) else {
++        return (document.into(), Removed::default());
++    };
++    // The core serializer has no viewport transform. Leave other documents
++    // intact rather than detaching children from their inherited transform.
++    if !tree.root().transform().is_identity() {
++        return (document.into(), Removed::default());
++    }
++    let mut draws = Vec::new();
++    collect(tree.root(), &mut draws);
++    let columns = width.div_ceil(TILE);
++    let rows = height.div_ceil(TILE);
++    let mut tiles = vec![Vec::new(); columns * rows];
++    let mut memberships = vec![Vec::new(); draws.len()];
++    for (i, draw) in draws.iter().enumerate() {
++        let [left, top, right, bottom] = draw.bounds;
++        let x0 = (left.max(0.0) as usize / TILE).min(columns);
++        let y0 = (top.max(0.0) as usize / TILE).min(rows);
++        let x1 = ((right.max(0.0).ceil() as usize).div_ceil(TILE)).min(columns);
++        let y1 = ((bottom.max(0.0).ceil() as usize).div_ceil(TILE)).min(rows);
++        for y in y0..y1 {
++            for x in x0..x1 {
++                let tile = y * columns + x;
++                tiles[tile].push(i);
++                memberships[i].push(tile);
++            }
++        }
++    }
++    let mut active = vec![true; draws.len()];
++    let mut removed: Vec<_> = (0..candidates.len())
++        .map(|i| tree.node_by_id(&format!("{PREFIX}{i}")).is_none())
++        .collect();
++    let mut baseline = HashMap::<(usize, usize), Pixmap>::new();
++    for (i, draw) in draws.iter().enumerate() {
++        let Some(candidate) = draw.candidate else {
++            continue;
++        };
++        let mut unchanged = true;
++        'scales: for scale in [1, 4] {
++            for &tile in &memberships[i] {
++                let x = tile % columns * TILE;
++                let y = tile / columns * TILE;
++                let w = TILE.min(width - x);
++                let h = TILE.min(height - y);
++                // Bound the scratch cache independently of source dimensions.
++                if baseline.len() >= 128 {
++                    baseline.clear();
++                }
++                let before = baseline.entry((tile, scale)).or_insert_with(|| {
++                    draw_tile(&draws, &tiles[tile], &active, None, x, y, w, h, scale)
++                });
++                let after = draw_tile(&draws, &tiles[tile], &active, Some(i), x, y, w, h, scale);
++                if before.data() != after.data() {
++                    unchanged = false;
++                    break 'scales;
++                }
++            }
++        }
++        if unchanged {
++            active[i] = false;
++            removed[candidate] = true;
++        }
++    }
++    let mut output = String::new();
++    let mut cursor = 0;
++    let mut report = Removed::default();
++    for (candidate, remove) in candidates.iter().zip(removed) {
++        if !remove {
++            continue;
++        }
++        output.push_str(&document[cursor..candidate.start]);
++        cursor = candidate.end;
++        let tag = &document[candidate.start..candidate.end];
++        report.paths += usize::from(tag.starts_with("<path "));
++        report.rects += usize::from(tag.starts_with("<rect "));
++        report.circles += usize::from(tag.starts_with("<circle "));
++        report.ellipses += usize::from(tag.starts_with("<ellipse "));
++        report.lines += usize::from(tag.starts_with("<line "));
++        report.shapes += 1;
++        report.strokes += usize::from(candidate.stroke);
++        report.ink += usize::from(candidate.ink);
++    }
++    output.push_str(&document[cursor..]);
++    (output, report)
++}

@@ -1,0 +1,7 @@
+{
+  "revision": "3fa41d2726efb77974a990666f5cd1ab28b85c5f",
+  "cpu": "AMD Ryzen AI 9 465 w/ Radeon 880M",
+  "available_cpus": "20",
+  "rustc": "rustc 1.95.0 (59807616e 2026-04-14)",
+  "measurement": "sequential, release + diagnostics, per-input 300 second timeout"
+}

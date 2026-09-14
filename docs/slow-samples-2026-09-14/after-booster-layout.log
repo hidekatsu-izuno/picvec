@@ -1,0 +1,74 @@
+picvec stage load-resize: 0.003s (total 0.003s)
+picvec stage edge-roles: 1.794s (total 1.797s)
+picvec stage structural-analysis: 0.164s (total 1.961s)
+picvec stage perceptual-smoothing: 0.368s (total 2.328s)
+picvec segmentation substage setup: 0.016s
+picvec segmentation substage palette: 0.037s (201 histogram cells, 43 colours)
+picvec segmentation substage initial-components: 0.013s
+picvec segmentation substage small-components: 0.101s
+picvec segmentation substage compact: 0.008s
+picvec segmentation substage antialias: 0.112s
+picvec segmentation substage finalize: 0.040s (total 0.328s)
+picvec stage segmentation: 2.331s (total 4.659s)
+picvec stage boundary-regularization: 0.129s (total 4.788s)
+picvec stage paint-aware-merge: 5.004s (total 9.792s)
+picvec stage thin-paint-ownership: 1.429s (total 11.221s)
+picvec stage paint-topology-preservation: 0.643s (total 11.864s)
+picvec paint substage setup: 0.017s
+picvec paint substage initial: 0.139s (primary solid 0, gain-bound solid 2534, low-range solid 1, model search 409)
+picvec paint substage harmonize: 0.001s
+picvec paint substage couple: 0.000s
+picvec stage paint-fitting: 0.187s (total 12.051s)
+picvec layered merge candidates: considered 3502, evidence 3490, seam 12, layered 0, nonfinite 0, face 0, combined 0, accepted 0
+picvec stage source-supported-paint-merge: 0.006s (total 12.056s)
+picvec stage exact-paint-merge: 0.014s (total 12.070s)
+picvec stage layered-paint-simplification: 0.060s (total 12.131s)
+picvec stage residual-shape-refinement: 0.002s (total 12.133s)
+picvec stage interior-shading: 0.104s (total 12.237s)
+picvec stage face-alpha: 0.000s (total 12.237s)
+picvec stage hierarchical-topology: 0.002s (total 12.239s)
+picvec stage shared-geometry: 2.710s (total 14.949s)
+picvec stage paint-preview: 0.059s (total 15.008s)
+picvec structural substage ownership: 1.919s
+picvec structural substage outline-proposals: 0.000s
+picvec structural substage outline-validation: 0.000s
+picvec structural substage colour-patches: 0.221s
+picvec stage structural-selection: 2.140s (total 17.148s)
+picvec hole candidates: 1553, SVG bytes 2464010
+picvec hole fragment cache: true
+picvec hole baseline: 0.153s
+picvec stage covered-hole-simplification: 2.712s (total 19.860s)
+picvec stage final-svg: 1.536s (total 21.396s)
+picvec adaptive candidate 0 0 5770 2058: error=7.8028 model_cost=1.7365 priority=5.9213
+picvec adaptive processing: source 0 0 5770 2058, processing 5770 2058
+picvec stage load-resize: 0.090s (total 0.090s)
+picvec stage edge-roles: 38.243s (total 38.333s)
+picvec stage structural-analysis: 3.170s (total 41.503s)
+picvec stage perceptual-smoothing: 4.807s (total 46.310s)
+picvec segmentation substage setup: 0.264s
+picvec segmentation substage palette: 0.487s (201 histogram cells, 40 colours)
+picvec segmentation substage initial-components: 0.260s
+picvec segmentation substage small-components: 1.284s
+picvec segmentation substage compact: 0.108s
+picvec segmentation substage antialias: 1.629s
+picvec segmentation substage finalize: 0.475s (total 4.506s)
+picvec stage segmentation: 15.543s (total 61.853s)
+picvec stage boundary-regularization: 2.005s (total 63.858s)
+picvec stage paint-aware-merge: 19.727s (total 83.585s)
+picvec stage thin-paint-ownership: 7.142s (total 90.727s)
+picvec stage paint-topology-preservation: 17.200s (total 107.927s)
+picvec paint substage setup: 0.250s
+picvec paint substage initial: 3.622s (primary solid 0, gain-bound solid 9201, low-range solid 12, model search 2999)
+picvec paint substage harmonize: 0.020s
+picvec paint substage couple: 0.015s
+picvec stage paint-fitting: 4.171s (total 112.098s)
+picvec layered merge candidates: considered 16686, evidence 16604, seam 72, layered 1, nonfinite 0, face 7, combined 1, accepted 2
+picvec stage source-supported-paint-merge: 77.346s (total 189.444s)
+picvec stage exact-paint-merge: 0.253s (total 189.696s)
+picvec stage layered-paint-simplification: 2.143s (total 191.840s)
+picvec stage residual-shape-refinement: 0.638s (total 192.478s)
+picvec stage interior-shading: 1.714s (total 194.192s)
+picvec stage face-alpha: 0.031s (total 194.223s)
+picvec stage hierarchical-topology: 0.016s (total 194.238s)
+picvec stage shared-geometry: 42.182s (total 236.421s)
+picvec stage paint-preview: 0.439s (total 236.860s)

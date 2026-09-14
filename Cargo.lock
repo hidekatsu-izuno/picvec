@@ -394,6 +394,7 @@ dependencies = [
  "image",
  "rayon",
  "resvg",
+ "roxmltree",
  "serde",
  "serde_json",
  "tempfile",

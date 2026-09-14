@@ -3426,6 +3426,28 @@ fn fit_residual_paint(
     maximum_layers: usize,
     preserve_shape: bool,
 ) -> (Paint, ErrorStats) {
+    fit_residual_paint_impl(
+        source,
+        samples,
+        validation_samples,
+        region_bounds,
+        base,
+        maximum_layers,
+        preserve_shape,
+        true,
+    )
+}
+
+fn fit_residual_paint_impl(
+    source: &Raster,
+    samples: &[usize],
+    validation_samples: &[usize],
+    region_bounds: Bounds,
+    base: Paint,
+    maximum_layers: usize,
+    preserve_shape: bool,
+    skip_zero_support: bool,
+) -> (Paint, ErrorStats) {
     if samples.len() < 48 || maximum_layers == 0 {
         let stats = paint_stats(source, samples, &base);
         return (base, stats);
@@ -3624,6 +3646,7 @@ fn fit_residual_paint(
                     }
                 }
                 for geometry in geometries {
+                    let active_validation = std::cell::OnceCell::<Vec<usize>>::new();
                     // All opacity profiles fit the same spatial basis. Keep
                     // sample order and f64 normal-equation accumulation exact.
                     let parameters: Vec<_> = samples
@@ -3736,11 +3759,29 @@ fn fit_residual_paint(
                             paint_rgb_mse_with(source, samples, &mut candidate_at)
                         };
                         if best.as_ref().is_none_or(|(best_mse, _)| mse < *best_mse)
-                            && validation_samples
+                            && active_validation
+                                .get_or_init(|| {
+                                    // Current is the original base, or an already
+                                    // fully validated overlay chain. A zero-alpha
+                                    // addition leaves its colour error unchanged.
+                                    // All three profiles are exactly zero at t>=1.
+                                    validation_samples
+                                        .iter()
+                                        .enumerate()
+                                        .skip(8)
+                                        .filter(|&(_, &i)| {
+                                            !skip_zero_support
+                                                || coupled_parameter(&geometry, i, source.width)
+                                                    < 1.0
+                                        })
+                                        .map(|(position, _)| position)
+                                        .collect()
+                                })
                                 .iter()
-                                .zip(&supported)
-                                .skip(8)
-                                .all(|(&i, cell)| supports(i, cell, candidate_at(i)))
+                                .all(|&position| {
+                                    let i = validation_samples[position];
+                                    supports(i, &supported[position], candidate_at(i))
+                                })
                             && slopes.iter().all(|&(i, j, target, original)| {
                                 let predicted = difference(
                                     rgb_to_oklab(candidate_at(i)),
@@ -8134,6 +8175,57 @@ pub(crate) fn fit_outline_field(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn zero_opacity_residual_validation_matches_full_sample_checks() {
+        let width = 80;
+        let height = 64;
+        let source = Raster::new(
+            width,
+            height,
+            (0..width * height)
+                .map(|i| {
+                    let x = (i % width) as f32;
+                    let y = (i / width) as f32;
+                    let field = 0.4
+                        + x / 400.0
+                        + 0.12 * (-((x - 30.0).powi(2) + (y - 29.0).powi(2)) / 180.0).exp();
+                    [field, field * 0.97, field * 0.92]
+                })
+                .collect(),
+        );
+        let validation: Vec<_> = (0..width * height).collect();
+        let samples = sampled_indices(&validation, 256);
+        for preserve_shape in [false, true] {
+            for layers in [1, 3] {
+                let base = Paint::Solid {
+                    color: [0.5, 0.48, 0.46],
+                };
+                let reference = fit_residual_paint_impl(
+                    &source,
+                    &samples,
+                    &validation,
+                    bounds(&validation, width),
+                    base.clone(),
+                    layers,
+                    preserve_shape,
+                    false,
+                );
+                let candidate = fit_residual_paint_impl(
+                    &source,
+                    &samples,
+                    &validation,
+                    bounds(&validation, width),
+                    base,
+                    layers,
+                    preserve_shape,
+                    true,
+                );
+                assert_eq!(candidate.0, reference.0);
+                assert_eq!(format!("{:?}", candidate.1), format!("{:?}", reference.1));
+            }
+        }
+    }
+
     #[test]
     fn orthogonal_colour_and_opacity_are_not_forced_onto_one_axis() {
         let (w, h) = (32, 32);

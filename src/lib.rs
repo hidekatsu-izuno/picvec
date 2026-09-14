@@ -13,6 +13,7 @@ pub mod color;
 mod colour_fields;
 pub mod config;
 pub mod edge;
+mod extrema;
 mod elementary;
 mod face_alpha;
 pub mod geometry;
@@ -33,6 +34,7 @@ mod separators;
 mod soft_edges;
 pub mod structural;
 pub mod svg;
+mod svg_fragments;
 mod union_find;
 mod visibility;
 

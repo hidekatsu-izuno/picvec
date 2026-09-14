@@ -1,0 +1,76 @@
+{
+  "threads": 4,
+  "timeout_seconds": 300,
+  "build_seconds": 69,
+  "conversion_seconds": 262.825774,
+  "attempt_seconds_excluding_booster": 1162.911514,
+  "wall_seconds_excluding_booster": 1163.020549361,
+  "log_directory": "/tmp/picvec-sample-final-20260914-110645",
+  "results": [
+    {
+      "input": "booster-layout.jpg",
+      "output": "booster-layout.svg",
+      "seconds": 892.444687,
+      "status": "cancelled_by_user",
+      "note": "Stopped before clean rebuild; existing SVG retained."
+    },
+    {
+      "input": "boy_and_turtle.png",
+      "output": "boy_and_turtle.svg",
+      "seconds": 8.798716,
+      "status": "success",
+      "mask_count": 0,
+      "bytes": 98003
+    },
+    {
+      "input": "car.png",
+      "output": "car.svg",
+      "seconds": 81.749257,
+      "status": "success",
+      "mask_count": 0,
+      "bytes": 804985
+    },
+    {
+      "input": "cliparts-6x6.png",
+      "output": "cliparts-6x6.svg",
+      "seconds": 300.034453,
+      "status": "timeout"
+    },
+    {
+      "input": "cliparts.png",
+      "output": "cliparts.svg",
+      "seconds": 79.897699,
+      "status": "success",
+      "mask_count": 0,
+      "bytes": 4001531
+    },
+    {
+      "input": "vectorization-stress-still-life.png",
+      "output": "vectorization-stress-still-life.svg",
+      "seconds": 300.014526,
+      "status": "timeout"
+    },
+    {
+      "input": "viewport1.jpg",
+      "output": "viewport1.svg",
+      "seconds": 36.105499,
+      "status": "success",
+      "mask_count": 0,
+      "bytes": 3088435
+    },
+    {
+      "input": "viewport2.jpg",
+      "output": "viewport2.svg",
+      "seconds": 300.036761,
+      "status": "timeout"
+    },
+    {
+      "input": "wikipedia_logo_1_0.png",
+      "output": "wikipedia_logo_1_0.svg",
+      "seconds": 56.274603,
+      "status": "success",
+      "mask_count": 0,
+      "bytes": 1250198
+    }
+  ]
+}

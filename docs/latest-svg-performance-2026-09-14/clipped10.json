@@ -1,0 +1,53 @@
+[
+  {
+    "input": "wikipedia_logo_1_0.png",
+    "binary_sha256": "11f12564311f065d21471ff55b374bc9acafc546f7f3b66fd516570f4f8fc432",
+    "seconds": 23.072245277002366,
+    "status": "ok",
+    "command": [
+      "/home/hidek/git/picvec/target/release/picvec",
+      "/home/hidek/git/picvec/sample/input/wikipedia_logo_1_0.png",
+      "/tmp/picvec-head-exact/clipped10/wikipedia_logo_1_0.svg",
+      "--threads",
+      "10",
+      "--verbose"
+    ],
+    "bytes": 1250198,
+    "sha256": "4e884605e43109022623ac7156a7d1300d8feb9f65390730691eea347d96701d",
+    "exact": true,
+    "mask_free": true
+  },
+  {
+    "input": "viewport2.jpg",
+    "binary_sha256": "11f12564311f065d21471ff55b374bc9acafc546f7f3b66fd516570f4f8fc432",
+    "seconds": 159.4301713030036,
+    "status": "ok",
+    "command": [
+      "/home/hidek/git/picvec/target/release/picvec",
+      "/home/hidek/git/picvec/sample/input/viewport2.jpg",
+      "/tmp/picvec-head-exact/clipped10/viewport2.svg",
+      "--threads",
+      "10",
+      "--verbose"
+    ],
+    "bytes": 22661527,
+    "sha256": "e014a5b19ddeebc9bb0eb17603121263d3f75705c11ea9391467de52c512bb13",
+    "exact": true,
+    "mask_free": true
+  },
+  {
+    "input": "cliparts-6x6.png",
+    "binary_sha256": "11f12564311f065d21471ff55b374bc9acafc546f7f3b66fd516570f4f8fc432",
+    "seconds": 300.04324657899997,
+    "status": "timeout",
+    "command": [
+      "/home/hidek/git/picvec/target/release/picvec",
+      "/home/hidek/git/picvec/sample/input/cliparts-6x6.png",
+      "/tmp/picvec-head-exact/clipped10/cliparts-6x6.svg",
+      "--threads",
+      "10",
+      "--verbose",
+      "--remove-chroma-key-background"
+    ]
+  }
+]

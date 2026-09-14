@@ -1,0 +1,35 @@
+picvec stage load-resize: 0.002s (total 0.002s)
+picvec stage edge-roles: 2.760s (total 2.762s)
+picvec stage structural-analysis: 0.165s (total 2.928s)
+picvec stage perceptual-smoothing: 0.357s (total 3.284s)
+picvec segmentation substage setup: 0.016s
+picvec segmentation substage palette: 0.037s (201 histogram cells, 43 colours)
+picvec segmentation substage initial-components: 0.014s
+picvec segmentation substage small-components: 0.102s
+picvec segmentation substage compact: 0.008s
+picvec segmentation substage antialias: 0.115s
+picvec segmentation substage finalize: 0.034s (total 0.326s)
+picvec stage segmentation: 2.271s (total 5.556s)
+picvec stage boundary-regularization: 0.127s (total 5.683s)
+picvec stage paint-aware-merge: 3.998s (total 9.681s)
+picvec stage thin-paint-ownership: 1.386s (total 11.068s)
+picvec stage paint-topology-preservation: 1.469s (total 12.537s)
+picvec paint substage setup: 0.013s
+picvec paint substage initial: 0.416s (primary solid 0, gain-bound solid 2534, low-range solid 1, model search 409)
+picvec paint substage harmonize: 0.001s
+picvec paint substage couple: 0.000s
+picvec stage paint-fitting: 0.460s (total 12.997s)
+picvec layered merge candidates: considered 3502, evidence 3490, seam 12, layered 0, nonfinite 0, face 0, combined 0, accepted 0
+picvec stage source-supported-paint-merge: 0.006s (total 13.003s)
+picvec stage exact-paint-merge: 0.014s (total 13.017s)
+picvec stage layered-paint-simplification: 0.049s (total 13.065s)
+picvec stage residual-shape-refinement: 0.024s (total 13.090s)
+picvec stage interior-shading: 0.116s (total 13.206s)
+picvec stage face-alpha: 0.000s (total 13.206s)
+picvec stage hierarchical-topology: 0.001s (total 13.208s)
+picvec stage shared-geometry: 3.092s (total 16.300s)
+picvec stage paint-preview: 0.058s (total 16.358s)
+picvec stage structural-selection: 2.170s (total 18.528s)
+picvec stage covered-hole-simplification: 3.104s (total 21.632s)
+picvec stage final-svg: 1.530s (total 23.162s)
+picvec adaptive candidate 0 0 5770 2058: error=7.8028 model_cost=1.7365 priority=5.9213

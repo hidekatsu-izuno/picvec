@@ -1,0 +1,147 @@
+{
+  "start_revision": "725a082da21d067b0d10bcc7f722f7930ac0cd03",
+  "last_revision": "3fa41d2726efb77974a990666f5cd1ab28b85c5f",
+  "patches": [
+    {
+      "file": "patches/01-initial-and-visibility.patch",
+      "base": "725a082da21d067b0d10bcc7f722f7930ac0cd03",
+      "target": "9e67747cb933e088997722d64358558423972b8e",
+      "sha256": "982c3a7614f252bf9122c2ef096308dddf961df99d8020c972db4c1f441b301d"
+    },
+    {
+      "file": "patches/02-paint.patch",
+      "base": "9e67747cb933e088997722d64358558423972b8e",
+      "target": "b83a8cde52b6178cd6d73a51b77f5bcce7276ccf",
+      "sha256": "1466aac9a3c6916d636387d5a3e4dc9cbf19a005620b710b5fbbfb1ec4b77fd9"
+    },
+    {
+      "file": "patches/03-hole-verification.patch",
+      "base": "b83a8cde52b6178cd6d73a51b77f5bcce7276ccf",
+      "target": "49167ba114db3100f369547e5b0c361644b1627f",
+      "sha256": "7d9d0ea0ea71fe3661b2e3dbbd9664a57939e761b5689fddad55f27ccbb2ea7c"
+    },
+    {
+      "file": "patches/04-parallel-regions.patch",
+      "base": "49167ba114db3100f369547e5b0c361644b1627f",
+      "target": "494bef1deebf00edb98993569180d70f90ea6de7",
+      "sha256": "e5559bc97920f877fd5e96e381a1498239e5f371bd092ba364eb885de2240893"
+    },
+    {
+      "file": "patches/05-algorithmic-search.patch",
+      "base": "494bef1deebf00edb98993569180d70f90ea6de7",
+      "target": "3fa41d2726efb77974a990666f5cd1ab28b85c5f",
+      "sha256": "de773fa156c837326fe798e5eb5c41d1cfbffadf91cb3b5a5d75638479a42837"
+    }
+  ],
+  "status": "documentation_only; regression investigation interrupted at user request; no last-good stage established",
+  "evidence": [
+    {
+      "file": "investigation/415d64f-booster.log",
+      "sha256": "916dd881346a15bb8cbb926abc84b9dc1b341e0a383066114875209a0f3bb554"
+    },
+    {
+      "file": "investigation/725a082-booster.json",
+      "sha256": "d57d56eac79ce912fbdc5175c749d32c5e9659ad4b4fe3e575bce574f0d515df"
+    },
+    {
+      "file": "investigation/725a082-booster.log",
+      "sha256": "8396c2d8392b464b1d9285a982782f355748cc0d77baea658d0ad2f5580c0ea4"
+    },
+    {
+      "file": "investigation/clean-latest-booster.log",
+      "sha256": "a526754a11c2a61bc9d2719cead0396062d28a79b5ac81c2435628cffd9db963"
+    },
+    {
+      "file": "investigation/clean-start-booster.json",
+      "sha256": "e335df0bc1eef5a03b7283db84ee27b651fd8cb930a28215af80cf1e99f6c4d3"
+    },
+    {
+      "file": "investigation/clean-start-booster.log",
+      "sha256": "f7e55da7530a9fdbec06a21635dac38bbb2deadab8112a6f8268a8af23c4e149"
+    },
+    {
+      "file": "investigation/concurrent-cliparts-6x6.log",
+      "sha256": "aa001cfdc984783cf6c50aa6681cda27a601045674881a26ac4485deee631cbb"
+    },
+    {
+      "file": "investigation/concurrent-conversion-timings.csv",
+      "sha256": "35fb704f56ea6e19696d7971059b5d9767eb5389201e83684efcdb627f5992c3"
+    },
+    {
+      "file": "investigation/run.py",
+      "sha256": "f234979ae30f4c5fcd73a70476ff861379981abb76bcbdf0334ab9ea8a06ad7c"
+    },
+    {
+      "file": "investigation/versions.json",
+      "sha256": "a0c7b17ecf1072b88b13ef58e94ad8c02cfe8812641e5538d190deb28a254c70"
+    },
+    {
+      "file": "patches/01-initial-and-visibility.patch",
+      "sha256": "982c3a7614f252bf9122c2ef096308dddf961df99d8020c972db4c1f441b301d"
+    },
+    {
+      "file": "patches/02-paint.patch",
+      "sha256": "1466aac9a3c6916d636387d5a3e4dc9cbf19a005620b710b5fbbfb1ec4b77fd9"
+    },
+    {
+      "file": "patches/03-hole-verification.patch",
+      "sha256": "7d9d0ea0ea71fe3661b2e3dbbd9664a57939e761b5689fddad55f27ccbb2ea7c"
+    },
+    {
+      "file": "patches/04-parallel-regions.patch",
+      "sha256": "e5559bc97920f877fd5e96e381a1498239e5f371bd092ba364eb885de2240893"
+    },
+    {
+      "file": "patches/05-algorithmic-search.patch",
+      "sha256": "de773fa156c837326fe798e5eb5c41d1cfbffadf91cb3b5a5d75638479a42837"
+    },
+    {
+      "file": "reports/algorithmic-search-reuse.json",
+      "sha256": "fba4708bf55a74057d08446e3b94d1ef4b58331cc3d2f778c1447a4dc1253fc3"
+    },
+    {
+      "file": "reports/algorithmic-search-reuse.md",
+      "sha256": "f2f7d6d7a39183928d1224d992106f525feb86d529cd66c7562797955e47993c"
+    },
+    {
+      "file": "reports/hole-performance-2026-09-13.json",
+      "sha256": "e12f6a255b0819cc29c345975ef6985ef235149c820065bb84712a91d6173794"
+    },
+    {
+      "file": "reports/hole-performance-2026-09-13.md",
+      "sha256": "9327ed83767feae59b9fc9305419daa39c2b14adecfac03fe80cc0e8148bec35"
+    },
+    {
+      "file": "reports/paint-performance-2026-09-13.json",
+      "sha256": "f42bd81bf273b0f64e0860083e6f6a16aefa7e46eff72156f0331a0c7c86b882"
+    },
+    {
+      "file": "reports/paint-performance-2026-09-13.md",
+      "sha256": "4b3b13a429d8cb1beecbb65d1b0f5cf37559333e4e482f0536e34726417f4fe2"
+    },
+    {
+      "file": "reports/parallel-region-evaluation.json",
+      "sha256": "0c299e961d6e2a37f7fb542dced10463dda8216eb20880620976c595917d9e71"
+    },
+    {
+      "file": "reports/parallel-region-evaluation.md",
+      "sha256": "f90aad11d1422b40b6f51d1bf6935c6ef8ab73b15d3f918f01f937dadb0818bb"
+    },
+    {
+      "file": "reports/performance-2026-09-13.json",
+      "sha256": "124eb06aca925fe2049ae858cb68981c01b2eb5d14cd66c44e78ebf72e13294d"
+    },
+    {
+      "file": "reports/performance-2026-09-13.md",
+      "sha256": "7678875ce6952ef0adb23178765768665360bf9d0009685fc48ae8c1342fd932"
+    },
+    {
+      "file": "reports/visibility-performance-2026-09-13.json",
+      "sha256": "7b1e84374d2fbb2cf9af477e6305383d1da34394ed1974d10c38f23d331080bc"
+    },
+    {
+      "file": "reports/visibility-performance-2026-09-13.md",
+      "sha256": "6ba358df2f14736f8aed1e76d2889dfd32c1778717380ebccf3438735b952fb4"
+    }
+  ]
+}

@@ -33,7 +33,7 @@ from the initial raster segmentation.
 | `--remove-chroma-key-background` | Detect and remove a saturated red, green, blue, cyan, magenta or yellow backing. |
 | `--paint-merge-passes <N>` | Paint merge passes, 1–8 (1). |
 | `--oklab-palette-threshold-scale <FACTOR>` | Palette tolerance multiplier in 100-scaled OKLab units (1.0). |
-| `--threads <N>` | Worker count (0: half the detected CPUs, at least 1 and capped at 4). |
+| `--threads <N>` | Worker count (0: half the detected CPUs, at least 1 and capped at 10). |
 | `--max-input-dimension <PX>` | Maximum source width or height (32768). |
 | `--max-input-megapixels <MP>` | Maximum source area (32). |
 | `--max-decode-mib <MIB>` | Best-effort decoder allocation limit (512 MiB). |
@@ -76,9 +76,10 @@ There is no separate sparse-drawing SVG generator for `booster-layout`.
    canvas is replaced, count the final drawing elements and write the SVG.
 
 Connected drawings are not split arbitrarily across a rectangular grid. When no
-safe local refinement core exists, the complete source can be evaluated as a
-candidate. This preserves one model for connected strokes and gradients, but can
-be much slower than the base conversion. A configured SVG budget limits accepted
+safe local refinement core exists but background/foreground separation is supported
+by the source, the complete source can be evaluated as a candidate. Images with
+no such separation evidence retain the selected global model. This preserves one
+model for connected strokes and gradients, but can be much slower than the base conversion. A configured SVG budget limits accepted
 additional output bytes, **not** evaluation time or peak memory.
 
 ### Transparency and visible geometry
@@ -106,8 +107,8 @@ mise exec -- bash scripts/generate_sample_svgs.sh
 bash scripts/generate_sample_comparisons.sh
 ```
 
-The SVG script builds with diagnostics enabled and uses four workers. It also
-accepts input file names to regenerate a subset, for example:
+The SVG script builds with diagnostics enabled and selects the worker count
+automatically (`PICVEC_THREADS` overrides it). It also accepts input file names to regenerate a subset, for example:
 
 ```sh
 mise exec -- bash scripts/generate_sample_svgs.sh car.png cliparts.png
@@ -131,6 +132,17 @@ on the left and SVG rendering on the right, both on white.
 | [Viewport 2](sample/input/viewport2.jpg) | [SVG](sample/output/viewport2.svg) | [PNG](sample/comparison/viewport2.png) | 30,500 | 35,501 |
 | [Wikipedia logo](sample/input/wikipedia_logo_1_0.png) | [SVG](sample/output/wikipedia_logo_1_0.svg) | [PNG](sample/comparison/wikipedia_logo_1_0.png) | 1,917 | 2,623 |
 
+To time regeneration against the committed SVG bytes (with a 300-second limit
+per image), run after building:
+
+```sh
+python3 scripts/benchmark_committed_svgs.py --output-dir /tmp/picvec-sample-check
+```
+
+Use `--update-output` to replace only outputs that match the reference exactly.
+See [the SVG compatibility and timing report](docs/latest-svg-performance-2026-09-14.md)
+for the reference revision, measurements, and validation conditions.
+
 ## Validation and current limitations
 
 ```sh
@@ -146,9 +158,9 @@ editable contour.
 
 The common source-resolution model improves `booster-layout` over the earlier
 coarse normal conversion, but **does not yet match the removed dedicated
-coverage generator in quality, output size or speed**. The measured native-core
-experiment took about 14 minutes; the complete base-plus-refinement evaluation
-took about 16 minutes. Display-scale grayscale MAE was 4.36, versus 6.06 for the
+coverage generator in quality, output size or speed**. The original native-core
+experiment took about 14 minutes; the original base-plus-refinement evaluation
+took about 16 minutes. Current timings are recorded in the report above. Display-scale grayscale MAE was 4.36, versus 6.06 for the
 old coarse result and 2.85 for the removed shortcut. These figures describe this
 sample and test environment, not general performance guarantees.
 

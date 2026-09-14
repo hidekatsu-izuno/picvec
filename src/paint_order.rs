@@ -370,75 +370,92 @@ pub(crate) fn validate(
         .any(|j| labels[i] != labels[j]);
     }
     let boundary = crate::edge::dilate_square(&boundary, w, h, 2);
+    use rayon::prelude::*;
+    let rows: Vec<_> = (0..h).step_by(64).collect();
+    let batch_size = rayon::current_num_threads().clamp(1, 4);
     let mut increase = 0.0f64;
     for scale in [1usize, 4] {
-        for y in (0..h).step_by(64) {
-            // Render horizontal bands: traversing the complete SVG once
-            // per 64-pixel column repeats expensive clip/gradient setup.
-            // The same native and 4x pixels are still checked below.
-            let x = 0;
-            let tw = w - x;
-            let th = (h - y).min(64);
-            let mut pa = Pixmap::new((tw * scale) as u32, (th * scale) as u32).unwrap();
-            let mut pb = pa.clone();
-            let transform = Transform::from_row(
-                scale as f32,
-                0.0,
-                0.0,
-                scale as f32,
-                -((x * scale) as f32),
-                -((y * scale) as f32),
-            );
-            resvg::render(&a, transform, &mut pa.as_mut());
-            resvg::render(&b, transform, &mut pb.as_mut());
-            let mut tile_increase = vec![0.0_f64; w.div_ceil(64)];
-            for (k, (p, q)) in pa.pixels().iter().zip(pb.pixels()).enumerate() {
-                if p == q {
-                    continue;
-                }
-                let i = (y + k / (tw * scale) / scale) * w + x + k % (tw * scale) / scale;
-                let pv = [p.red(), p.green(), p.blue(), p.alpha()];
-                let qv = [q.red(), q.green(), q.blue(), q.alpha()];
-                if scale == 4 {
-                    if !boundary[i] && pv.iter().zip(qv).any(|(&p, q)| p.abs_diff(q) > 2) {
-                        summary.rejection = Some("interior changed at 4x".into());
+        for batch in rows.chunks(batch_size) {
+            // Bands are independent. Preserve the old row/column reduction
+            // and first rejection, with at most four pairs of live pixmaps.
+            let evaluated: Vec<Result<Vec<f64>, String>> = batch
+                .par_iter()
+                .map(|&y| {
+                    // Render horizontal bands: traversing the complete SVG once
+                    // per 64-pixel column repeats expensive clip/gradient setup.
+                    // The same native and 4x pixels are still checked below.
+                    let x = 0;
+                    let tw = w - x;
+                    let th = (h - y).min(64);
+                    let mut pa = Pixmap::new((tw * scale) as u32, (th * scale) as u32).unwrap();
+                    let mut pb = pa.clone();
+                    let transform = Transform::from_row(
+                        scale as f32,
+                        0.0,
+                        0.0,
+                        scale as f32,
+                        0.0,
+                        -((y * scale) as f32),
+                    );
+                    resvg::render(&a, transform, &mut pa.as_mut());
+                    resvg::render(&b, transform, &mut pb.as_mut());
+                    let mut tile_increase = vec![0.0_f64; w.div_ceil(64)];
+                    for (k, (p, q)) in pa.pixels().iter().zip(pb.pixels()).enumerate() {
+                        if p == q {
+                            continue;
+                        }
+                        let i = (y + k / (tw * scale) / scale) * w + x + k % (tw * scale) / scale;
+                        let pv = [p.red(), p.green(), p.blue(), p.alpha()];
+                        let qv = [q.red(), q.green(), q.blue(), q.alpha()];
+                        if scale == 4 {
+                            if !boundary[i] && pv.iter().zip(qv).any(|(&p, q)| p.abs_diff(q) > 2) {
+                                return Err("interior changed at 4x".to_owned());
+                            }
+                            continue;
+                        }
+                        let alpha = matte.map_or(1.0, |m| m.get(i)) as f64;
+                        let error = |v: [u8; 4]| {
+                            let av = v[3] as f64 / 255.0;
+                            let mut e = (av - alpha).abs();
+                            for c in 0..3 {
+                                let target = source.pixels[i][c] as f64 * alpha;
+                                let actual = v[c] as f64 / 255.0;
+                                e += (actual - target).abs()
+                                    + (actual + 1.0 - av - target - 1.0 + alpha).abs();
+                            }
+                            e / 7.0
+                        };
+                        let loss = error(qv) - error(pv);
+                        if !boundary[i] && loss > 32.0 / 255.0 {
+                            return Err(format!(
+                                "local source error at {},{}: {:.2} codes",
+                                i % w,
+                                i / w,
+                                loss * 255.0
+                            ));
+                        }
+                        tile_increase[(i % w) / 64] += loss;
+                    }
+                    Ok(tile_increase)
+                })
+                .collect();
+            for (&y, result) in batch.iter().zip(evaluated) {
+                let losses = match result {
+                    Ok(losses) => losses,
+                    Err(reason) => {
+                        summary.rejection = Some(reason);
                         return false;
                     }
-                    continue;
-                }
-                let alpha = matte.map_or(1.0, |m| m.get(i)) as f64;
-                let error = |v: [u8; 4]| {
-                    let av = v[3] as f64 / 255.0;
-                    let mut e = (av - alpha).abs();
-                    for c in 0..3 {
-                        let target = source.pixels[i][c] as f64 * alpha;
-                        let actual = v[c] as f64 / 255.0;
-                        e += (actual - target).abs()
-                            + (actual + 1.0 - av - target - 1.0 + alpha).abs();
-                    }
-                    e / 7.0
                 };
-                let loss = error(qv) - error(pv);
-                if !boundary[i] && loss > 32.0 / 255.0 {
-                    summary.rejection = Some(format!(
-                        "local source error at {},{}: {:.2} codes",
-                        i % w,
-                        i / w,
-                        loss * 255.0
-                    ));
-                    return false;
-                }
-                tile_increase[(i % w) / 64] += loss;
-            }
-            if scale == 1 {
-                for (column, loss) in tile_increase.into_iter().enumerate() {
-                    increase += loss;
-                    // Rendering uses a wide band, but the original 64x64
-                    // local error budgets must not be diluted across it.
-                    let area = (w - column * 64).min(64) * th;
-                    if loss / area as f64 > 2.0 / 255.0 {
-                        summary.rejection = Some("tile source error increased".into());
-                        return false;
+                if scale == 1 {
+                    let th = (h - y).min(64);
+                    for (column, loss) in losses.into_iter().enumerate() {
+                        increase += loss;
+                        let area = (w - column * 64).min(64) * th;
+                        if loss / area as f64 > 2.0 / 255.0 {
+                            summary.rejection = Some("tile source error increased".into());
+                            return false;
+                        }
                     }
                 }
             }
@@ -455,6 +472,36 @@ pub(crate) fn validate(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn parallel_bands_match_original_validation_and_rejection_order() {
+        let source = Raster::blank(137, 151, [0.5; 3]);
+        let labels: Vec<u32> = (0..137 * 151).map(|i| (i % 137 >= 65) as u32).collect();
+        let before = r##"<svg xmlns="http://www.w3.org/2000/svg" width="137" height="151"><rect width="137" height="151" fill="#808080"/><path d="M64.8 0L65.2 0L65.2 151L64.8 151Z" fill="#111" fill-opacity=".4"/></svg>"##;
+        let changed = [
+            before.to_owned(),
+            before.replace("#808080", "#818181"),
+            before.replace("#808080", "#eeeeee"),
+            before.replace("65.2", "68.2"),
+            before.replace(".4", ".2"),
+        ];
+        for after in changed {
+            let mut expected = Summary::default();
+            let result = validate_reference(before, &after, &source, None, &labels, &mut expected);
+            for threads in [1, 4] {
+                let pool = rayon::ThreadPoolBuilder::new()
+                    .num_threads(threads)
+                    .build()
+                    .unwrap();
+                let mut actual = Summary::default();
+                let accepted =
+                    pool.install(|| validate(before, &after, &source, None, &labels, &mut actual));
+                assert_eq!(accepted, result);
+                assert_eq!(format!("{actual:?}"), format!("{expected:?}"));
+            }
+        }
+    }
+
     use super::*;
     #[test]
     fn graph_removes_weak_cycle_and_preserves_alpha_barrier() {
@@ -597,4 +644,122 @@ mod tests {
             &mut Summary::default()
         ));
     }
+}
+
+#[cfg(test)]
+fn validate_reference(
+    before: &str,
+    after: &str,
+    source: &Raster,
+    matte: Option<&crate::chroma::AlphaMatte>,
+    labels: &[u32],
+    summary: &mut Summary,
+) -> bool {
+    use resvg::{
+        tiny_skia::{Pixmap, Transform},
+        usvg::{Options, Tree},
+    };
+    let (Ok(a), Ok(b)) = (
+        Tree::from_str(before, &Options::default()),
+        Tree::from_str(after, &Options::default()),
+    ) else {
+        summary.rejection = Some("SVG parse failed".into());
+        return false;
+    };
+    let (w, h) = (source.width, source.height);
+    let mut boundary = vec![false; w * h];
+    for i in 0..w * h {
+        let (x, y) = (i % w, i / w);
+        boundary[i] = [
+            (x > 0).then(|| i - 1),
+            (x + 1 < w).then(|| i + 1),
+            (y > 0).then(|| i - w),
+            (y + 1 < h).then(|| i + w),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|j| labels[i] != labels[j]);
+    }
+    let boundary = crate::edge::dilate_square(&boundary, w, h, 2);
+    let mut increase = 0.0f64;
+    for scale in [1usize, 4] {
+        for y in (0..h).step_by(64) {
+            // Render horizontal bands: traversing the complete SVG once
+            // per 64-pixel column repeats expensive clip/gradient setup.
+            // The same native and 4x pixels are still checked below.
+            let x = 0;
+            let tw = w - x;
+            let th = (h - y).min(64);
+            let mut pa = Pixmap::new((tw * scale) as u32, (th * scale) as u32).unwrap();
+            let mut pb = pa.clone();
+            let transform = Transform::from_row(
+                scale as f32,
+                0.0,
+                0.0,
+                scale as f32,
+                -((x * scale) as f32),
+                -((y * scale) as f32),
+            );
+            resvg::render(&a, transform, &mut pa.as_mut());
+            resvg::render(&b, transform, &mut pb.as_mut());
+            let mut tile_increase = vec![0.0_f64; w.div_ceil(64)];
+            for (k, (p, q)) in pa.pixels().iter().zip(pb.pixels()).enumerate() {
+                if p == q {
+                    continue;
+                }
+                let i = (y + k / (tw * scale) / scale) * w + x + k % (tw * scale) / scale;
+                let pv = [p.red(), p.green(), p.blue(), p.alpha()];
+                let qv = [q.red(), q.green(), q.blue(), q.alpha()];
+                if scale == 4 {
+                    if !boundary[i] && pv.iter().zip(qv).any(|(&p, q)| p.abs_diff(q) > 2) {
+                        summary.rejection = Some("interior changed at 4x".into());
+                        return false;
+                    }
+                    continue;
+                }
+                let alpha = matte.map_or(1.0, |m| m.get(i)) as f64;
+                let error = |v: [u8; 4]| {
+                    let av = v[3] as f64 / 255.0;
+                    let mut e = (av - alpha).abs();
+                    for c in 0..3 {
+                        let target = source.pixels[i][c] as f64 * alpha;
+                        let actual = v[c] as f64 / 255.0;
+                        e += (actual - target).abs()
+                            + (actual + 1.0 - av - target - 1.0 + alpha).abs();
+                    }
+                    e / 7.0
+                };
+                let loss = error(qv) - error(pv);
+                if !boundary[i] && loss > 32.0 / 255.0 {
+                    summary.rejection = Some(format!(
+                        "local source error at {},{}: {:.2} codes",
+                        i % w,
+                        i / w,
+                        loss * 255.0
+                    ));
+                    return false;
+                }
+                tile_increase[(i % w) / 64] += loss;
+            }
+            if scale == 1 {
+                for (column, loss) in tile_increase.into_iter().enumerate() {
+                    increase += loss;
+                    // Rendering uses a wide band, but the original 64x64
+                    // local error budgets must not be diluted across it.
+                    let area = (w - column * 64).min(64) * th;
+                    if loss / area as f64 > 2.0 / 255.0 {
+                        summary.rejection = Some("tile source error increased".into());
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    summary.source_error_increase = (increase / (w * h).max(1) as f64) as f32;
+    if summary.source_error_increase > 0.25 / 255.0 {
+        summary.rejection = Some("source error increased".into());
+        return false;
+    }
+    summary.accepted = true;
+    true
 }

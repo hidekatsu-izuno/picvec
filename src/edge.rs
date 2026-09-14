@@ -79,7 +79,7 @@ pub fn oklab_values(pixels: &[[f32; 3]]) -> Vec<Oklab> {
     // Paint searches repeatedly convert small batches, often inside an
     // already parallel region fit. Scheduling these batches costs more than
     // the pixel transforms. Keep exactly the same transform and output order.
-    if pixels.len() <= 256 {
+    if pixels.len() <= 8192 {
         return pixels
             .iter()
             .copied()
@@ -1687,22 +1687,31 @@ fn medial_axis(mask: &[bool], width: usize, height: usize) -> (Vec<bool>, Vec<f3
 }
 
 fn local_maximum(values: &[f32], width: usize, height: usize, radius: usize) -> Vec<f32> {
-    (0..values.len())
-        .into_par_iter()
-        .map(|index| {
-            let x = index % width;
-            let y = index / width;
-            let mut maximum = f32::NEG_INFINITY;
-            for dy in -(radius as isize)..=radius as isize {
-                let py = (y as isize + dy).clamp(0, height.saturating_sub(1) as isize) as usize;
-                for dx in -(radius as isize)..=radius as isize {
-                    let px = (x as isize + dx).clamp(0, width.saturating_sub(1) as isize) as usize;
-                    maximum = maximum.max(values[py * width + px]);
-                }
+    let mut horizontal = vec![0.0; values.len()];
+    horizontal
+        .par_chunks_mut(width)
+        .zip(values.par_chunks(width))
+        .for_each(|(out, row)| {
+            out.copy_from_slice(&crate::extrema::sliding(row, radius, true, false));
+        });
+    // Store columns contiguously so each worker owns its output buffer.
+    let mut columns = vec![0.0; values.len()];
+    columns
+        .par_chunks_mut(height)
+        .enumerate()
+        .for_each(|(x, out)| {
+            let column: Vec<f32> = (0..height).map(|y| horizontal[y * width + x]).collect();
+            out.copy_from_slice(&crate::extrema::sliding(&column, radius, true, false));
+        });
+    horizontal
+        .par_chunks_mut(width)
+        .enumerate()
+        .for_each(|(y, out)| {
+            for (x, value) in out.iter_mut().enumerate() {
+                *value = columns[x * height + y];
             }
-            maximum
-        })
-        .collect()
+        });
+    horizontal
 }
 
 fn dark_ridge_support(
@@ -3261,7 +3270,9 @@ mod tests {
             .unwrap();
         pool.install(|| {
             let values = [-0.1, -0.0, 0.0, 0.001, 0.04045, 0.04046, 0.5, 1.0, 1.1];
-            for length in [0, 1, 31, 128, 255, 256, 257, 1024] {
+            for length in [
+                0, 1, 31, 128, 255, 256, 257, 1023, 1024, 1025, 8191, 8192, 8193,
+            ] {
                 let pixels: Vec<_> = (0..length)
                     .map(|i| [values[i % 9], values[(i / 9) % 9], values[(i / 81) % 9]])
                     .collect();

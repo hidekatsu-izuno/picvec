@@ -1,0 +1,16 @@
+{
+  "version": "clean-start",
+  "case": "booster",
+  "command": [
+    "/tmp/picvec-perf/baseline",
+    "/home/hidek/git/picvec/sample/input/booster-layout.jpg",
+    "/tmp/picvec-regression-20260914/clean-start-booster.svg",
+    "--threads",
+    "4",
+    "--verbose"
+  ],
+  "status": "timeout",
+  "exit_code": null,
+  "seconds": 300.06467143900227,
+  "binary_sha256": "e7cab41ea5becbfbdca2bb2a880f9f386a04166c150828b52f81e78e079d568d"
+}

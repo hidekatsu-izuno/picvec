@@ -1,0 +1,35 @@
+picvec stage load-resize: 0.003s (total 0.003s)
+picvec stage edge-roles: 3.005s (total 3.008s)
+picvec stage structural-analysis: 0.172s (total 3.180s)
+picvec stage perceptual-smoothing: 0.384s (total 3.565s)
+picvec segmentation substage setup: 0.017s
+picvec segmentation substage palette: 0.041s (201 histogram cells, 43 colours)
+picvec segmentation substage initial-components: 0.015s
+picvec segmentation substage small-components: 0.109s
+picvec segmentation substage compact: 0.009s
+picvec segmentation substage antialias: 0.135s
+picvec segmentation substage finalize: 0.046s (total 0.370s)
+picvec stage segmentation: 2.569s (total 6.134s)
+picvec stage boundary-regularization: 0.140s (total 6.274s)
+picvec stage paint-aware-merge: 7.257s (total 13.532s)
+picvec stage thin-paint-ownership: 1.547s (total 15.079s)
+picvec stage paint-topology-preservation: 1.534s (total 16.612s)
+picvec paint substage setup: 0.015s
+picvec paint substage initial: 0.568s (primary solid 0, gain-bound solid 2534, low-range solid 1, model search 409)
+picvec paint substage harmonize: 0.001s
+picvec paint substage couple: 0.000s
+picvec stage paint-fitting: 0.613s (total 17.225s)
+picvec layered merge candidates: considered 3502, evidence 3490, seam 12, layered 0, nonfinite 0, face 0, combined 0, accepted 0
+picvec stage source-supported-paint-merge: 0.005s (total 17.231s)
+picvec stage exact-paint-merge: 0.016s (total 17.247s)
+picvec stage layered-paint-simplification: 0.091s (total 17.337s)
+picvec stage residual-shape-refinement: 0.031s (total 17.368s)
+picvec stage interior-shading: 0.179s (total 17.547s)
+picvec stage face-alpha: 0.003s (total 17.551s)
+picvec stage hierarchical-topology: 0.002s (total 17.553s)
+picvec stage shared-geometry: 3.466s (total 21.019s)
+picvec stage paint-preview: 0.072s (total 21.091s)
+picvec stage structural-selection: 2.459s (total 23.550s)
+picvec stage covered-hole-simplification: 3.341s (total 26.892s)
+picvec stage final-svg: 1.658s (total 28.550s)
+picvec adaptive candidate 0 0 5770 2058: error=7.8028 model_cost=1.7365 priority=5.9213

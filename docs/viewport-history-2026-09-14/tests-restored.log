@@ -1,0 +1,177 @@
+COMMAND ['cargo', 'test', '--offline', '--release', '--features', 'diagnostics', '--lib', 'geometry::', '--', '--test-threads=4']
+   Compiling picvec v0.2.0 (/home/hidek/git/picvec)
+    Finished `release` profile [optimized] target(s) in 1m 20s
+     Running unittests src/lib.rs (target/release/deps/picvec-010f366aeb97c8e0)
+
+running 73 tests
+test geometry::geometry_bezier::tests::closed_fit_preserves_corners_and_rejects_thin_bands_and_crossings ... ok
+test geometry::geometry_bezier::tests::corners_and_retraced_intervals_are_not_smoothed_away ... ok
+test geometry::geometry_bezier::tests::fixed_point_exit_matches_all_ten_iterations ... ok
+test geometry::geometry_bezier::tests::mixed_straight_pieces_compact_without_rounding_a_corner ... ok
+test geometry::geometry_bezier::tests::partial_analytic_run_merges_up_to_a_real_corner ... ok
+test geometry::geometry_bezier::tests::equal_adjacent_corner_turns_do_not_reject_the_window_loop ... ok
+test geometry::geometry_bezier::tests::short_pair_keeps_corners_and_rejects_unsupported_source ... ok
+test geometry::geometry_bezier::tests::short_s_curve_loses_a_node_without_losing_its_inflection_or_tangents ... ok
+test geometry::geometry_bezier::tests::remojii_spiral_arc_uses_one_cubic_with_shared_graph_mapping ... ok
+test geometry::geometry_bezier::tests::complete_bands_use_few_curves_and_map_every_shading_junction ... ok
+test geometry::geometry_bezier::tests::single_cubic_uses_geometric_distance_with_nonuniform_observations ... ok
+test geometry::geometry_bezier::tests::tiny_analytic_pieces_do_not_block_a_source_supported_cubic ... ok
+test geometry::geometry_bezier::tests::two_cubics_have_one_smooth_interior_knot ... ok
+test geometry::geometry_bezier::tests::three_cubics_merge_before_a_corner_without_a_new_endpoint_kink ... ok
+test geometry::geometry_ellipse::tests::closed_models_share_a_budget_independent_of_location_and_winding ... ok
+test geometry::geometry_ellipse::tests::corners_dents_open_and_retraced_contours_stay_freeform ... ok
+test geometry::geometry_ellipse::tests::large_ellipse_localization_budget_is_bounded_and_retains_dents ... ok
+test geometry::geometry_distance::tests::tree_matches_exhaustive_segments_bit_for_bit ... ok
+test geometry::geometry_ellipse::tests::open_rotated_ellipse_keeps_shared_endpoints_and_one_model ... ok
+test geometry::geometry_mapping::tests::graph_nodes_follow_position_not_uniform_bezier_parameter ... ok
+test geometry::geometry_mapping::tests::raster_backtracking_is_pooled_without_reversing_the_shared_master ... ok
+test geometry::geometry_ellipse::tests::noisy_rotated_ellipses_keep_one_smooth_closed_model ... ok
+test geometry::geometry_primitives::tests::graph_tangent_constraints_can_veto_a_geometric_fit ... ok
+test geometry::geometry_primitives::tests::noisy_minor_major_and_closed_arcs_have_one_radius_and_export_as_arcs ... ok
+test geometry::geometry_primitives::tests::noncircular_shapes_corners_and_retraced_paths_are_not_single_primitives ... ok
+test geometry::geometry_primitives::tests::raster_staircase_becomes_one_line_with_fixed_endpoints ... ok
+test geometry::geometry_bezier::tests::car_hood_tonal_contour_can_use_fewer_curves_with_fixed_end_tangents ... ok
+test geometry::geometry_primitives::tests::tiny_and_degenerate_support_is_left_to_the_existing_fitter ... ok
+test geometry::geometry_primitives::tests::shared_piece_consolidation_does_not_accumulate_source_drift ... ok
+test geometry::tests::adjacent_faces_reuse_one_exact_reversed_boundary ... ok
+test geometry::tests::adjacent_masters_share_their_raster_vertex_exactly ... ok
+test geometry::tests::alpha_fairing_retains_rectangle_corners_and_small_islands ... ok
+test geometry::tests::bounded_fairing_preserves_a_persistent_right_angle ... ok
+test geometry::tests::bounded_fairing_removes_raster_staircase_without_leaving_source_corridor ... ok
+test geometry::tests::closed_continuity_split_preserves_every_boundary_edge ... ok
+test geometry::tests::a_highlight_edge_stays_continuous_inside_one_material_class ... ok
+test geometry::tests::closed_simplification_keeps_canvas_corner ... ok
+test geometry::tests::connected_curve_endpoint_stays_inside_shared_vertex_budget ... ok
+test geometry::tests::continuity_follows_colour_through_fragments_before_accepting_exterior ... ok
+test geometry::tests::coreless_line_cap_does_not_split_supported_surface_contour ... ok
+test geometry::tests::corner_regularization_preserves_narrow_crescent_tips ... ok
+test geometry::geometry_bezier::tests::shoulder_contours_use_at_most_one_interior_knot_and_keep_graph_connections ... ok
+test geometry::tests::closed_material_contour_is_fitted_across_quantized_face_transitions ... ok
+test geometry::tests::cube_bottom_corner_excursion_is_regularized ... ok
+test geometry::tests::diagonal_grid_staircase_is_one_continuous_line ... ok
+test geometry::tests::disconnected_or_visibly_distinct_neutral_faces_keep_separate_classes ... ok
+test geometry::tests::distant_master_handoff_does_not_translate_a_control_handle ... ok
+test geometry::tests::dominant_shared_edge_connects_shades_without_merging_distinct_materials ... ok
+test geometry::tests::corridor_queries_match_exhaustive_distances ... ok
+test geometry::tests::cube_alpha_contour_does_not_restore_corner_spurs ... ok
+test geometry::geometry_primitives::tests::attached_disc_rim_becomes_arcs_without_rounding_the_attached_garment ... ok
+test geometry::tests::material_transition_slices_one_continuous_master_boundary ... ok
+test geometry::tests::offset_band_maps_the_displacement_at_the_window_corner ... ok
+test geometry::tests::only_holes_owned_entirely_by_later_faces_are_removed ... ok
+test geometry::tests::perceptually_close_adjacent_patch_shares_continuity_class ... ok
+test geometry::tests::potrace_default_corner_threshold_keeps_a_compact_cusp ... ok
+test geometry::tests::raster_alpha_circle_has_smooth_turning_without_losing_its_shape ... ok
+test geometry::tests::raster_supported_disc_remains_shared_path_before_final_optimization ... ok
+test geometry::tests::rectangular_region_remains_shared_path_before_final_optimization ... ok
+test geometry::tests::remojii_chain_cap_preserves_the_cut_across_paint_pairs ... ok
+test geometry::tests::shaded_diagonal_continuity_master_keeps_analytic_lines ... ok
+test geometry::tests::fragmented_diagonal_silhouette_does_not_export_grid_steps ... ok
+test geometry::tests::shading_fairing_requires_source_colour_support ... ok
+test geometry::tests::short_cornerless_boundary_can_reject_a_one_pixel_phase_reversal ... ok
+test geometry::tests::small_rectangular_insets_keep_observed_corners ... ok
+test geometry::tests::smooth_closed_fit_has_no_corner_at_its_storage_origin ... ok
+test geometry::tests::sorted_fairing_search_matches_exhaustive_hypot_and_ties ... ok
+test geometry::tests::source_supported_hooks_survive_excursion_removal ... ok
+test geometry::tests::structural_endpoint_constraint_preserves_anchor_and_sets_g1_direction ... ok
+test geometry::tests::window_ink_antialias_shades_keep_one_continuity_class ... ok
+test geometry::tests::shaded_ellipse_ring_reuses_whole_inner_and_outer_contours ... ok
+test geometry::tests::every_binary_three_by_three_partition_has_closed_faces ... ok
+test geometry::tests::every_ternary_three_by_three_partition_uses_shared_loops ... ok
+
+test result: ok. 73 passed; 0 failed; 0 ignored; 0 measured; 269 filtered out; finished in 2.14s
+
+COMMAND ['cargo', 'test', '--offline', '--release', '--features', 'diagnostics', '--lib', 'gradient::', '--', '--test-threads=4']
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running unittests src/lib.rs (target/release/deps/picvec-010f366aeb97c8e0)
+
+running 56 tests
+test gradient::coherent::tests::colour_knots_follow_a_non_tenth_highlight ... ok
+test gradient::coherent::tests::continuous_ramp_replaces_artificial_grid_and_retains_thin_line ... ok
+test gradient::coherent::tests::blurred_step_inside_quantizer_faces_is_not_merged_away ... ok
+test gradient::coherent::tests::a_single_fittable_face_is_not_cut_into_spatial_patches ... ok
+test gradient::coherent::tests::fitted_field_is_not_subdivided_into_long_axis_patches ... ok
+test gradient::coherent::tests::perforated_smooth_interior_does_not_create_extra_boundaries ... ok
+test gradient::coherent::tests::material_transition_separates_coherent_fields ... ok
+test gradient::residual::tests::bounded_mse_preserves_pairwise_rounding_and_strict_thresholds ... ok
+test gradient::residual::tests::bounded_mse_stops_before_predicting_a_proven_losing_suffix ... ok
+test gradient::residual::tests::cached_subsets_match_complete_paint_evaluation_bit_for_bit ... ok
+test gradient::residual::tests::lazy_slope_observations_match_uncached_checks ... ok
+test gradient::residual::tests::shared_overlay_parameter_keeps_colour_and_opacity_exact ... ok
+test gradient::tests::a_narrow_observed_profile_keeps_its_slope_without_fabricated_samples ... ok
+test gradient::tests::blurred_material_step_is_not_a_continuous_shading_boundary ... ok
+test gradient::tests::cached_merge_observations_keep_both_error_statistics_exact ... ok
+test gradient::tests::cached_solid_lab_preserves_paint_error_exactly ... ok
+test gradient::tests::car_bumper_highlight_keeps_brightening_towards_the_trim ... ok
+test gradient::tests::continuous_ramp_priority_accounts_for_visible_boundary_length ... ok
+test gradient::coherent::tests::shared_quantizer_owners_do_not_join_fields_across_an_occluding_line ... ok
+test gradient::tests::curved_car_highlight_keeps_colour_beyond_the_bright_ridge ... ok
+test gradient::coherent::tests::a_local_highlight_is_refined_without_subdividing_its_field ... ok
+test gradient::tests::flat_chroma_quantile_roundoff_does_not_invert_stop_bounds ... ok
+test gradient::tests::gradient_discontinuity_separates_a_ramp_from_a_step ... ok
+test gradient::tests::dark_edge_outliers_do_not_cast_a_shadow_into_supported_paint ... ok
+test gradient::tests::interpolation_hits_endpoints ... ok
+test gradient::tests::irregular_stop_spacing_does_not_bend_a_linear_ramp ... ok
+test gradient::tests::layered_paint_fades_without_an_internal_boundary ... ok
+test gradient::tests::layered_simplification_keeps_separate_local_highlights ... ok
+test gradient::tests::local_mean_preserves_a_large_flat_faces_colour ... ok
+test gradient::tests::merge_template_preserves_fitted_direction_and_radial_focus ... ok
+test gradient::tests::native_continuity_gate_keeps_interior_colour_regression_sub_jnd ... ok
+test gradient::tests::normal_region_uses_one_gain_gate_for_every_gradient_model ... ok
+test gradient::tests::office_fit_uses_the_source_angle_for_a_rotated_linear_ramp ... ok
+test gradient::tests::primary_gate_keeps_smooth_local_highlights ... ok
+test gradient::tests::primary_gate_separates_coherent_gradient_from_unstructured_texture ... ok
+test gradient::tests::radial_normals_recover_a_highlight_centre_outside_the_face ... ok
+test gradient::tests::redundant_layered_field_becomes_one_paint ... ok
+test gradient::tests::removing_a_false_spot_preserves_the_supported_shading_and_owners ... ok
+test gradient::coherent::tests::quiet_bridge_cannot_erase_a_measured_material_interface ... ok
+test gradient::tests::seam_adjustment_cannot_hide_local_colour_loss_in_a_group_average ... ok
+test gradient::tests::small_region_gradient_requires_strict_measured_gain ... ok
+test gradient::tests::smooth_boundary_detection_accepts_a_steep_continuous_ramp ... ok
+test gradient::tests::smooth_boundary_detection_rejects_a_material_step ... ok
+test gradient::tests::residual_corrections_do_not_add_circular_shading_to_a_ramp ... ok
+test gradient::tests::source_supported_merge_joins_a_chain_of_ramp_fragments ... ok
+test gradient::tests::source_supported_merge_keeps_a_faint_one_pixel_line ... ok
+test gradient::tests::source_supported_merge_preserves_a_native_material_transition ... ok
+test gradient::tests::source_supported_merge_removes_only_an_unsupported_paint_interface ... ok
+test gradient::tests::sparse_outline_fields_keep_the_color_error_gate ... ok
+test gradient::tests::sparse_residual_fit_checks_pixels_between_observations ... ok
+test gradient::tests::spatial_slivers_use_their_own_colour_instead_of_the_parent_palette ... ok
+test gradient::tests::supported_local_shadow_survives_residual_validation ... ok
+test gradient::tests::unsplit_slivers_use_valid_native_samples_instead_of_a_global_palette_colour ... ok
+test gradient::tests::smooth_highlight_samples_survive_a_quantized_ridge_mask ... ok
+test gradient::tests::narrow_isocolour_band_keeps_the_source_slope ... ok
+test gradient::tests::fitted_fields_reconcile_smooth_seams_but_keep_blurred_material_steps ... ok
+
+test result: ok. 56 passed; 0 failed; 0 ignored; 0 measured; 286 filtered out; finished in 0.92s
+
+COMMAND ['cargo', 'test', '--offline', '--release', '--features', 'diagnostics', '--lib', 'ridge::', '--', '--test-threads=4']
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running unittests src/lib.rs (target/release/deps/picvec-010f366aeb97c8e0)
+
+running 5 tests
+test ridge::tests::canonical_ridge_extrema_require_source_support_to_restore_samples ... ok
+test ridge::tests::vector_correlation_matches_scalar_bits_at_reflected_edges ... ok
+test ridge::tests::shared_hessian_preserves_both_independent_polarities ... ok
+test ridge::tests::shared_analysis_matches_independent_ridge_consumers ... ok
+test ridge::tests::disk_morphology_matches_brute_force ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 337 filtered out; finished in 0.89s
+
+COMMAND ['cargo', 'test', '--offline', '--release', '--features', 'diagnostics', '--lib', 'extrema::', '--', '--test-threads=4']
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running unittests src/lib.rs (target/release/deps/picvec-010f366aeb97c8e0)
+
+running 1 test
+test extrema::tests::sliding_matches_full_window_with_both_boundary_modes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 341 filtered out; finished in 0.00s
+
+COMMAND ['cargo', 'test', '--offline', '--release', '--features', 'diagnostics', '--lib', 'edge::history_speed_checks', '--', '--test-threads=4']
+    Finished `release` profile [optimized] target(s) in 0.02s
+     Running unittests src/lib.rs (target/release/deps/picvec-010f366aeb97c8e0)
+
+running 1 test
+test edge::history_speed_checks::short_colour_batches_keep_serial_bits ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 341 filtered out; finished in 0.00s
+

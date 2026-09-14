@@ -1,0 +1,33 @@
+picvec stage load-resize: 0.006s (total 0.006s)
+picvec stage edge-roles: 16.473s (total 16.479s)
+picvec stage structural-analysis: 0.610s (total 17.089s)
+picvec stage perceptual-smoothing: 0.769s (total 17.857s)
+picvec segmentation substage setup: 0.032s
+picvec segmentation substage palette: 0.286s (66734 histogram cells, 1712 colours)
+picvec segmentation substage initial-components: 0.349s
+picvec segmentation substage small-components: 3.070s
+picvec segmentation substage compact: 0.092s
+picvec segmentation substage antialias: 1.156s
+picvec segmentation substage finalize: 0.103s (total 5.090s)
+picvec stage segmentation: 11.913s (total 29.771s)
+picvec stage boundary-regularization: 0.279s (total 30.050s)
+picvec stage paint-aware-merge: 51.735s (total 81.784s)
+picvec stage thin-paint-ownership: 5.906s (total 87.691s)
+picvec stage paint-topology-preservation: 7.787s (total 95.477s)
+picvec paint substage setup: 0.041s
+picvec paint substage initial: 18.916s (primary solid 3278, gain-bound solid 22512, low-range solid 4, model search 3299)
+picvec paint substage harmonize: 2.924s
+picvec paint substage couple: 0.694s
+picvec stage paint-fitting: 22.833s (total 118.311s)
+picvec layered merge candidates: considered 54627, evidence 54067, seam 183, layered 81, nonfinite 0, face 269, combined 90, accepted 18
+picvec stage source-supported-paint-merge: 82.515s (total 200.826s)
+picvec stage exact-paint-merge: 0.058s (total 200.883s)
+picvec stage layered-paint-simplification: 2.006s (total 202.890s)
+picvec stage residual-shape-refinement: 1.104s (total 203.994s)
+picvec stage interior-shading: 16.059s (total 220.053s)
+picvec stage face-alpha: 0.020s (total 220.073s)
+picvec stage hierarchical-topology: 0.022s (total 220.095s)
+picvec stage shared-geometry: 26.742s (total 246.837s)
+picvec stage paint-preview: 0.898s (total 247.735s)
+picvec stage structural-selection: 18.472s (total 266.208s)
+picvec stage paint-order-validation: 29.549s (total 295.756s)

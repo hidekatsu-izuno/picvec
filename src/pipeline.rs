@@ -2,6 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+#[cfg(test)]
 use rayon::prelude::*;
 use serde::Serialize;
 use tempfile::{Builder as TemporaryFileBuilder, NamedTempFile};
@@ -510,7 +511,7 @@ pub fn vectorize(input: &Path, output: &Path, config: &Config) -> Result<Summary
 }
 
 fn default_execution_thread_count(cpu_count: usize) -> usize {
-    (cpu_count / 2).clamp(1, 4)
+    (cpu_count / 2).clamp(1, 10)
 }
 
 fn execution_thread_count(config: &Config) -> usize {
@@ -547,7 +548,7 @@ fn adaptive_parallel_jobs(
     image_dimensions: (usize, usize),
     execution_threads: usize,
 ) -> usize {
-    const MAXIMUM_JOBS: usize = 8;
+    const MAXIMUM_JOBS: usize = 10;
     const ESTIMATED_WORKING_BYTES_PER_PIXEL: usize = 320;
     let maximum_memory_budget = usize::try_from(4_u64 * 1024 * 1024 * 1024).unwrap_or(usize::MAX);
     let (width, height) = image_dimensions;
@@ -574,6 +575,42 @@ fn adaptive_parallel_jobs(
         .min(MAXIMUM_JOBS)
         .min(memory_jobs.max(1))
         .max(1)
+}
+
+/// Keep a bounded number of independent jobs in flight without waiting for
+/// the slowest member of a batch. Commit results in their original order.
+fn bounded_map<T: Sync, U: Send, F: Fn(&T) -> U + Sync>(
+    tasks: &[T],
+    limit: usize,
+    evaluate: F,
+) -> Vec<U> {
+    if tasks.is_empty() {
+        return Vec::new();
+    }
+    if limit <= 1 {
+        return tasks.iter().map(evaluate).collect();
+    }
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let outputs = std::sync::Mutex::new((0..tasks.len()).map(|_| None).collect::<Vec<Option<U>>>());
+    rayon::scope(|scope| {
+        for _ in 0..limit.min(tasks.len()) {
+            let (next, outputs, evaluate) = (&next, &outputs, &evaluate);
+            scope.spawn(move |_| loop {
+                let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let Some(task) = tasks.get(i) else {
+                    break;
+                };
+                let outcome = evaluate(task);
+                outputs.lock().unwrap()[i] = Some(outcome);
+            });
+        }
+    });
+    outputs
+        .into_inner()
+        .unwrap()
+        .into_iter()
+        .map(Option::unwrap)
+        .collect()
 }
 
 struct EvaluatedRefinement {
@@ -684,7 +721,7 @@ fn adaptively_refine(
     let mut child_config = config.clone();
     child_config.adaptive_refinement = false;
     child_config.compute_quality_metrics = false;
-    child_config.retain_diagnostics = false;
+    child_config.retain_diagnostics = config.retain_diagnostics;
     let base_scale = 1.0 / source_scale;
     let mut evaluated = Vec::<EvaluatedRefinement>::new();
     // Keep enough independent jobs in flight to cover serial geometry and
@@ -698,10 +735,8 @@ fn adaptively_refine(
     // coarse preview invents an antialias halo across otherwise clear gaps.
     // Parse once; render only the small child bounds, not a full-size sheet.
     let base_tree = parse_svg_document(&core.document)?;
-    for batch in candidates.chunks(parallel_jobs) {
-        let outcomes = batch
-            .par_iter()
-            .map(|candidate| -> Result<RefinementOutcome> {
+    let outcomes = bounded_map(&candidates, parallel_jobs,
+            |candidate| -> Result<RefinementOutcome> {
                 let margin = (candidate.core.width.min(candidate.core.height) / 64).clamp(8, 24);
                 let expanded = candidate.core.expanded(margin, input_width, input_height);
                 let crop =
@@ -739,6 +774,10 @@ fn adaptively_refine(
                     .min(processing.height as f32 / expanded.height.max(1) as f32);
                 if local_scale <= 1.1 * base_scale {
                     return Ok(RefinementOutcome::NotFiner);
+                }
+                #[cfg(feature = "diagnostics")]
+                if config.retain_diagnostics {
+                    eprintln!("picvec adaptive processing: source {} {} {} {}, processing {} {}", expanded.x, expanded.y, expanded.width, expanded.height, processing.width, processing.height);
                 }
                 let child = vectorize_processing(
                     processing,
@@ -822,22 +861,21 @@ fn adaptively_refine(
                     rate,
                 })))
             })
-            .collect::<Result<Vec<_>>>()?;
-        for outcome in outcomes {
-            match outcome {
-                RefinementOutcome::NotFiner => summary.rejected_for_quality += 1,
-                RefinementOutcome::QualityRejected => {
-                    summary.evaluated_regions += 1;
-                    summary.rejected_for_quality += 1;
-                }
-                RefinementOutcome::ComplexityRejected => {
-                    summary.evaluated_regions += 1;
-                    summary.rejected_for_complexity += 1;
-                }
-                RefinementOutcome::Accepted(refinement) => {
-                    summary.evaluated_regions += 1;
-                    evaluated.push(*refinement);
-                }
+            .into_iter().collect::<Result<Vec<_>>>()?;
+    for outcome in outcomes {
+        match outcome {
+            RefinementOutcome::NotFiner => summary.rejected_for_quality += 1,
+            RefinementOutcome::QualityRejected => {
+                summary.evaluated_regions += 1;
+                summary.rejected_for_quality += 1;
+            }
+            RefinementOutcome::ComplexityRejected => {
+                summary.evaluated_regions += 1;
+                summary.rejected_for_complexity += 1;
+            }
+            RefinementOutcome::Accepted(refinement) => {
+                summary.evaluated_regions += 1;
+                evaluated.push(*refinement);
             }
         }
     }
@@ -1742,6 +1780,16 @@ fn vectorize_processing(
         &mut geometry_cache,
     )?;
     report_progress(config, "paint-preview", started, &mut checkpoint);
+    let mut structural_checkpoint = Instant::now();
+    let mut report_structural = |name: &str| {
+        if cfg!(feature = "diagnostics") && config.retain_diagnostics {
+            eprintln!(
+                "picvec structural substage {name}: {:.3}s",
+                structural_checkpoint.elapsed().as_secs_f64()
+            );
+        }
+        structural_checkpoint = Instant::now();
+    };
     let optimization = optimization_summary(&geometry, &paints, &geometry_report);
     let mut ownership = resolve_boundary_ownership(
         if source_alpha {
@@ -1790,6 +1838,7 @@ fn vectorize_processing(
     ownership
         .structural
         .refine_interrupted_strokes(&processing, chroma_matte.filter(|_| source_alpha));
+    report_structural("ownership");
     let outlines = if source_alpha {
         Vec::new()
     } else {
@@ -1800,6 +1849,7 @@ fn vectorize_processing(
             &geometry_report.paint_closed_contours,
         )
     };
+    report_structural("outline-proposals");
     if !outlines.is_empty() {
         let before = render_svg_preview(
             (processing.width, processing.height),
@@ -1829,6 +1879,7 @@ fn vectorize_processing(
             .outlines
             .retain(|band| band.supported_by_render(&processing_reference, &before, &after));
     }
+    report_structural("outline-validation");
     if !source_alpha && !ownership.structural.strokes.is_empty() {
         let mut preview = |ink: &StructuralInk| {
             render_svg_preview(
@@ -1875,6 +1926,7 @@ fn vectorize_processing(
             ownership.structural.strokes.clear();
         }
     }
+    report_structural("colour-patches");
     ownership.summary.structural_strokes = ownership.structural.strokes.len();
     report_progress(config, "structural-selection", started, &mut checkpoint);
     let ownership_summary = ownership.summary.clone();
@@ -2693,14 +2745,49 @@ mod tests {
     }
 
     #[test]
-    fn default_worker_count_uses_half_the_cpus_capped_at_four() {
+    fn refinement_queue_preserves_order_and_limits_nested_jobs() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        for threads in [1, 4] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap();
+            pool.install(|| {
+                for limit in [1, 2, 4, 8, 10] {
+                    let active = AtomicUsize::new(0);
+                    let peak = AtomicUsize::new(0);
+                    let tasks: Vec<_> = (0usize..37).collect();
+                    let outcomes = bounded_map(&tasks, limit, |&i| {
+                        let count = active.fetch_add(1, Ordering::SeqCst) + 1;
+                        peak.fetch_max(count, Ordering::SeqCst);
+                        let sum: usize = (0..1024).into_par_iter().map(|j| i + j).sum();
+                        active.fetch_sub(1, Ordering::SeqCst);
+                        sum
+                    });
+                    assert_eq!(
+                        outcomes,
+                        tasks
+                            .iter()
+                            .map(|i| i * 1024 + 1023 * 1024 / 2)
+                            .collect::<Vec<_>>()
+                    );
+                    assert_eq!(active.load(Ordering::SeqCst), 0);
+                    assert!(peak.load(Ordering::SeqCst) <= limit);
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn default_worker_count_uses_half_the_cpus_capped_at_ten() {
         assert_eq!(default_execution_thread_count(1), 1);
         assert_eq!(default_execution_thread_count(2), 1);
         assert_eq!(default_execution_thread_count(3), 1);
         assert_eq!(default_execution_thread_count(4), 2);
         assert_eq!(default_execution_thread_count(6), 3);
         assert_eq!(default_execution_thread_count(8), 4);
-        assert_eq!(default_execution_thread_count(20), 4);
+        assert_eq!(default_execution_thread_count(20), 10);
+        assert_eq!(default_execution_thread_count(64), 10);
     }
 
     #[test]

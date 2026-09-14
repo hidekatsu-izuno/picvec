@@ -20,7 +20,7 @@ mkdir -p sample/output
 working_directory=$(mktemp -d "$repository_root/sample/output/.regenerate-XXXXXX")
 trap 'rm -rf -- "$working_directory"' EXIT
 for name in "${inputs[@]}"; do
-    options=(--threads 4 --verbose)
+    options=(--threads "${PICVEC_THREADS:-0}" --verbose)
     # This sheet historically removes its green backing. Keying also separates
     # the grid from touching figures before source-resolution refinement.
     if [[ "$name" == cliparts-6x6.png ]]; then

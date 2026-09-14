@@ -1,0 +1,283 @@
+diff --git a/src/edge.rs b/src/edge.rs
+index 237f8e63694a110cf7706747e2fe83acb35984a9..bf0a6d7d5d97ee294ae17ddf18c2de47a3e86ca6 100644
+--- a/src/edge.rs
++++ b/src/edge.rs
+@@ -76,6 +76,16 @@ pub fn oklab_pixels(image: &Raster) -> Vec<Oklab> {
+ }
+ 
+ pub fn oklab_values(pixels: &[[f32; 3]]) -> Vec<Oklab> {
++    // Paint searches repeatedly convert small batches, often inside an
++    // already parallel region fit. Scheduling these batches costs more than
++    // the pixel transforms. Keep exactly the same transform and output order.
++    if pixels.len() <= 256 {
++        return pixels
++            .iter()
++            .copied()
++            .map(crate::color::rgb_to_oklab)
++            .collect();
++    }
+     pixels
+         .par_iter()
+         .copied()
+@@ -3242,6 +3252,35 @@ pub fn perceptual_smooth(image: &Raster, config: &Config) -> Raster {
+ 
+ #[cfg(test)]
+ mod tests {
++    #[test]
++    fn small_color_batches_match_parallel_transform_bit_for_bit() {
++        use rayon::prelude::*;
++        let pool = rayon::ThreadPoolBuilder::new()
++            .num_threads(4)
++            .build()
++            .unwrap();
++        pool.install(|| {
++            let values = [-0.1, -0.0, 0.0, 0.001, 0.04045, 0.04046, 0.5, 1.0, 1.1];
++            for length in [0, 1, 31, 128, 255, 256, 257, 1024] {
++                let pixels: Vec<_> = (0..length)
++                    .map(|i| [values[i % 9], values[(i / 9) % 9], values[(i / 81) % 9]])
++                    .collect();
++                let expected: Vec<_> = pixels
++                    .par_iter()
++                    .copied()
++                    .map(crate::color::rgb_to_oklab)
++                    .collect();
++                for (a, b) in super::oklab_values(&pixels).iter().zip(&expected) {
++                    assert_eq!(
++                        [a.l.to_bits(), a.a.to_bits(), a.b.to_bits()],
++                        [b.l.to_bits(), b.a.to_bits(), b.b.to_bits()]
++                    );
++                }
++                assert_eq!(super::oklab_values(&pixels).len(), expected.len());
++            }
++        });
++    }
++
+     #[test]
+     fn dark_quantization_noise_smooths_without_erasing_a_black_line() {
+         let config = crate::config::Config::default();
+diff --git a/src/gradient.rs b/src/gradient.rs
+index fe1b01c70d5049632de1b073d7af8cdfc39ecf23..05e80b991a8d6e271a2f09a125e030c87f3da079 100644
+--- a/src/gradient.rs
++++ b/src/gradient.rs
+@@ -443,12 +443,15 @@ fn interpolate(stops: &[ColorStop], t: f32) -> [f32; 3] {
+ }
+ 
+ fn median(values: &mut [f32]) -> f32 {
+-    values.sort_by(f32::total_cmp);
+     let middle = values.len() / 2;
+-    if values.len().is_multiple_of(2) {
+-        0.5 * (values[middle - 1] + values[middle])
++    let even = values.len().is_multiple_of(2);
++    let (lower, upper, _) = values.select_nth_unstable_by(middle, f32::total_cmp);
++    if even {
++        // Only the two central ranks are needed. Preserve the reference's
++        // total ordering (including signed zero) and arithmetic expression.
++        0.5 * (*lower.iter().max_by(|a, b| a.total_cmp(b)).unwrap() + *upper)
+     } else {
+-        values[middle]
++        *upper
+     }
+ }
+ 
+@@ -6556,13 +6559,21 @@ fn supported_merge_error_gate(
+     let mut baseline_errors = Vec::new();
+     let mut candidate_errors = Vec::new();
+     for (samples, baseline) in faces {
+-        let before = paint_stats_against_labs(labs, samples, width, baseline);
+-        let after = paint_stats_against_labs(labs, samples, width, candidate);
++        let before_errors = errors_for_indices(labs, samples, width, baseline);
++        let after_errors = errors_for_indices(labs, samples, width, candidate);
++        let stats = |errors: &[f32]| ErrorStats {
++            mean: numpy_sum_f32(errors) / errors.len().max(1) as f32,
++            // Percentile selection reorders its buffer. Keep the original
++            // sample order for the combined floating-point reduction below.
++            percentile: percentile(errors.to_vec(), 0.90),
++        };
++        let before = stats(&before_errors);
++        let after = stats(&after_errors);
+         if after.mean > before.mean + 0.30 || after.percentile > before.percentile + 0.75 {
+             return 1;
+         }
+-        baseline_errors.extend(errors_for_indices(labs, samples, width, baseline));
+-        candidate_errors.extend(errors_for_indices(labs, samples, width, candidate));
++        baseline_errors.extend(before_errors);
++        candidate_errors.extend(after_errors);
+     }
+     let before = numpy_sum_f32(&baseline_errors) / baseline_errors.len().max(1) as f32;
+     let after = numpy_sum_f32(&candidate_errors) / candidate_errors.len().max(1) as f32;
+@@ -8944,6 +8955,129 @@ mod tests {
+         assert!((radius.x / radius.y - 110.0 / 130.0).abs() < 0.01);
+     }
+ 
++    #[test]
++    fn selected_median_matches_sorted_bits() {
++        for length in 1..1025 {
++            let mut values = (0..length)
++                .map(|i| ((i * 73 + length * 31) % 101) as f32 - 50.0)
++                .collect::<Vec<_>>();
++            if length >= 6 {
++                values[..6].copy_from_slice(&[
++                    -0.0,
++                    0.0,
++                    f32::MIN,
++                    f32::MAX,
++                    f32::NEG_INFINITY,
++                    f32::INFINITY,
++                ]);
++            }
++            let mut sorted = values.clone();
++            sorted.sort_by(f32::total_cmp);
++            let middle = length / 2;
++            let expected = if length % 2 == 0 {
++                0.5 * (sorted[middle - 1] + sorted[middle])
++            } else {
++                sorted[middle]
++            };
++            assert_eq!(median(&mut values).to_bits(), expected.to_bits());
++        }
++        for mut values in [
++            vec![-0.0, 0.0],
++            vec![0.0, -0.0],
++            vec![f32::NAN],
++            vec![1.0, f32::NAN, 2.0],
++        ] {
++            let mut sorted = values.clone();
++            sorted.sort_by(f32::total_cmp);
++            let middle = sorted.len() / 2;
++            let expected = if sorted.len() % 2 == 0 {
++                0.5 * (sorted[middle - 1] + sorted[middle])
++            } else {
++                sorted[middle]
++            };
++            assert_eq!(median(&mut values).to_bits(), expected.to_bits());
++        }
++    }
++
++    #[test]
++    fn reused_merge_errors_preserve_all_gate_outcomes() {
++        // Independent reference: compute face statistics, then render both
++        // paints again for the combined gate, as before this optimization.
++        fn reference(
++            labs: &[Oklab],
++            width: usize,
++            faces: [(&[usize], &Paint); 2],
++            candidate: &Paint,
++        ) -> u8 {
++            let mut baseline_errors = Vec::new();
++            let mut candidate_errors = Vec::new();
++            for (samples, baseline) in faces {
++                let before = paint_stats_against_labs(labs, samples, width, baseline);
++                let after = paint_stats_against_labs(labs, samples, width, candidate);
++                if after.mean > before.mean + 0.30 || after.percentile > before.percentile + 0.75 {
++                    return 1;
++                }
++                baseline_errors.extend(errors_for_indices(labs, samples, width, baseline));
++                candidate_errors.extend(errors_for_indices(labs, samples, width, candidate));
++            }
++            let before = numpy_sum_f32(&baseline_errors) / baseline_errors.len().max(1) as f32;
++            let after = numpy_sum_f32(&candidate_errors) / candidate_errors.len().max(1) as f32;
++            if after > before + 0.01
++                || percentile(candidate_errors, 0.90) > percentile(baseline_errors, 0.90) + 0.04
++            {
++                2
++            } else {
++                0
++            }
++        }
++        let source = Raster::new(
++            32,
++            32,
++            (0..1024)
++                .map(|i| [0.3 + (i % 32) as f32 / 200.0; 3])
++                .collect(),
++        );
++        let labs = oklab_pixels(&source);
++        let mut outcomes = [0usize; 3];
++        for length in [0, 1, 7, 32, 127, 256, 511] {
++            let left: Vec<_> = (0..length).collect();
++            let right: Vec<_> = (512..512 + length).rev().collect();
++            for offset in [-0.01, 0.0, 0.0001, 0.001, 0.002, 0.01, 0.1] {
++                let baseline = Paint::Linear {
++                    preset: LinearPreset::LeftToRight,
++                    start: Point { x: 0.0, y: 0.0 },
++                    end: Point { x: 31.0, y: 0.0 },
++                    stops: vec![
++                        ColorStop {
++                            offset: 0.0,
++                            color: [0.3; 3],
++                        },
++                        ColorStop {
++                            offset: 1.0,
++                            color: [0.455; 3],
++                        },
++                    ],
++                };
++                let mut candidate = baseline.clone();
++                if let Paint::Linear { stops, .. } = &mut candidate {
++                    for stop in stops {
++                        for c in &mut stop.color {
++                            *c += offset;
++                        }
++                    }
++                }
++                let faces = [(&left[..], &baseline), (&right[..], &baseline)];
++                let expected = reference(&labs, 32, faces, &candidate);
++                assert_eq!(
++                    supported_merge_error_gate(&labs, 32, faces, &candidate),
++                    expected
++                );
++                outcomes[expected as usize] += 1;
++            }
++        }
++        assert!(outcomes.iter().all(|&count| count > 0), "{outcomes:?}");
++    }
++
+     #[test]
+     fn cached_merge_observations_keep_both_error_statistics_exact() {
+         let source = Raster::new(
+diff --git a/tests/color_batch_performance.rs b/tests/color_batch_performance.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..0354cf1ba623fe29b962c0a89986858e300f48c2
+--- /dev/null
++++ b/tests/color_batch_performance.rs
+@@ -0,0 +1,40 @@
++//! Explicit benchmark for scheduling repeated paint-sized color batches.
++use picvec::{
++    color::{rgb_to_oklab, Oklab},
++    edge::oklab_values,
++};
++use rayon::prelude::*;
++use std::{hint::black_box, time::Instant};
++
++#[test]
++#[ignore = "manual timing; run alone with --nocapture --test-threads=1"]
++fn color_batch_scheduling() {
++    for threads in [1, 4] {
++        let pool = rayon::ThreadPoolBuilder::new()
++            .num_threads(threads)
++            .build()
++            .unwrap();
++        pool.install(|| {
++            for size in [32, 256, 768, 2048, 4096, 16384] {
++                let pixels: Vec<_> = (0..size).map(|i| [((i*73)%257) as f32 / 256.0, ((i*31)%257) as f32 / 256.0, ((i*17)%257) as f32 / 256.0]).collect();
++                for nested in [false, true] {
++                    for mode in ["parallel", "serial", "dispatch"] {
++                        let run = || {
++                            let p = black_box(&pixels);
++                            let values: Vec<Oklab> = match mode {
++                                "parallel" => p.par_iter().copied().map(rgb_to_oklab).collect(),
++                                "serial" => p.iter().copied().map(rgb_to_oklab).collect(),
++                                _ => oklab_values(p),
++                            };
++                            black_box(values);
++                        };
++                        let start = Instant::now();
++                        if nested { (0..256).into_par_iter().for_each(|_| run()); }
++                        else { for _ in 0..256 { run(); } }
++                        eprintln!("threads={threads} size={size} nested={nested} mode={mode} seconds={:.6}", start.elapsed().as_secs_f64());
++                    }
++                }
++            }
++        });
++    }
++}

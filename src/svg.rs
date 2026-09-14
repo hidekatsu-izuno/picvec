@@ -327,7 +327,16 @@ fn bbox_cells(bbox: (f64, f64, f64, f64)) -> Vec<(i64, i64)> {
     cells
 }
 
+#[cfg(test)]
 fn batch_equal_paint_paths(elements: &mut [Option<PaintElement>], summary: &mut SvgSummary) {
+    batch_equal_paint_paths_impl(elements, summary, &mut Vec::new());
+}
+
+fn batch_equal_paint_paths_impl(
+    elements: &mut [Option<PaintElement>],
+    summary: &mut SvgSummary,
+    merges: &mut Vec<(usize, usize)>,
+) {
     let mut signature_ids = HashMap::<String, usize>::new();
     let mut latest_spatial = HashMap::<(i64, i64), Vec<(usize, usize)>>::new();
     let mut global_blockers = Vec::<(usize, usize)>::new();
@@ -413,6 +422,7 @@ fn batch_equal_paint_paths(elements: &mut [Option<PaintElement>], summary: &mut 
                     None => bbox,
                 });
             }
+            merges.push((current, target));
             elements[current] = None;
             let batch = &mut batches.get_mut(&signature_id).unwrap()[batch_index];
             if !batch.merged {
@@ -830,9 +840,121 @@ pub(crate) fn serialize_filtered(
 #[derive(Default)]
 pub(crate) struct GeometryCache {
     paths: HashMap<String, Option<(OptimizedElement, PathOptimization)>>,
+    strokes: HashMap<String, Option<(OptimizedElement, PathOptimization)>>,
+    stroke_outlines: HashMap<String, HashMap<(u32, bool), Option<String>>>,
+    batches: std::collections::VecDeque<BatchPlan>,
+}
+
+struct BatchKey {
+    attributes: String,
+    batchable: bool,
+    bbox: Option<[u64; 4]>,
+}
+
+fn batch_bbox(element: &PaintElement) -> Option<[u64; 4]> {
+    paint_path_bbox(element).map(|b| [b.0.to_bits(), b.1.to_bits(), b.2.to_bits(), b.3.to_bits()])
+}
+
+struct BatchPlan {
+    keys: Vec<Option<BatchKey>>,
+    merges: Vec<(usize, usize)>,
+    batches: usize,
+    bytes: usize,
+}
+
+impl BatchPlan {
+    fn matches(&self, elements: &[Option<PaintElement>]) -> bool {
+        self.keys.len() == elements.len()
+            && self
+                .keys
+                .iter()
+                .zip(elements)
+                .all(|(key, element)| match (key, element) {
+                    (None, None) => true,
+                    (Some(k), Some(e)) => {
+                        k.attributes == e.attributes
+                            && k.batchable == e.batchable
+                            && k.bbox == batch_bbox(e)
+                    }
+                    _ => false,
+                })
+    }
 }
 
 impl GeometryCache {
+    // Batch decisions depend on exact paint attributes, batchability, and
+    // original path bounds, not path commands. Reuse only those decisions;
+    // append the current commands in the same order as the original loop.
+    fn batch(&mut self, elements: &mut [Option<PaintElement>], summary: &mut SvgSummary) {
+        if elements.is_empty() {
+            return;
+        }
+        if let Some(index) = self.batches.iter().position(|p| p.matches(elements)) {
+            let plan = self.batches.remove(index).unwrap();
+            for &(current, target) in &plan.merges {
+                let current = elements[current].take().unwrap();
+                let OptimizedElement::Path {
+                    data: source,
+                    bbox: Some(b),
+                    ..
+                } = current.geometry
+                else {
+                    unreachable!()
+                };
+                let OptimizedElement::Path { data, bbox } =
+                    &mut elements[target].as_mut().unwrap().geometry
+                else {
+                    unreachable!()
+                };
+                data.push(' ');
+                data.push_str(source.trim());
+                *bbox = Some(match *bbox {
+                    Some(a) => (a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3)),
+                    None => b,
+                });
+            }
+            summary.paint_batches += plan.batches;
+            summary.paint_paths_merged += plan.merges.len();
+            self.batches.push_back(plan);
+            return;
+        }
+        let keys: Vec<Option<BatchKey>> = elements
+            .iter()
+            .map(|e| {
+                e.as_ref().map(|e| BatchKey {
+                    attributes: e.attributes.clone(),
+                    batchable: e.batchable,
+                    bbox: batch_bbox(e),
+                })
+            })
+            .collect();
+        let before = summary.paint_batches;
+        let mut merges = Vec::new();
+        batch_equal_paint_paths_impl(elements, summary, &mut merges);
+        let bytes = keys.len() * std::mem::size_of::<Option<BatchKey>>()
+            + keys
+                .iter()
+                .flatten()
+                .map(|k| k.attributes.len())
+                .sum::<usize>()
+            + merges.len() * std::mem::size_of::<(usize, usize)>();
+        const LIMIT: usize = 64 * 1024 * 1024;
+        if bytes > LIMIT {
+            return;
+        }
+        while self.batches.len() >= 4
+            || bytes + self.batches.iter().map(|p| p.bytes).sum::<usize>() > LIMIT
+        {
+            self.batches.pop_front();
+        }
+        self.batches.push_back(BatchPlan {
+            keys,
+            merges,
+            batches: summary.paint_batches - before,
+            bytes,
+        });
+    }
+
     fn optimize(&mut self, path: &str) -> Option<(OptimizedElement, PathOptimization)> {
         if let Some(cached) = self.paths.get(path) {
             return cached.clone();
@@ -840,6 +962,27 @@ impl GeometryCache {
         let optimized = optimize_path(path, true, false);
         self.paths.insert(path.to_owned(), optimized.clone());
         optimized
+    }
+    fn optimize_stroke(&mut self, path: &str) -> Option<(OptimizedElement, PathOptimization)> {
+        if let Some(cached) = self.strokes.get(path) {
+            return cached.clone();
+        }
+        let optimized = optimize_path(path, true, true);
+        self.strokes.insert(path.to_owned(), optimized.clone());
+        optimized
+    }
+
+    fn stroke_outline(&mut self, path: &str, width: f32, butt: bool) -> Option<String> {
+        let key = (width.to_bits(), butt);
+        if let Some(cached) = self.stroke_outlines.get(path).and_then(|v| v.get(&key)) {
+            return cached.clone();
+        }
+        let outline = stroke_outline(path, width, butt);
+        self.stroke_outlines
+            .entry(path.to_owned())
+            .or_default()
+            .insert(key, outline.clone());
+        outline
     }
 }
 
@@ -1135,7 +1278,7 @@ pub(crate) fn serialize_filtered_with_alpha_cached(
             });
             context
         });
-    batch_equal_paint_paths(&mut paint_elements, &mut summary);
+    geometry_cache.batch(&mut paint_elements, &mut summary);
     let mut body = String::new();
     body.push_str("<g id=\"paint-layer\" fill-rule=\"evenodd\">");
     write_paint_elements(&mut body, &paint_elements, &mut summary);
@@ -1180,7 +1323,7 @@ pub(crate) fn serialize_filtered_with_alpha_cached(
             let _ = write!(body, "<path data-outline-band=\"true\" d=\"{path}\" fill=\"{fill}\" stroke=\"{fill}\" stroke-width=\"0.25\" clip-path=\"url(#outline-outer-{i})\" fill-rule=\"evenodd\"/>");
             summary.path_elements += 1;
         }
-        batch_equal_paint_paths(&mut elements, &mut summary);
+        geometry_cache.batch(&mut elements, &mut summary);
         write_paint_elements(&mut body, &elements, &mut summary);
     }
     body.push_str("</g>");
@@ -1234,7 +1377,7 @@ pub(crate) fn serialize_filtered_with_alpha_cached(
             attributes.push_str(" stroke-linecap=\"butt\"");
         }
         if !structural.color_patches.is_empty() {
-            if let Some(outline) = stroke_outline(
+            if let Some(outline) = geometry_cache.stroke_outline(
                 &data,
                 stroke.width,
                 matches!(stroke.role, "boundary-stroke" | "sampled-ink"),
@@ -1246,7 +1389,7 @@ pub(crate) fn serialize_filtered_with_alpha_cached(
                 let _ = write!(patch_mask_uses, "<path d=\"{outline}\"{clip}/>");
             }
         }
-        let (geometry, operations) = optimize_path(&data, true, true).unwrap_or((
+        let (geometry, operations) = geometry_cache.optimize_stroke(&data).unwrap_or((
             OptimizedElement::Path { data, bbox: None },
             Default::default(),
         ));
@@ -1398,6 +1541,35 @@ mod tests {
             attributes: attributes.to_string(),
             batchable: true,
         })
+    }
+
+    #[test]
+    fn cached_stroke_geometry_and_outlines_keep_cap_and_width_context() {
+        let mut cache = GeometryCache::default();
+        for path in [
+            "M0 0L24 0L24 24Z",
+            "M1.25 2.75C13 2.75 13 19 25 19",
+            "M0 0L0 0",
+        ] {
+            for _ in 0..2 {
+                assert_eq!(
+                    format!("{:?}", cache.optimize(path)),
+                    format!("{:?}", optimize_path(path, true, false))
+                );
+                assert_eq!(
+                    format!("{:?}", cache.optimize_stroke(path)),
+                    format!("{:?}", optimize_path(path, true, true))
+                );
+                for width in [0.13, 1.0, 5.75] {
+                    for butt in [false, true] {
+                        assert_eq!(
+                            cache.stroke_outline(path, width, butt),
+                            stroke_outline(path, width, butt)
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -1643,6 +1815,54 @@ mod tests {
             for y in 79..85 {
                 assert_eq!(pixmap.pixel(x, y).unwrap().alpha(), 255);
             }
+        }
+    }
+
+    #[test]
+    fn batch_plan_reuses_decisions_but_keeps_current_paths_and_paint_barriers() {
+        let mut cache = GeometryCache::default();
+        for version in [0, 1, 2, 3, 4, 0, 1] {
+            let mut elements = vec![
+                path("M0 0H4V4H0Z", (0.0, 0.0, 4.0, 4.0), "red"),
+                path("M20 0H24V4H20Z", (20.0, 0.0, 24.0, 4.0), "blue"),
+                path(
+                    if version == 1 {
+                        "M40 0H44V4H40Z M41 1V2H42V1Z"
+                    } else {
+                        "M40 0H44V4H40Z"
+                    },
+                    (40.0, 0.0, 44.0, 4.0),
+                    "red",
+                ),
+            ];
+            if version == 2 {
+                elements[1].as_mut().unwrap().batchable = false;
+            }
+            if version == 3 {
+                elements[2].as_mut().unwrap().attributes = "fill=\"blue\"".into();
+            }
+            if version == 4 {
+                elements[1].as_mut().unwrap().geometry = OptimizedElement::Rect {
+                    x: 20.0,
+                    y: 0.0,
+                    width: 4.0,
+                    height: 4.0,
+                };
+            }
+            let mut reference = elements.clone();
+            let mut expected = SvgSummary::default();
+            let mut actual = SvgSummary::default();
+            batch_equal_paint_paths(&mut reference, &mut expected);
+            cache.batch(&mut elements, &mut actual);
+            let mut a = String::new();
+            let mut b = String::new();
+            write_paint_elements(&mut a, &reference, &mut expected);
+            write_paint_elements(&mut b, &elements, &mut actual);
+            assert_eq!(a, b);
+            assert_eq!(
+                serde_json::to_value(expected).unwrap(),
+                serde_json::to_value(actual).unwrap()
+            );
         }
     }
 

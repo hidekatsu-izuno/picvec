@@ -1,0 +1,254 @@
+picvec stage load-resize: 0.006s (total 0.006s)
+picvec stage edge-roles: 16.606s (total 16.611s)
+picvec stage structural-analysis: 0.396s (total 17.007s)
+picvec stage perceptual-smoothing: 1.207s (total 18.214s)
+picvec segmentation substage setup: 0.123s
+picvec segmentation substage palette: 6.228s (117170 histogram cells, 11302 colours)
+picvec segmentation substage initial-components: 0.248s
+picvec segmentation substage small-components: 9.946s
+picvec segmentation substage compact: 0.076s
+picvec segmentation substage antialias: 0.945s
+picvec segmentation substage finalize: 0.226s (total 17.793s)
+picvec stage segmentation: 17.797s (total 36.011s)
+picvec stage boundary-regularization: 0.817s (total 36.828s)
+picvec stage paint-aware-merge: 21.230s (total 58.059s)
+picvec stage thin-paint-ownership: 1.204s (total 59.263s)
+picvec stage paint-topology-preservation: 3.910s (total 63.173s)
+picvec paint substage setup: 0.138s
+picvec paint substage initial: 20.992s (primary solid 6421, gain-bound solid 55309, low-range solid 21, model search 8177)
+picvec paint substage harmonize: 1.828s
+picvec paint substage couple: 0.497s
+picvec stage paint-fitting: 23.933s (total 87.106s)
+picvec layered merge candidates: considered 110199, evidence 109513, seam 199, layered 398, nonfinite 0, face 248, combined 170, accepted 69
+picvec stage source-supported-paint-merge: 4.372s (total 91.478s)
+picvec stage source-alpha-mask: 5.510s (total 96.988s)
+picvec stage exact-paint-merge: 0.012s (total 96.999s)
+picvec stage shared-geometry: 14.092s (total 111.091s)
+picvec stage paint-preview: 1.336s (total 112.427s)
+picvec stage structural-selection: 27.589s (total 140.015s)
+picvec stage final-svg: 0.853s (total 140.869s)
+{
+  "input_width": 4272,
+  "input_height": 2848,
+  "processing_width": 1600,
+  "processing_height": 1067,
+  "output": "/tmp/picvec-viewport-history/baseline-c29c9b5-valid/viewport2.svg",
+  "elapsed_seconds": 142.449588451,
+  "execution_threads": 4,
+  "complexity": {
+    "probe_width": 1024,
+    "probe_height": 683,
+    "probe_region_count": 362067,
+    "probe_region_density": 517688.22,
+    "edge_density": 0.78679055,
+    "normalized_region_density": 1.0,
+    "normalized_edge_density": 1.0,
+    "complexity": 1.0,
+    "target_pixels": 2000000.0,
+    "selected_dimension": 1600
+  },
+  "source_alpha": {
+    "detected": false,
+    "quantization_bits": 0,
+    "mask_paths": 0,
+    "removed_regions": 0
+  },
+  "chroma_key": {
+    "enabled": false,
+    "detected": false,
+    "border_coverage": 0.0,
+    "removed_regions": 0
+  },
+  "adaptive_refinement": {
+    "enabled": true,
+    "source_scale": 2.67,
+    "proposed_regions": 0,
+    "candidate_regions": 0,
+    "prefiltered_for_complexity": 0,
+    "evaluated_regions": 0,
+    "parallel_jobs": 0,
+    "accepted_regions": 0,
+    "rejected_for_quality": 0,
+    "rejected_for_complexity": 0,
+    "rejected_for_budget": 0,
+    "baseline_mean_delta_e": 5.069637,
+    "refined_mean_delta_e": 5.069637,
+    "estimated_global_delta_e_reduction": 0.0,
+    "added_svg_bytes": 0
+  },
+  "hierarchical_topology": {
+    "nodes": 926393,
+    "leaves": 640950,
+    "unit_leaves": 431731,
+    "represented_pixels": 1707200,
+    "compression_ratio": 2.6635463
+  },
+  "edge_roles": {
+    "skeleton_pixels": 190992,
+    "edge_chain_count": 29359,
+    "edge_chain_samples": 190755,
+    "boundary_pixels": 49036,
+    "ridge_role_pixels": 23223,
+    "ridge_on_boundary_pixels": 72346,
+    "unknown_pixels": 15425,
+    "visible_ridge_pixels": 4416,
+    "visible_ridge_coverage_pixels": 9416,
+    "dark_boundary_pixels": 33391,
+    "shading_pixels": 26656,
+    "face_barrier_pixels": 115453,
+    "visible_ridge_graph_edges": 296,
+    "visible_ridge_graph_edges_before_join": 306,
+    "dark_boundary_graph_edges": 1301,
+    "wide_dark_outline_graph_edges_before_join": 739,
+    "dark_boundary_candidates": 596,
+    "dark_ridge_candidates": 5660,
+    "dark_ridge_supported": 323,
+    "profile_ridge_candidates": 690,
+    "profile_ridge_extensions": 722,
+    "visible_ridge_graph_length": 2741.536,
+    "visible_ridge_median_width": 1.713117,
+    "visible_ridge_width_weighted_length": 5102.4043,
+    "dark_boundary_graph_length": 9463.411,
+    "dark_boundary_median_width": 1.4252199,
+    "gradient_threshold": 0.88670075,
+    "ridge_threshold": 0.65
+  },
+  "segmentation": {
+    "graph_edges": 3411733,
+    "coherent_domains": 0,
+    "coherent_regions_removed": 0,
+    "histogram_cells": 117170,
+    "palette_colours": 11302,
+    "initial_regions": 761872,
+    "raw_regions": 100673,
+    "corrected_regions": 79077,
+    "regularized_regions": 79077,
+    "merged_regions": 68951,
+    "forced_small_region_merges": 3692967,
+    "compatible_region_merges": 982946,
+    "paint_aware_region_merge_proposals": 2231,
+    "paint_aware_region_merges": 2231,
+    "exact_paint_region_merges": 921,
+    "source_supported_paint_merges": 69,
+    "preserved_independent_materials": 28084,
+    "antialias_pixels": 122275,
+    "core_sampled_regions": 751,
+    "antialias_split_regions": 21596,
+    "boundary_regularization_passes": 1,
+    "boundary_regularization_moved_pixels": 20081,
+    "boundary_regularization_source_edges": 58662,
+    "thin_paint_examined": 57596,
+    "thin_paint_protected": 2604,
+    "thin_paint_refined": 7619,
+    "thin_paint_preflight_rejected": 5503,
+    "thin_paint_reassigned_pixels": 21374,
+    "thin_paint_removed_regions": 6987,
+    "adaptive_patch_candidate_faces": 254,
+    "adaptive_patch_split_faces": 46,
+    "adaptive_patch_added_regions": 82,
+    "effective_minimum_area": 417,
+    "local_minimum_area": 29,
+    "local_median_area": 417,
+    "local_maximum_area": 417
+  },
+  "structural": {
+    "source_coverage_pixels": 132105,
+    "source_line_pixels": 107898,
+    "skeleton_pixels": 45288,
+    "stroke_count": 6043,
+    "underpainted_pixels": 17925,
+    "antialias_unmixed_pixels": 8509,
+    "silhouette_fill_count": 0,
+    "residual_legacy_strokes": 4487,
+    "visible_ridge_strokes": 914,
+    "boundary_profile_strokes": 586,
+    "recovered_boundary_strokes": 0,
+    "recovered_alpha_boundary_strokes": 0,
+    "suppressed_ellipse_retraces": 0,
+    "aligned_ellipse_strokes": 0
+  },
+  "ownership": {
+    "structural_strokes": 6043,
+    "paint_overlap": 0.2,
+    "overlap_is_underpaint": true
+  },
+  "gradients": {
+    "solid_regions": 65315,
+    "linear_regions": 2679,
+    "radial_regions": 823,
+    "layered_regions": 134,
+    "overlay_layers": 340,
+    "fitted_direction_linear_regions": 1779,
+    "fitted_focus_radial_regions": 129,
+    "coupled_linear_regions": 67,
+    "source_supported_paint_merges": 69,
+    "source_supported_boundary_edges_removed": 1254,
+    "maximum_stops": 5,
+    "primary_gate_active": true,
+    "primary_solid_regions": 6421,
+    "provable_solid_regions": 55330,
+    "gain_bound_solid_regions": 55309,
+    "low_range_solid_regions": 21,
+    "gradient_model_search_regions": 8177,
+    "coherent_field_regions": 13,
+    "full_fit_regions": 63507
+  },
+  "geometry": {
+    "regions": 68951,
+    "loops": 72843,
+    "empty_regions": 0,
+    "empty_region_pixels": 0,
+    "largest_empty_region": 0,
+    "source_boundary_edges": 1294406,
+    "shared_boundary_edges": 644536,
+    "simplified_vertices": 580384,
+    "cubic_segments": 507015,
+    "line_segments": 5617,
+    "rectangles": 0,
+    "circles": 0,
+    "ellipses": 0,
+    "covered_holes_removed": 1538,
+    "shared_loop_fallbacks": 0,
+    "shared_loop_missing_edges": 0,
+    "shared_loop_discontinuities": 0,
+    "shared_loop_invalid_areas": 0,
+    "adaptive_optimal_polygons": 5455,
+    "continuity_faired_masters": 55156,
+    "fitted_ellipse_contours": 1,
+    "fitted_bezier_contours": 2,
+    "regularized_corner_excursions": 38,
+    "regularized_corner_vertices": 848,
+    "shared_curve_downgrades": 0
+  },
+  "optimization": {
+    "input_regions": 68951,
+    "primitive_regions": 0,
+    "path_regions": 68951,
+    "shared_gradient_regions": 0
+  },
+  "svg": {
+    "path_elements": 49723,
+    "rect_elements": 85,
+    "circle_elements": 0,
+    "ellipse_elements": 0,
+    "line_elements": 2314,
+    "linear_gradients": 2769,
+    "radial_gradients": 1201,
+    "structural_strokes": 6043,
+    "structural_color_patches": 272,
+    "gradient_stops": 15356,
+    "linear_cubics_to_lines": 33185,
+    "redundant_segments_removed": 9920,
+    "arc_segments": 9509,
+    "merged_arc_segments": 2,
+    "paint_paths_merged": 23484,
+    "paint_batches": 9299,
+    "alpha_mask_paths": 0,
+    "outline_bands": 0,
+    "outline_color_patches": 0,
+    "outline_paint_regions_removed": 0,
+    "outline_structural_strokes_removed": 0,
+    "bytes": 33312530
+  }
+}
+wrote /tmp/picvec-viewport-history/baseline-c29c9b5-valid/viewport2.svg (1600x1067, 68951 regions, 142.450s)

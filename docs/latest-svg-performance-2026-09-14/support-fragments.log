@@ -1,0 +1,18 @@
+
+running 1 test
+fragment render scale=1 y=0: full=0.081s cached=0.001s
+fragment warm scale=1 y=0: 0.001s
+fragment render scale=1 y=704: full=0.215s cached=0.006s
+fragment warm scale=1 y=704: 0.003s
+fragment render scale=1 y=1408: full=0.004s cached=0.000s
+fragment warm scale=1 y=1408: 0.000s
+fragment render scale=4 y=0: full=1.200s cached=0.006s
+fragment warm scale=4 y=0: 0.005s
+fragment render scale=4 y=704: full=4.569s cached=0.051s
+fragment warm scale=4 y=704: 0.012s
+fragment render scale=4 y=1408: full=0.005s cached=0.001s
+fragment warm scale=4 y=1408: 0.000s
+test svg_fragments::tests::emitted_core_fragments_match_full_renderer ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 455 filtered out; finished in 6.34s
+

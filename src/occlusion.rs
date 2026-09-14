@@ -8,6 +8,7 @@ use resvg::{
     tiny_skia::{Pixmap, Transform},
     usvg::{Options, Tree},
 };
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 struct Completion<'a> {
     width: usize,
@@ -24,6 +25,8 @@ struct BaselineBand {
 struct Baseline {
     size: resvg::usvg::Size,
     bands: Vec<BaselineBand>,
+    fragments: Option<crate::svg_fragments::Cache>,
+    last_failure: AtomicUsize,
 }
 
 impl Baseline {
@@ -44,7 +47,12 @@ impl Baseline {
                 BaselineBand { scale, y, pixels }
             })
             .collect();
-        Some(Self { size, bands })
+        Some(Self {
+            size,
+            bands,
+            fragments: crate::svg_fragments::Cache::new(svg),
+            last_failure: AtomicUsize::new(usize::MAX),
+        })
     }
 
     #[cfg(test)]
@@ -80,26 +88,56 @@ impl Baseline {
         completion: Option<&Completion<'_>>,
         selected: &[bool],
     ) -> bool {
+        self.equivalent_bands_impl(after, completion, selected, true)
+    }
+
+    fn equivalent_bands_impl(
+        &self,
+        after: &str,
+        completion: Option<&Completion<'_>>,
+        selected: &[bool],
+        accelerate: bool,
+    ) -> bool {
+        self.last_failure.store(usize::MAX, Ordering::Relaxed);
         assert_eq!(selected.len(), self.bands.len());
-        let Ok(tree) = Tree::from_str(after, &Options::default()) else {
-            return false;
+        let scene = if accelerate {
+            self.fragments.as_ref().and_then(|cache| cache.scene(after))
+        } else {
+            None
         };
-        if self.size != tree.size() {
-            return false;
-        }
+        let tree = if scene.is_none() {
+            let Ok(tree) = Tree::from_str(after, &Options::default()) else {
+                return false;
+            };
+            if self.size != tree.size() {
+                return false;
+            }
+            Some(tree)
+        } else {
+            None
+        };
         // Every candidate uses the same original pixels; accepted changes never
         // become the baseline, so neither rounding nor tolerances accumulate.
-        self.bands
-            .par_iter()
-            .zip(selected.par_iter())
-            .all(|(band, &selected)| {
-                if !selected {
-                    return true;
-                }
+        // Do not start expensive 4x jobs while native pixels can already
+        // reject a trial. Both scales still use the same complete RGBA gates.
+        let check = |band_index: usize| {
+            if !selected[band_index] {
+                return true;
+            }
+            let band = &self.bands[band_index];
+            let passed = (|| {
                 let p = &band.pixels;
                 let tw = p.width() as usize;
                 let mut q = Pixmap::new(p.width(), p.height()).unwrap();
-                resvg::render(&tree, band_transform(band.scale, band.y), &mut q.as_mut());
+                if let Some(scene) = &scene {
+                    scene.render(band.scale, band.y, &mut q);
+                } else {
+                    resvg::render(
+                        tree.as_ref().unwrap(),
+                        band_transform(band.scale, band.y),
+                        &mut q.as_mut(),
+                    );
+                }
                 for (k, (p, q)) in p
                     .data()
                     .chunks_exact(4)
@@ -131,7 +169,24 @@ impl Baseline {
                     }
                 }
                 true
-            })
+            })();
+            if !passed {
+                let _ = self.last_failure.compare_exchange(
+                    usize::MAX,
+                    band_index,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                );
+            }
+            passed
+        };
+        [1usize, 4].into_iter().all(|scale| {
+            self.bands
+                .par_iter()
+                .enumerate()
+                .filter(|(_, band)| band.scale == scale)
+                .all(|(i, _)| check(i))
+        })
     }
 }
 
@@ -174,6 +229,49 @@ fn affected_rows(path: &str, width: usize, height: usize) -> (f32, f32) {
     };
     let bounds = node.abs_bounding_box();
     (bounds.top() - 2.0, bounds.bottom() + 2.0)
+}
+
+/// Bisection often retries an ancestor's rejected geometry after accepting its
+/// left half. Keep exact path strings, not probabilistic hashes. A cached bad
+/// pixel is reusable only if its band is selected by the new trial too.
+#[derive(Default)]
+struct RejectedTrials {
+    entries: std::collections::VecDeque<(Vec<String>, usize, usize)>,
+    bytes: usize,
+    hits: usize,
+}
+
+impl RejectedTrials {
+    fn contains(&mut self, paths: &[&str], selected: &[bool]) -> bool {
+        let found = self.entries.iter().position(|(key, band, _)| {
+            selected[*band] && key.iter().map(String::as_str).eq(paths.iter().copied())
+        });
+        if let Some(index) = found {
+            let entry = self.entries.remove(index).unwrap();
+            self.entries.push_back(entry);
+            self.hits += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn insert(&mut self, paths: &[&str], band: usize) {
+        const LIMIT: usize = 64 * 1024 * 1024;
+        let bytes = paths
+            .iter()
+            .map(|p| p.len() + std::mem::size_of::<String>())
+            .sum::<usize>();
+        if band == usize::MAX || bytes > LIMIT {
+            return;
+        }
+        while !self.entries.is_empty() && (self.entries.len() >= 8 || self.bytes + bytes > LIMIT) {
+            self.bytes -= self.entries.pop_front().unwrap().2;
+        }
+        self.entries
+            .push_back((paths.iter().map(|p| p.to_string()).collect(), band, bytes));
+        self.bytes += bytes;
+    }
 }
 
 pub(crate) fn simplify<F>(
@@ -227,10 +325,11 @@ where
         .collect();
     let mut current = original.clone();
     let mut removed = 0;
-    // Valid only for the exact SVG in `current`, against the original
-    // baseline and the same immutable completion evidence. Replaced, never
-    // unioned, when another candidate is accepted.
-    let mut verified = vec![false; baseline.bands.len()];
+    let mut watched: Vec<_> = candidates.iter().map(|item| item.0).collect();
+    watched.sort_unstable();
+    watched.dedup();
+    let mut rejections = RejectedTrials::default();
+    let mut timings = (0usize, std::time::Duration::ZERO, std::time::Duration::ZERO);
     fn visit<F>(
         items: &[(usize, String, (f32, f32))],
         geometry: &mut [RegionGeometry],
@@ -238,7 +337,9 @@ where
         completion: &Completion<'_>,
         current: &mut (String, SvgSummary),
         removed: &mut usize,
-        verified: &mut Vec<bool>,
+        watched: &[usize],
+        rejections: &mut RejectedTrials,
+        timings: &mut (usize, std::time::Duration, std::time::Duration),
         serialize: &mut F,
     ) where
         F: FnMut(&[RegionGeometry]) -> (String, SvgSummary),
@@ -259,14 +360,28 @@ where
         }
         let ranges: Vec<_> = items.iter().map(|item| item.2).collect();
         let selected = baseline.selected_bands(&ranges);
-        let candidate = serialize(geometry);
-        if candidate.0.len() < current.0.len()
-            && baseline.equivalent_bands(&candidate.0, Some(completion), &selected)
-        {
-            *current = candidate;
-            *removed += items.len();
-            *verified = selected;
-            return;
+        let paths: Vec<_> = watched
+            .iter()
+            .map(|&i| geometry[i].occlusion_path_data.as_deref().unwrap())
+            .collect();
+        timings.0 += 1;
+        if !rejections.contains(&paths, &selected) {
+            let started = std::time::Instant::now();
+            let candidate = serialize(geometry);
+            timings.1 += started.elapsed();
+            let started = std::time::Instant::now();
+            let profitable = candidate.0.len() < current.0.len();
+            let accepted =
+                profitable && baseline.equivalent_bands(&candidate.0, Some(completion), &selected);
+            timings.2 += started.elapsed();
+            if accepted {
+                *current = candidate;
+                *removed += items.len();
+                return;
+            }
+            if profitable {
+                rejections.insert(&paths, baseline.last_failure.load(Ordering::Relaxed));
+            }
         }
         for (i, data) in backup {
             geometry[i].occlusion_path_data = data;
@@ -280,7 +395,9 @@ where
                 completion,
                 current,
                 removed,
-                verified,
+                watched,
+                rejections,
+                timings,
                 serialize,
             );
             visit(
@@ -290,7 +407,9 @@ where
                 completion,
                 current,
                 removed,
-                verified,
+                watched,
+                rejections,
+                timings,
                 serialize,
             );
         }
@@ -302,17 +421,29 @@ where
         &completion,
         &mut current,
         &mut removed,
-        &mut verified,
+        &watched,
+        &mut rejections,
+        &mut timings,
         &mut serialize,
     );
-    // The band bounds are an acceleration hint, never the final authority.
-    // Every band of the complete accumulated output must pass. The last
-    // accepted candidate already checked some of them for this exact SVG.
-    // Older candidates' checks cannot be reused: their SVG was different.
-    let unchecked: Vec<_> = verified.iter().map(|&checked| !checked).collect();
+    if cfg!(feature = "diagnostics") && std::env::var_os("PICVEC_OCCLUSION_DIAGNOSTICS").is_some() {
+        eprintln!(
+            "picvec hole trials: {} calls, {} cached rejections, serialization {:.3}s, validation {:.3}s",
+            timings.0, rejections.hits,
+            timings.1.as_secs_f64(),
+            timings.2.as_secs_f64()
+        );
+    }
+    // Independently validate the complete accumulated SVG with the original
+    // parser and renderer at both scales, even bands checked through cached
+    // fragments. Trial caches never become the final authority.
     if removed > 0
-        && unchecked.iter().any(|&check| check)
-        && !baseline.equivalent_bands(&current.0, Some(&completion), &unchecked)
+        && !baseline.equivalent_bands_impl(
+            &current.0,
+            Some(&completion),
+            &vec![true; baseline.bands.len()],
+            false,
+        )
     {
         for (g, saved) in geometry.iter_mut().zip(saved_paths) {
             g.occlusion_path_data = saved;

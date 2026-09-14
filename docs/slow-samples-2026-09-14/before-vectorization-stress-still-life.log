@@ -1,0 +1,21 @@
+picvec stage load-resize: 0.006s (total 0.006s)
+picvec stage edge-roles: 18.201s (total 18.207s)
+picvec stage structural-analysis: 0.636s (total 18.843s)
+picvec stage perceptual-smoothing: 0.693s (total 19.536s)
+picvec segmentation substage setup: 0.028s
+picvec segmentation substage palette: 0.270s (59147 histogram cells, 1874 colours)
+picvec segmentation substage initial-components: 0.431s
+picvec segmentation substage small-components: 3.393s
+picvec segmentation substage compact: 0.104s
+picvec segmentation substage antialias: 1.583s
+picvec segmentation substage finalize: 0.090s (total 5.901s)
+picvec stage segmentation: 14.543s (total 34.079s)
+picvec stage boundary-regularization: 0.247s (total 34.325s)
+picvec stage paint-aware-merge: 1.410s (total 35.736s)
+picvec stage thin-paint-ownership: 6.413s (total 42.148s)
+picvec stage paint-topology-preservation: 4.433s (total 46.582s)
+picvec paint substage setup: 0.041s
+picvec paint substage initial: 11.677s (primary solid 0, gain-bound solid 7251, low-range solid 3, model search 5333)
+picvec paint substage harmonize: 0.556s
+picvec paint substage couple: 0.703s
+picvec stage paint-fitting: 13.201s (total 59.783s)

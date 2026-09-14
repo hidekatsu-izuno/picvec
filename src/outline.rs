@@ -5,6 +5,7 @@ use crate::{
 use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Debug)]
+#[cfg_attr(test, derive(PartialEq))]
 pub(crate) struct OutlineBand {
     pub outer: String,
     pub inner: String,
@@ -214,7 +215,34 @@ pub(crate) fn propose(
     segmentation: &Segmentation,
     contours: &[crate::geometry::ClosedContour],
 ) -> Vec<OutlineBand> {
-    propose_with_alignment(source, matte, segmentation, contours, false)
+    use rayon::prelude::*;
+    // Fitting each contour is independent; ownership and fallback priority
+    // are not. Evaluate bounded batches, then apply the original greedy order.
+    let models: Vec<_> = contours
+        .iter()
+        .flat_map(|model| std::iter::once(model).chain(model.fallback.as_deref()))
+        .collect();
+    let mut result: Vec<OutlineBand> = Vec::new();
+    for batch in models.chunks(rayon::current_num_threads().clamp(1, 4)) {
+        let candidates: Vec<_> = batch
+            .par_iter()
+            .map(|model| {
+                let mut single = (**model).clone();
+                // Fallbacks are already separate entries in the original order.
+                single.fallback = None;
+                propose_with_alignment(source, matte, segmentation, &[single], false)
+            })
+            .collect();
+        for band in candidates.into_iter().flatten() {
+            if result
+                .iter()
+                .all(|previous| previous.regions.is_disjoint(&band.regions))
+            {
+                result.push(band);
+            }
+        }
+    }
+    result
 }
 
 fn propose_with_alignment(
@@ -795,6 +823,38 @@ mod tests {
             .collect();
         contour.push(contour[0]);
         (source, segmentation, contour)
+    }
+
+    #[test]
+    fn parallel_contours_keep_serial_ownership_and_fallback_priority() {
+        let (source, segmentation, points) = disc([1.0; 3]);
+        let inner: Vec<_> = points
+            .iter()
+            .map(|p| Point {
+                x: 48.0 + (p.x - 48.0) * 28.0 / 30.0,
+                y: 48.0 + (p.y - 48.0) * 28.0 / 30.0,
+            })
+            .collect();
+        let outer = crate::geometry::ClosedContour::from_points(&points);
+        let inner = crate::geometry::ClosedContour::from_points(&inner);
+        let mut fallback = outer.clone();
+        fallback.fallback = Some(Box::new(inner.clone()));
+        for contours in [
+            vec![outer.clone(), inner.clone()],
+            vec![inner.clone(), outer.clone()],
+            vec![fallback.clone(), outer.clone(), fallback, inner],
+        ] {
+            let expected = propose_with_alignment(&source, None, &segmentation, &contours, false);
+            assert!(!expected.is_empty());
+            for count in [1, 4] {
+                let pool = rayon::ThreadPoolBuilder::new()
+                    .num_threads(count)
+                    .build()
+                    .unwrap();
+                let actual = pool.install(|| propose(&source, None, &segmentation, &contours));
+                assert_eq!(actual, expected, "threads={count}");
+            }
+        }
     }
 
     #[test]

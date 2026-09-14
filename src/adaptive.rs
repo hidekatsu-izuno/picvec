@@ -620,10 +620,15 @@ pub(crate) fn plan_candidates<S: RasterSource + ?Sized>(
     };
     let support = foreground_support(source, matte);
     let mut regions = object_regions(&support, source.width(), source.height(), tile_dimension);
-    if regions.is_empty() && source.width().max(source.height()) > tile_dimension {
-        // No safe small replacement exists. A complete source model is still
-        // a valid candidate: it introduces no crop joins and must pass exactly
-        // the same source-error and representation-cost tests as local models.
+    if regions.is_empty()
+        && source.width().max(source.height()) > tile_dimension
+        && support.iter().any(|&foreground| !foreground)
+    {
+        // A separated oversized object can use a complete source model with
+        // no crop joins. With no separation evidence (all-foreground support),
+        // keep the selected global model instead of unconditionally rerunning
+        // a photograph at its entire input resolution. Oversized illustrations
+        // still pass the usual measured source-error and byte-cost gates.
         regions.push(whole);
     }
     let mut candidates = regions
@@ -1023,6 +1028,8 @@ mod tests {
         assert!(support.iter().all(|v| *v));
         assert!(object_regions(&support, 400, 240, 300).is_empty());
         assert_eq!(object_regions(&support, 400, 240, 400).len(), 1);
+        let coarse = Raster::blank(100, 60, [1.0; 3]);
+        assert!(plan_candidates(&source, None, &coarse, &vec![0; 100 * 60], 300, 64, 0.75).is_empty());
     }
 
     #[test]

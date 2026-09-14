@@ -116,18 +116,55 @@ fn correlate_axis(
         .par_chunks_mut(width)
         .enumerate()
         .for_each(|(y, row)| {
-            for (x, output) in row.iter_mut().enumerate() {
-                let mut sum = 0.0_f64;
-                for (position, &weight) in weights.iter().enumerate() {
-                    let offset = position as isize - radius;
-                    let (sample_x, sample_y) = if axis == 0 {
-                        (x, reflect_index(y as isize + offset, height))
+            // Border lookup is shared by the entire row, rather than repeated for
+            // every pixel and kernel tap. Each SIMD lane retains the original f64
+            // multiply/add sequence; no reassociation or fused multiply-add.
+            let rows: Vec<usize> = if axis == 0 {
+                (0..weights.len())
+                    .map(|p| reflect_index(y as isize + p as isize - radius, height) * width)
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let padded: Vec<f32> = if axis == 1 {
+                (0..width + weights.len() - 1)
+                    .map(|p| input[y * width + reflect_index(p as isize - radius, width)])
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let vector_end = width / 4 * 4;
+            for x in (0..vector_end).step_by(4) {
+                let mut sum = wide::f64x4::ZERO;
+                for (p, &weight) in weights.iter().enumerate() {
+                    let values = if axis == 0 {
+                        &input[rows[p] + x..][..4]
                     } else {
-                        (reflect_index(x as isize + offset, width), y)
+                        &padded[x + p..][..4]
                     };
-                    sum += input[sample_y * width + sample_x] as f64 * weight;
+                    let samples = wide::f64x4::from([
+                        values[0] as f64,
+                        values[1] as f64,
+                        values[2] as f64,
+                        values[3] as f64,
+                    ]);
+                    sum = sum + samples * wide::f64x4::splat(weight);
                 }
-                *output = sum as f32;
+                for (out, value) in row[x..x + 4].iter_mut().zip(sum.to_array()) {
+                    *out = value as f32;
+                }
+            }
+            for x in vector_end..width {
+                let mut sum = 0.0_f64;
+                for (p, &weight) in weights.iter().enumerate() {
+                    let value = if axis == 0 {
+                        input[rows[p] + x]
+                    } else {
+                        padded[x + p]
+                    };
+                    sum += value as f64 * weight;
+                }
+                row[x] = sum as f32;
             }
         });
     output
@@ -281,30 +318,48 @@ fn morphology(
     offsets: &[(isize, isize)],
     dilate: bool,
 ) -> Vec<f32> {
-    let mut output = vec![0.0_f32; input.len()];
-    output
-        .par_chunks_mut(width)
-        .enumerate()
-        .for_each(|(y, row)| {
-            for (x, output) in row.iter_mut().enumerate() {
-                let mut selected = if dilate {
-                    f32::NEG_INFINITY
-                } else {
-                    f32::INFINITY
-                };
-                for &(offset_x, offset_y) in offsets {
-                    let sample_x = reflect_index(x as isize + offset_x, width);
-                    let sample_y = reflect_index(y as isize + offset_y, height);
-                    let value = input[sample_y * width + sample_x];
-                    selected = if dilate {
-                        selected.max(value)
-                    } else {
-                        selected.min(value)
-                    };
+    // A disk is a union of horizontal intervals. Sliding each distinct
+    // interval once changes O(pixels * radius²) work to O(pixels * radius),
+    // without replacing the disk by a square or changing reflected borders.
+    let mut spans = std::collections::BTreeMap::<usize, Vec<isize>>::new();
+    for (i, &(dx, dy)) in offsets.iter().enumerate() {
+        if offsets.get(i + 1).is_none_or(|&(_, next_y)| next_y != dy) {
+            spans.entry(dx as usize).or_default().push(dy);
+        }
+    }
+    let initial = if dilate {
+        f32::NEG_INFINITY
+    } else {
+        f32::INFINITY
+    };
+    let mut output = vec![initial; input.len()];
+    for (radius, rows) in spans {
+        let mut horizontal = vec![0.0; input.len()];
+        horizontal
+            .par_chunks_mut(width)
+            .zip(input.par_chunks(width))
+            .for_each(|(out, row)| {
+                out.copy_from_slice(&crate::extrema::sliding(row, radius, dilate, true));
+            });
+        output
+            .par_chunks_mut(width)
+            .enumerate()
+            .for_each(|(y, out)| {
+                for &dy in &rows {
+                    let sy = reflect_index(y as isize + dy, height);
+                    for (selected, &value) in out
+                        .iter_mut()
+                        .zip(&horizontal[sy * width..(sy + 1) * width])
+                    {
+                        *selected = if dilate {
+                            selected.max(value)
+                        } else {
+                            selected.min(value)
+                        };
+                    }
                 }
-                *output = selected;
-            }
-        });
+            });
+    }
     output
 }
 
@@ -743,7 +798,99 @@ pub fn adjust_paint_samples(image: &Raster, original: &[bool]) -> Vec<bool> {
 }
 
 #[cfg(test)]
+fn correlate_axis_reference(
+    input: &[f32],
+    width: usize,
+    height: usize,
+    axis: usize,
+    weights: &[f64],
+) -> Vec<f32> {
+    let radius = (weights.len() / 2) as isize;
+    let mut output = vec![0.0_f32; input.len()];
+    output
+        .par_chunks_mut(width)
+        .enumerate()
+        .for_each(|(y, row)| {
+            for (x, output) in row.iter_mut().enumerate() {
+                let mut sum = 0.0_f64;
+                for (position, &weight) in weights.iter().enumerate() {
+                    let offset = position as isize - radius;
+                    let (sample_x, sample_y) = if axis == 0 {
+                        (x, reflect_index(y as isize + offset, height))
+                    } else {
+                        (reflect_index(x as isize + offset, width), y)
+                    };
+                    sum += input[sample_y * width + sample_x] as f64 * weight;
+                }
+                *output = sum as f32;
+            }
+        });
+    output
+}
+
+#[cfg(test)]
 mod tests {
+
+    #[test]
+    fn vector_correlation_matches_scalar_bits_at_reflected_edges() {
+        for (width, height) in [(1, 1), (2, 7), (3, 2), (4, 5), (7, 9), (39, 17)] {
+            let input: Vec<f32> = (0..width * height)
+                .map(|i| ((i * 7919 + 13) % 997) as f32 / 997.0 - 0.5)
+                .collect();
+            for sigma in [0.5, 1.5, 6.0, 23.0] {
+                for order in [0, 1] {
+                    let weights = gaussian_kernel(sigma, order, 8.0);
+                    for axis in [0, 1] {
+                        let expected =
+                            correlate_axis_reference(&input, width, height, axis, &weights);
+                        let actual = correlate_axis(&input, width, height, axis, &weights);
+                        assert_eq!(
+                            actual.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                            expected.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                            "{width}x{height}, sigma={sigma}, order={order}, axis={axis}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn disk_morphology_matches_brute_force() {
+        for (width, height) in [(1, 1), (2, 7), (37, 19)] {
+            let input: Vec<f32> = (0..width * height)
+                .map(|i| ((i * 7919 + 13) % 997) as f32 / 997.0)
+                .collect();
+            for radius in [0, 1, 3, 11, 17, 23, 34] {
+                let offsets = disk_offsets(radius);
+                for dilate in [false, true] {
+                    let expected: Vec<f32> = (0..input.len())
+                        .map(|i| {
+                            offsets
+                                .iter()
+                                .map(|&(dx, dy)| {
+                                    input[reflect_index((i / width) as isize + dy, height) * width
+                                        + reflect_index((i % width) as isize + dx, width)]
+                                })
+                                .fold(
+                                    if dilate {
+                                        f32::NEG_INFINITY
+                                    } else {
+                                        f32::INFINITY
+                                    },
+                                    |a, b| if dilate { a.max(b) } else { a.min(b) },
+                                )
+                        })
+                        .collect();
+                    assert_eq!(
+                        morphology(&input, width, height, &offsets, dilate),
+                        expected
+                    );
+                }
+            }
+        }
+    }
+
     use super::*;
 
     #[test]
