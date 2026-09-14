@@ -4,6 +4,8 @@
 
 use crate::chroma::AlphaMatte;
 use crate::raster::{RasterSource, SourceRaster};
+use crate::svg_document::attrs;
+use crate::svg_document::{Document, Elements};
 
 pub(crate) struct Separator {
     pub rect: [f32; 4],
@@ -161,25 +163,29 @@ pub(crate) fn extract(
     (separators, cleaned)
 }
 
-pub(crate) fn prepend(document: &mut String, separators: &[Separator], scale: [f32; 2]) {
+pub(crate) fn prepend(document: &mut Document, separators: &[Separator], scale: [f32; 2]) {
     if separators.is_empty() {
         return;
     }
-    let Some(root) = document.find("<svg") else {
-        return;
-    };
-    let Some(end) = document[root..].find('>') else {
-        return;
-    };
-    let mut layer = String::from("<g data-source-separators=\"true\">");
+    let mut layer = Elements::new();
+    layer.open("g", attrs([("data-source-separators", "true".into())]));
     for s in separators {
         let [x, y, w, h] = s.rect;
         let [r, g, b] = s.color.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8);
-        layer.push_str(&format!("<rect x=\"{:.4}\" y=\"{:.4}\" width=\"{:.4}\" height=\"{:.4}\" fill=\"#{r:02x}{g:02x}{b:02x}\" opacity=\"{:.4}\"/>",
-            x*scale[0],y*scale[1],w*scale[0],h*scale[1],s.opacity));
+        layer.leaf(
+            "rect",
+            attrs([
+                ("x", format!("{0:.4}", x * scale[0])),
+                ("y", format!("{0:.4}", y * scale[1])),
+                ("width", format!("{0:.4}", w * scale[0])),
+                ("height", format!("{0:.4}", h * scale[1])),
+                ("fill", format!("#{r:02x}{g:02x}{b:02x}")),
+                ("fill-opacity", format!("{0:.4}", s.opacity)),
+            ]),
+        );
     }
-    layer.push_str("</g>");
-    document.insert_str(root + end + 1, &layer);
+    layer.close();
+    document.root_mut().children.splice(..0, layer.roots);
 }
 
 #[cfg(test)]

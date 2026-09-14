@@ -1,6 +1,7 @@
 //! Keep source-supported soft details without blurring sharp lettering.
+use crate::svg_document::attrs;
+use crate::svg_document::{Document, Elements};
 use crate::{chroma::AlphaMatte, raster::Raster, Result};
-use std::fmt::Write;
 
 #[derive(Clone, Copy)]
 struct Patch {
@@ -126,18 +127,12 @@ fn propose(source: &Raster, render: &Raster, matte: Option<&AlphaMatte>) -> Vec<
     proposals
 }
 
-fn document_with_patches(document: &str, patches: &[Patch]) -> String {
+fn document_with_patches(document: &Document, patches: &[Patch]) -> Document {
     if patches.is_empty() {
-        return document.into();
+        return document.clone();
     }
-    let Some(body_start) = document.find("</defs>").map(|p| p + 7) else {
-        return document.into();
-    };
-    let Some(body_end) = document.rfind("</svg>") else {
-        return document.into();
-    };
-    let mut result = document[..body_start].to_string();
-    result.push_str("<defs>");
+    let mut result = Elements::new();
+    result.open("defs", vec![]);
     let sigmas = [0.6_f32, 1.0, 1.5, 2.0];
     for (i, &sigma) in sigmas.iter().enumerate() {
         let group: Vec<_> = patches.iter().filter(|p| p.sigma == sigma).collect();
@@ -146,7 +141,29 @@ fn document_with_patches(document: &str, patches: &[Patch]) -> String {
         }
         // One reused vector instance per blur scale, not per patch. This
         // keeps the renderer's expanded instance tree bounded.
-        let _ = write!(result, "<filter id=\"soft-filter-{i}\" x=\"-2%\" y=\"-2%\" width=\"104%\" height=\"104%\" color-interpolation-filters=\"sRGB\"><feGaussianBlur stdDeviation=\"{sigma}\"/></filter><clipPath id=\"soft-clip-{i}\" clipPathUnits=\"userSpaceOnUse\">");
+        result.open(
+            "filter",
+            attrs([
+                ("id", format!("soft-filter-{i}")),
+                ("x", "-2%".into()),
+                ("y", "-2%".into()),
+                ("width", "104%".into()),
+                ("height", "104%".into()),
+                ("color-interpolation-filters", "sRGB".into()),
+            ]),
+        );
+        result.leaf(
+            "feGaussianBlur",
+            attrs([("stdDeviation", format!("{sigma}"))]),
+        );
+        result.close();
+        result.open(
+            "clipPath",
+            attrs([
+                ("id", format!("soft-clip-{i}")),
+                ("clipPathUnits", "userSpaceOnUse".into()),
+            ]),
+        );
         // Join adjacent equal-scale patches before cropping. An internal
         // tile edge must not leave a stripe of the original hard geometry.
         let mut rows: Vec<(usize, usize, usize, usize)> = Vec::new();
@@ -173,40 +190,50 @@ fn document_with_patches(document: &str, patches: &[Patch]) -> String {
             rectangles.push(row);
         }
         for (x, y, w, h) in rectangles {
-            let _ = write!(
-                result,
-                "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\"/>",
-                x + 4,
-                y + 4,
-                w - 8,
-                h - 8
+            result.leaf(
+                "rect",
+                attrs([
+                    ("x", (x + 4).to_string()),
+                    ("y", (y + 4).to_string()),
+                    ("width", (w - 8).to_string()),
+                    ("height", (h - 8).to_string()),
+                ]),
             );
         }
-        result.push_str("</clipPath>");
+        result.close();
     }
-    result.push_str("</defs><g id=\"soft-source\">");
-    result.push_str(&document[body_start..body_end]);
-    result.push_str("</g>");
+    result.close();
+    let mut source = Elements::new();
+    source.roots = document.root().children.clone();
+    result.append(source.wrap("g", attrs([("id", "soft-source".into())])));
     for (i, &sigma) in sigmas.iter().enumerate() {
         if !patches.iter().any(|p| p.sigma == sigma) {
             continue;
         }
-        let _ = write!(result, "<g clip-path=\"url(#soft-clip-{i})\"><use href=\"#soft-source\" filter=\"url(#soft-filter-{i})\"/>");
-        result.push_str("</g>");
+        result.open("g", attrs([("clip-path", format!("url(#soft-clip-{i})"))]));
+        result.leaf(
+            "use",
+            attrs([
+                ("href", "#soft-source".into()),
+                ("filter", format!("url(#soft-filter-{i})")),
+            ]),
+        );
+        result.close();
     }
-    result.push_str("</svg>");
-    result
+    let mut root = document.root().clone();
+    root.children = result.roots;
+    Document::new(root)
 }
 
 pub(crate) fn refine(
-    document: &str,
+    document: &Document,
     source: &Raster,
     matte: Option<&AlphaMatte>,
     render: impl Fn(&str) -> Result<Raster>,
-) -> Result<String> {
+) -> Result<Document> {
     // Repainting a blurred copy would accumulate intrinsic face opacity.
     if matte.is_some() {
-        return Ok(document.into());
+        return Ok(document.clone());
     }
     // Coloured illustrations cannot supply neutral shading evidence here.
     if source
@@ -219,12 +246,12 @@ pub(crate) fn refine(
         .count()
         > source.pixels.len() / 20
     {
-        return Ok(document.into());
+        return Ok(document.clone());
     }
     let before = render(document)?;
     let candidates = propose(source, &before, matte);
     if candidates.is_empty() {
-        return Ok(document.into());
+        return Ok(document.clone());
     }
     let trial = document_with_patches(document, &candidates);
     let after = render(&trial)?;
@@ -298,7 +325,7 @@ mod tests {
                     .collect(),
             ))
         };
-        let before = render(document).unwrap();
+        let before = render(&Document::from((document).to_string())).unwrap();
         let input = image::RgbImage::from_fn(72, 72, |x, y| {
             image::Rgb(
                 before
@@ -314,7 +341,13 @@ mod tests {
                 .map(|p| p.0.map(|v| v as f32 / 255.0))
                 .collect(),
         );
-        let updated = refine(document, &source, None, render).unwrap();
+        let updated = refine(
+            &Document::from((document).to_string()),
+            &source,
+            None,
+            render,
+        )
+        .unwrap();
         assert!(updated.contains("feGaussianBlur"));
         assert!(!updated.contains("<image"));
         let after = render(&updated).unwrap();
@@ -332,7 +365,16 @@ mod tests {
             "internal tile edge retained a hard stripe"
         );
         assert_eq!(before.get(10, 10), after.get(10, 10));
-        assert_eq!(refine(document, &before, None, render).unwrap(), document);
+        assert_eq!(
+            refine(
+                &Document::from((document).to_string()),
+                &before,
+                None,
+                render
+            )
+            .unwrap(),
+            Document::from(document)
+        );
     }
 
     #[test]

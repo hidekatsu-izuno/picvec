@@ -2,6 +2,7 @@
 //! code value at native size and 4x, except for filling AA gaps along opaque
 //! material boundaries. All accepted changes share one baseline,
 //! so tolerances cannot accumulate across overlapping faces.
+use crate::svg_document::Document;
 use crate::{geometry::RegionGeometry, svg::SvgSummary};
 use rayon::prelude::*;
 use resvg::{
@@ -30,7 +31,7 @@ struct Baseline {
 }
 
 impl Baseline {
-    fn new(svg: &str) -> Option<Self> {
+    fn new(svg: &Document) -> Option<Self> {
         let tree = Tree::from_str(svg, &Options::default()).ok()?;
         let size = tree.size();
         let (w, h) = (size.width().ceil() as usize, size.height().ceil() as usize);
@@ -56,7 +57,7 @@ impl Baseline {
     }
 
     #[cfg(test)]
-    fn equivalent(&self, after: &str, completion: Option<&Completion<'_>>) -> bool {
+    fn equivalent(&self, after: &Document, completion: Option<&Completion<'_>>) -> bool {
         self.equivalent_in(after, completion, &[])
     }
 
@@ -75,7 +76,7 @@ impl Baseline {
     #[cfg(test)]
     fn equivalent_in(
         &self,
-        after: &str,
+        after: &Document,
         completion: Option<&Completion<'_>>,
         ranges: &[(f32, f32)],
     ) -> bool {
@@ -84,7 +85,7 @@ impl Baseline {
 
     fn equivalent_bands(
         &self,
-        after: &str,
+        after: &Document,
         completion: Option<&Completion<'_>>,
         selected: &[bool],
     ) -> bool {
@@ -93,7 +94,7 @@ impl Baseline {
 
     fn equivalent_bands_impl(
         &self,
-        after: &str,
+        after: &Document,
         completion: Option<&Completion<'_>>,
         selected: &[bool],
         accelerate: bool,
@@ -202,7 +203,7 @@ fn band_transform(scale: usize, y: usize) -> Transform {
 }
 
 #[cfg(test)]
-fn equivalent(before: &str, after: &str, completion: Option<&Completion<'_>>) -> bool {
+fn equivalent(before: &Document, after: &Document, completion: Option<&Completion<'_>>) -> bool {
     Baseline::new(before).is_some_and(|baseline| baseline.equivalent(after, completion))
 }
 
@@ -276,14 +277,14 @@ impl RejectedTrials {
 
 pub(crate) fn simplify<F>(
     geometry: &mut [RegionGeometry],
-    original: (String, SvgSummary),
+    original: (Document, SvgSummary),
     labels: &[u32],
     width: usize,
     alpha: Option<&crate::chroma::AlphaMatte>,
     mut serialize: F,
-) -> (String, SvgSummary, usize)
+) -> (Document, SvgSummary, usize)
 where
-    F: FnMut(&[RegionGeometry]) -> (String, SvgSummary),
+    F: FnMut(&[RegionGeometry]) -> (Document, SvgSummary),
 {
     let height = labels.len() / width;
     let candidates: Vec<_> = geometry
@@ -335,14 +336,14 @@ where
         geometry: &mut [RegionGeometry],
         baseline: &Baseline,
         completion: &Completion<'_>,
-        current: &mut (String, SvgSummary),
+        current: &mut (Document, SvgSummary),
         removed: &mut usize,
         watched: &[usize],
         rejections: &mut RejectedTrials,
         timings: &mut (usize, std::time::Duration, std::time::Duration),
         serialize: &mut F,
     ) where
-        F: FnMut(&[RegionGeometry]) -> (String, SvgSummary),
+        F: FnMut(&[RegionGeometry]) -> (Document, SvgSummary),
     {
         if items.is_empty() {
             return;
@@ -507,7 +508,7 @@ mod tests {
                     svg.push_str(r##"<rect y="40" width="96" height="8" fill="#f00"/>"##);
                 }
                 svg.push_str("</svg>");
-                (svg, SvgSummary::default())
+                (Document::from(svg), SvgSummary::default())
             };
             let original = serialize(&geometry);
             let mut expected_geometry = geometry.clone();
@@ -573,7 +574,7 @@ mod tests {
                 format!(
                     r##"<svg xmlns="http://www.w3.org/2000/svg" width="96" height="192"><path fill="#fff" fill-rule="evenodd" d="{}"/><rect x="7" y="7" width="18" height="18" fill="#123456"/><rect y="160" width="96" height="32" fill="{colour}"/></svg>"##,
                     g[0].occlusion_path_data.as_ref().unwrap()
-                ),
+                ).into(),
                 SvgSummary::default(),
             )
         };
@@ -587,7 +588,7 @@ mod tests {
             serialize,
         );
         assert_eq!(removed, 0);
-        assert_eq!(output, original.0);
+        assert_eq!(output, Document::from(original.0));
         assert_eq!(
             geometry[0].occlusion_path_data.as_deref(),
             Some(path.as_str())
@@ -609,10 +610,10 @@ mod tests {
                 .replace(hole, "")
                 .replace("height=\"6\"", "height=\"2\""),
         ] {
-            let baseline = Baseline::new(&before).unwrap();
+            let baseline = Baseline::new(&Document::from((&before).to_string())).unwrap();
             assert_eq!(
-                baseline.equivalent_in(&candidate, None, &[range]),
-                baseline.equivalent(&candidate, None)
+                baseline.equivalent_in(&Document::from((&candidate).to_string()), None, &[range]),
+                baseline.equivalent(&Document::from((&candidate).to_string()), None)
             );
         }
         assert_eq!(
@@ -624,10 +625,16 @@ mod tests {
     #[test]
     fn cached_baseline_does_not_accumulate_candidate_tolerances() {
         let before = r##"<svg xmlns="http://www.w3.org/2000/svg" width="96" height="80"><path fill="#000000" d="M0 0H96V80H0Z"/></svg>"##;
-        let baseline = Baseline::new(before).unwrap();
-        assert!(baseline.equivalent(&before.replace("#000000", "#010000"), None));
-        assert!(!baseline.equivalent(&before.replace("#000000", "#020000"), None));
-        assert!(baseline.equivalent(before, None));
+        let baseline = Baseline::new(&Document::from((before).to_string())).unwrap();
+        assert!(baseline.equivalent(
+            &Document::from((&before.replace("#000000", "#010000")).to_string()),
+            None
+        ));
+        assert!(!baseline.equivalent(
+            &Document::from((&before.replace("#000000", "#020000")).to_string()),
+            None
+        ));
+        assert!(baseline.equivalent(&Document::from((before).to_string()), None));
     }
 
     #[test]
@@ -645,32 +652,48 @@ mod tests {
             boundary,
             alpha: None,
         };
-        assert!(!equivalent(before, &after, None));
-        assert!(equivalent(before, &after, Some(&context)));
+        assert!(!equivalent(
+            &Document::from((before).to_string()),
+            &Document::from((&after).to_string()),
+            None
+        ));
+        assert!(equivalent(
+            &Document::from((before).to_string()),
+            &Document::from((&after).to_string()),
+            Some(&context)
+        ));
         let matte = crate::chroma::AlphaMatte::new(32, 32, vec![0.5; 32 * 32]);
         let translucent = Completion {
             alpha: Some(&matte),
             ..context
         };
-        assert!(!equivalent(before, &after, Some(&translucent)));
+        assert!(!equivalent(
+            &Document::from((before).to_string()),
+            &Document::from((&after).to_string()),
+            Some(&translucent)
+        ));
     }
 
     #[test]
     fn only_opaque_cover_allows_a_hole_to_be_filled() {
         let before = r##"<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><path fill="#fff" fill-rule="evenodd" d="M0 0H32V32H0Z M8 8H24V24H8Z"/><rect x="7" y="7" width="18" height="18" fill="#123456"/></svg>"##;
         let after = before.replace(" M8 8H24V24H8Z", "");
-        assert!(equivalent(before, &after, None));
+        assert!(equivalent(
+            &Document::from((before).to_string()),
+            &Document::from((&after).to_string()),
+            None
+        ));
         let translucent =
             before.replace("fill=\"#123456\"", "fill=\"#123456\" fill-opacity=\"0.5\"");
         assert!(!equivalent(
-            &translucent,
-            &translucent.replace(" M8 8H24V24H8Z", ""),
+            &Document::from((&translucent).to_string()),
+            &Document::from((&translucent.replace(" M8 8H24V24H8Z", "")).to_string()),
             None
         ));
         let uncovered = before.replace("width=\"18\"", "width=\"8\"");
         assert!(!equivalent(
-            &uncovered,
-            &uncovered.replace(" M8 8H24V24H8Z", ""),
+            &Document::from((&uncovered).to_string()),
+            &Document::from((&uncovered.replace(" M8 8H24V24H8Z", "")).to_string()),
             None
         ));
     }

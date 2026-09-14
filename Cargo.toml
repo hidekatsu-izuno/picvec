@@ -1,6 +1,6 @@
 [package]
 name = "picvec"
-version = "0.2.0"
+version = "1.0.0"
 edition = "2021"
 rust-version = "1.95"
 license = "MIT"
@@ -26,7 +26,6 @@ diagnostics = ["dep:serde_json"]
 clap = { version = "4.6.6", features = ["derive"] }
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
 rayon = "1.12.0"
-roxmltree = "0.21.1"
 resvg = { version = "0.48.1", default-features = false }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.151", optional = true }

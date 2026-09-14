@@ -28,24 +28,24 @@ pub(super) fn draw_tile(
     pixmap
 }
 
-pub(super) fn prune(document: &str, width: usize, height: usize) -> (String, Removed) {
+pub(super) fn prune(document: &Document, width: usize, height: usize) -> (Document, Removed) {
     // A <use> can render the same source element again through a filter or
     // transform. Removing its source would alter both instances; do not treat
     // those instances as independently removable draw operations.
-    if document.contains("<use ") {
-        return (document.into(), Removed::default());
+    if document.root().contains_name("use") {
+        return (document.clone(), Removed::default());
     }
     let (annotated, candidates) = annotate(document);
     if candidates.is_empty() {
-        return (document.into(), Removed::default());
+        return (document.clone(), Removed::default());
     }
     let Ok(tree) = usvg::Tree::from_str(&annotated, &usvg::Options::default()) else {
-        return (document.into(), Removed::default());
+        return (document.clone(), Removed::default());
     };
     // The core serializer has no viewport transform. Leave other documents
     // intact rather than detaching children from their inherited transform.
     if !tree.root().transform().is_identity() {
-        return (document.into(), Removed::default());
+        return (document.clone(), Removed::default());
     }
     let mut draws = Vec::new();
     collect(tree.root(), &mut draws);
@@ -102,25 +102,5 @@ pub(super) fn prune(document: &str, width: usize, height: usize) -> (String, Rem
             removed[candidate] = true;
         }
     }
-    let mut output = String::new();
-    let mut cursor = 0;
-    let mut report = Removed::default();
-    for (candidate, remove) in candidates.iter().zip(removed) {
-        if !remove {
-            continue;
-        }
-        output.push_str(&document[cursor..candidate.start]);
-        cursor = candidate.end;
-        let tag = &document[candidate.start..candidate.end];
-        report.paths += usize::from(tag.starts_with("<path "));
-        report.rects += usize::from(tag.starts_with("<rect "));
-        report.circles += usize::from(tag.starts_with("<circle "));
-        report.ellipses += usize::from(tag.starts_with("<ellipse "));
-        report.lines += usize::from(tag.starts_with("<line "));
-        report.shapes += 1;
-        report.strokes += usize::from(candidate.stroke);
-        report.ink += usize::from(candidate.ink);
-    }
-    output.push_str(&document[cursor..]);
-    (output, report)
+    omit(document, &candidates, removed)
 }

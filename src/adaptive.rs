@@ -5,6 +5,8 @@
 //! likely to pay for its additional SVG representation cost, and composes the
 //! accepted refinements back into the base document.
 
+use crate::svg_document::attrs;
+use crate::svg_document::{Document, Elements};
 use std::collections::HashSet;
 
 use rayon::prelude::*;
@@ -13,7 +15,7 @@ use serde::Serialize;
 use crate::chroma::AlphaMatte;
 use crate::color::{delta_e_ok_pairs, rgb_to_oklab, Oklab};
 use crate::raster::{percentile, Raster, RasterSource};
-use crate::{Error, Result};
+use crate::Result;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct SourceRect {
@@ -72,7 +74,7 @@ impl RefinementCandidate {
 pub(crate) struct EmbeddedRefinement {
     pub core: SourceRect,
     pub expanded: SourceRect,
-    pub document: String,
+    pub document: Document,
     pub processing_width: usize,
     pub processing_height: usize,
 }
@@ -670,45 +672,27 @@ fn number(value: f32) -> String {
     }
 }
 
-fn inner_svg(document: &str, prefix: &str) -> Result<String> {
-    let svg = document
-        .find("<svg")
-        .ok_or_else(|| -> Error { "adaptive child SVG has no root element".into() })?;
-    let body = document[svg..]
-        .find('>')
-        .map(|offset| svg + offset + 1)
-        .ok_or_else(|| -> Error { "adaptive child SVG has an incomplete root element".into() })?;
-    let end = document
-        .rfind("</svg>")
-        .ok_or_else(|| -> Error { "adaptive child SVG has no closing root element".into() })?;
-    if body > end {
-        return Err("adaptive child SVG root is malformed".into());
-    }
-    Ok(document[body..end]
-        .replace("id=\"", &format!("id=\"{prefix}"))
-        .replace("url(#", &format!("url(#{prefix}"))
-        .replace("href=\"#", &format!("href=\"#{prefix}")))
-}
-
 pub(crate) fn compose_refinements(
-    base_document: &str,
+    base_document: &Document,
     base_dimensions: (usize, usize),
     source_dimensions: (usize, usize),
     refinements: &[EmbeddedRefinement],
     replace_base: bool,
-) -> Result<String> {
+) -> Result<Document> {
     if refinements.is_empty() {
-        return Ok(base_document.to_string());
+        return Ok(base_document.clone());
     }
-    let close = base_document
-        .rfind("</svg>")
-        .ok_or_else(|| -> Error { "base SVG has no closing root element".into() })?;
     let (base_width, base_height) = base_dimensions;
     let (source_width, source_height) = source_dimensions;
-    let mut layer = String::from("<g id=\"adaptive-refinement-layer\">");
+    let mut layer = Elements::new();
+    layer.open("g", attrs([("id", "adaptive-refinement-layer".into())]));
     for (index, refinement) in refinements.iter().enumerate() {
         let prefix = format!("lod-{index}-");
-        let body = inner_svg(&refinement.document, &prefix)?;
+        let mut body = Elements::new();
+        body.roots = refinement.document.root().children.clone();
+        for node in &mut body.roots {
+            node.namespace_ids(&prefix);
+        }
         let x = refinement.core.x as f32 * base_width as f32 / source_width as f32;
         let y = refinement.core.y as f32 * base_height as f32 / source_height as f32;
         let width = refinement.core.width as f32 * base_width as f32 / source_width as f32;
@@ -721,47 +705,36 @@ pub(crate) fn compose_refinements(
         let view_y = (refinement.core.y - refinement.expanded.y) as f32 * child_scale_y;
         let view_width = refinement.core.width as f32 * child_scale_x;
         let view_height = refinement.core.height as f32 * child_scale_y;
-        layer.push_str(&format!(
-            "<svg data-adaptive-refinement=\"{}\" x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" viewBox=\"{} {} {} {}\" preserveAspectRatio=\"none\" overflow=\"hidden\">{}</svg>",
-            index,
-            number(x),
-            number(y),
-            number(width),
-            number(height),
-            number(view_x),
-            number(view_y),
-            number(view_width),
-            number(view_height),
-            body,
-        ));
+        layer.open(
+            "svg",
+            attrs([
+                ("data-adaptive-refinement", (index).to_string()),
+                ("x", (number(x)).to_string()),
+                ("y", (number(y)).to_string()),
+                ("width", (number(width)).to_string()),
+                ("height", (number(height)).to_string()),
+                (
+                    "viewBox",
+                    format!(
+                        "{0} {1} {2} {3}",
+                        number(view_x),
+                        number(view_y),
+                        number(view_width),
+                        number(view_height)
+                    ),
+                ),
+                ("preserveAspectRatio", "none".into()),
+                ("overflow", "hidden".into()),
+            ]),
+        );
+        layer.append(body);
+        layer.close();
     }
-    layer.push_str("</g>");
-    let mut document = String::with_capacity(close + layer.len() + 512);
+    layer.close();
+    let mut document = base_document.clone();
     if refinements_cover_canvas(refinements, source_dimensions) {
-        // No base element is visible. Keeping its paths and gradient definitions
-        // would still charge parsing, storage and mask-rendering costs.
-        let root = base_document
-            .find("<svg")
-            .ok_or("base SVG has no root element")?;
-        let body = base_document[root..]
-            .find('>')
-            .ok_or("base SVG has an incomplete root element")?
-            + root
-            + 1;
-        document.push_str(&base_document[..body]);
+        document.root_mut().children.clear();
     } else if replace_base {
-        // A transparent refinement must replace, rather than merely cover,
-        // the coarse content in its core.  Clip those rectangles out
-        // of the base first; otherwise a finer, smaller silhouette would
-        // leave the coarse silhouette visible underneath it.
-        let root = base_document
-            .find("<svg")
-            .ok_or_else(|| -> Error { "base SVG has no root element".into() })?;
-        let body = base_document[root..]
-            .find('>')
-            .map(|offset| root + offset + 1)
-            .ok_or_else(|| -> Error { "base SVG has an incomplete root element".into() })?;
-        document.push_str(&base_document[..body]);
         // Build the uncovered strips. Subtracting a union this way also
         // handles overlapping refinement cores without restoring their overlap.
         let mut xs = vec![0, source_width];
@@ -804,14 +777,24 @@ pub(crate) fn compose_refinements(
                 cursor = cursor.max(bottom);
             }
         }
-        document.push_str(&format!("<defs><clipPath id=\"adaptive-base-clip\"><path d=\"{clip}\" clip-rule=\"nonzero\"/></clipPath></defs><g clip-path=\"url(#adaptive-base-clip)\">"));
-        document.push_str(&base_document[body..close]);
-        document.push_str("</g>");
-    } else {
-        document.push_str(&base_document[..close]);
+        let mut children = Elements::new();
+        children.open("defs", vec![]);
+        children.open("clipPath", attrs([("id", "adaptive-base-clip".into())]));
+        children.leaf(
+            "path",
+            attrs([("d", clip.to_string()), ("clip-rule", "nonzero".into())]),
+        );
+        children.close();
+        children.close();
+        let mut base = Elements::new();
+        base.roots = std::mem::take(&mut document.root_mut().children);
+        children.append(base.wrap(
+            "g",
+            attrs([("clip-path", "url(#adaptive-base-clip)".into())]),
+        ));
+        document.root_mut().children = children.roots;
     }
-    document.push_str(&layer);
-    document.push_str(&base_document[close..]);
+    document.root_mut().children.extend(layer.roots);
     Ok(document)
 }
 
@@ -851,7 +834,8 @@ mod tests {
     #[test]
     fn refinement_namespaces_reused_soft_geometry() {
         let child = "<svg><defs/><g id=\"soft-source\"/><use href=\"#soft-source\" filter=\"url(#blur)\"/></svg>";
-        let nested = inner_svg(child, "child-").unwrap();
+        let mut nested = Document::from(child);
+        nested.root_mut().namespace_ids("child-");
         assert!(nested.contains("href=\"#child-soft-source\""));
         assert!(nested.contains("id=\"child-soft-source\""));
         assert!(nested.contains("url(#child-blur)"));
@@ -1029,7 +1013,9 @@ mod tests {
         assert!(object_regions(&support, 400, 240, 300).is_empty());
         assert_eq!(object_regions(&support, 400, 240, 400).len(), 1);
         let coarse = Raster::blank(100, 60, [1.0; 3]);
-        assert!(plan_candidates(&source, None, &coarse, &vec![0; 100 * 60], 300, 64, 0.75).is_empty());
+        assert!(
+            plan_candidates(&source, None, &coarse, &vec![0; 100 * 60], 300, 64, 0.75).is_empty()
+        );
     }
 
     #[test]
@@ -1218,14 +1204,35 @@ mod tests {
                 processing_height: 10,
             })
             .collect();
-        let full = compose_refinements(base, (10, 10), (10, 10), &patches, true).unwrap();
+        let full = compose_refinements(
+            &Document::from((base).to_string()),
+            (10, 10),
+            (10, 10),
+            &patches,
+            true,
+        )
+        .unwrap();
         assert!(!full.contains("obsolete"));
         assert!(full.contains("lod-0-replacement") && full.contains("lod-1-replacement"));
-        let opaque = compose_refinements(base, (10, 10), (10, 10), &patches, false).unwrap();
+        let opaque = compose_refinements(
+            &Document::from((base).to_string()),
+            (10, 10),
+            (10, 10),
+            &patches,
+            false,
+        )
+        .unwrap();
         assert_eq!(opaque, full);
         patches[1].expanded.x = 4;
         patches[1].core.x = 4; // The summed area still matches, but there is overlap and a hole.
-        let partial = compose_refinements(base, (10, 10), (10, 10), &patches, true).unwrap();
+        let partial = compose_refinements(
+            &Document::from((base).to_string()),
+            (10, 10),
+            (10, 10),
+            &patches,
+            true,
+        )
+        .unwrap();
         assert!(partial.contains("obsolete"));
     }
 
@@ -1273,7 +1280,7 @@ mod tests {
         let base = "<?xml version=\"1.0\"?><svg width=\"10\" height=\"10\"><rect width=\"10\" height=\"10\"/></svg>";
         let child = "<svg width=\"8\" height=\"8\"><defs><linearGradient id=\"paint-0\"/></defs><path fill=\"url(#paint-0)\"/></svg>";
         let result = compose_refinements(
-            base,
+            &Document::from((base).to_string()),
             (10, 10),
             (100, 100),
             &[EmbeddedRefinement {
@@ -1289,7 +1296,7 @@ mod tests {
                     width: 60,
                     height: 60,
                 },
-                document: child.to_string(),
+                document: Document::from(child.to_string()),
                 processing_width: 60,
                 processing_height: 60,
             }],
@@ -1307,7 +1314,7 @@ mod tests {
         let base = "<svg width=\"10\" height=\"10\"><rect width=\"10\" height=\"10\"/></svg>";
         let child = "<svg width=\"4\" height=\"4\"></svg>";
         let result = compose_refinements(
-            base,
+            &Document::from((base).to_string()),
             (10, 10),
             (10, 10),
             &[EmbeddedRefinement {
@@ -1323,7 +1330,7 @@ mod tests {
                     width: 4,
                     height: 4,
                 },
-                document: child.to_string(),
+                document: Document::from(child.to_string()),
                 processing_width: 4,
                 processing_height: 4,
             }],
@@ -1357,7 +1364,14 @@ mod tests {
                 }
             })
             .collect();
-        let svg = compose_refinements(base, (10, 10), (10, 10), &refinements, true).unwrap();
+        let svg = compose_refinements(
+            &Document::from((base).to_string()),
+            (10, 10),
+            (10, 10),
+            &refinements,
+            true,
+        )
+        .unwrap();
         assert!(!svg.contains("<mask"));
         let tree = resvg::usvg::Tree::from_str(&svg, &resvg::usvg::Options::default()).unwrap();
         let mut pixmap = resvg::tiny_skia::Pixmap::new(10, 10).unwrap();

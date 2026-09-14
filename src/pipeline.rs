@@ -1,3 +1,4 @@
+use crate::svg_document::Document;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -1134,7 +1135,7 @@ fn vectorize_inner(
             enabled: config.remove_chroma_key_background,
             ..ChromaKeySummary::default()
         });
-    (core.svg.objects, core.svg.path_subpaths) = crate::svg::document_counts(&core.document)?;
+    (core.svg.objects, core.svg.path_subpaths) = core.document.counts();
     let temporary = temporary_svg(output, "output")?;
     fs::write(temporary.path(), core.document.as_bytes())?;
     temporary
@@ -1167,7 +1168,7 @@ fn vectorize_inner(
 }
 
 struct CoreVectorization {
-    document: String,
+    document: Document,
     processing_reference: Raster,
     labels: Vec<u32>,
     removed_background_regions: usize,
@@ -2625,7 +2626,7 @@ mod tests {
 
     #[test]
     fn factored_separator_stays_behind_foreground_and_leaves_background_clear() {
-        let mut document = r##"<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><rect x="14" y="6" width="4" height="20" fill="#202020"/></svg>"##.to_owned();
+        let mut document: Document = r##"<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><rect x="14" y="6" width="4" height="20" fill="#202020"/></svg>"##.into();
         crate::separators::prepend(
             &mut document,
             &[crate::separators::Separator {

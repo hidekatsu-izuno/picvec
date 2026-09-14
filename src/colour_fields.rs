@@ -1,4 +1,5 @@
 //! Source-over factorisation into the eight RGB cube vertices.
+use crate::svg_document::attrs;
 use crate::{chroma::AlphaMatte, raster::Raster};
 use std::fmt::Write;
 
@@ -6,7 +7,32 @@ use std::fmt::Write;
 // clip. CSS isolation alone is not a compositing boundary in Chromium's SVG
 // image renderer. This neutral sRGB stage changes neither colour nor alpha;
 // it adds no blur, mask, fixed raster resolution or embedded bitmap.
+#[cfg(test)]
 pub(crate) const COMPOSITE_FILTER: &str = r#"<filter id="source-field-composite" x="-10%" y="-10%" width="120%" height="120%" color-interpolation-filters="sRGB"><feColorMatrix type="matrix" values="1 0 0 0 0 0 1 0 0 0 0 0 1 0 0 0 0 0 1 0"/></filter>"#;
+
+pub(crate) fn composite_filter() -> crate::svg_document::Elements {
+    let mut elements = crate::svg_document::Elements::new();
+    elements.open(
+        "filter",
+        attrs([
+            ("id", "source-field-composite".into()),
+            ("x", "-10%".into()),
+            ("y", "-10%".into()),
+            ("width", "120%".into()),
+            ("height", "120%".into()),
+            ("color-interpolation-filters", "sRGB".into()),
+        ]),
+    );
+    elements.leaf(
+        "feColorMatrix",
+        attrs([
+            ("type", "matrix".into()),
+            ("values", "1 0 0 0 0 0 1 0 0 0 0 0 1 0 0 0 0 0 1 0".into()),
+        ]),
+    );
+    elements.close();
+    elements
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct Layer {
@@ -810,15 +836,13 @@ mod tests {
     #[test]
     fn transparent_source_and_exceeded_budget_emit_no_paint() {
         let source = Raster::new(16, 16, vec![[1.0, 0.7, 0.2]; 256]);
-        assert!(
-            generate(
-                &source,
-                &AlphaMatte::from_u8(16, 16, vec![0; 256]),
-                32,
-                100_000
-            )
-            .is_none()
-        );
+        assert!(generate(
+            &source,
+            &AlphaMatte::from_u8(16, 16, vec![0; 256]),
+            32,
+            100_000
+        )
+        .is_none());
         assert!(generate(&source, &AlphaMatte::from_u8(16, 16, vec![255; 256]), 32, 1).is_none());
     }
 

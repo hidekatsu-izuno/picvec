@@ -1,6 +1,7 @@
 //! Reuse unchanged parsed draw operations during covered-hole trials.
 //! Only inert groups are split. Clips, filters and transforms stay attached to
 //! their entire group. The final hole check still uses the full SVG renderer.
+use crate::svg_document::Document;
 use resvg::{
     tiny_skia::{IntRect, Pixmap, PixmapPaint, Transform},
     usvg::{Options, Tree},
@@ -203,303 +204,208 @@ impl Scene {
     }
 }
 
-struct Template {
-    range: std::ops::Range<usize>,
-    path: Option<std::ops::Range<usize>>,
-    document: String,
-    document_body: usize,
-    draw: Fragment,
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct DrawSource {
+    root: Vec<(String, String)>,
+    wrappers: Vec<(String, Vec<(String, String)>)>,
+    resources: Vec<crate::svg_document::Element>,
+    element: crate::svg_document::Element,
+}
+impl DrawSource {
+    fn document(&self) -> Document {
+        use crate::svg_document::Element;
+        let mut element = self.element.clone();
+        for (name, attributes) in self.wrappers.iter().rev() {
+            element = Element {
+                name: name.clone(),
+                attributes: attributes.clone(),
+                children: vec![element],
+            };
+        }
+        Document::new(Element {
+            name: "svg".into(),
+            attributes: self.root.clone(),
+            children: vec![
+                Element {
+                    name: "defs".into(),
+                    attributes: vec![],
+                    children: self.resources.clone(),
+                },
+                element,
+            ],
+        })
+    }
 }
 
 pub(crate) struct Cache {
-    source: String,
-    templates: Vec<Template>,
-    root: String,
-    trees: HashMap<String, Arc<Tree>>,
+    root: Vec<(String, String)>,
+    trees: HashMap<DrawSource, Arc<Tree>>,
     layers: Arc<Mutex<Layers>>,
 }
 
-fn refs(node: roxmltree::Node<'_, '_>, ids: &mut BTreeSet<String>) -> Option<()> {
-    for n in node.descendants().filter(|n| n.is_element()) {
-        for attr in n.attributes() {
-            let mut value = attr.value();
-            if attr.name() == "href" {
-                ids.insert(value.strip_prefix('#')?.to_owned());
-            }
-            while let Some(start) = value.find("url(") {
-                value = &value[start + 4..];
-                let end = value.find(')')?;
-                let id = value[..end]
+fn refs(node: &crate::svg_document::Element, ids: &mut BTreeSet<String>) -> Option<()> {
+    for (name, value) in &node.attributes {
+        let mut value = value.as_str();
+        if matches!(name.as_str(), "href" | "xlink:href") {
+            ids.insert(value.strip_prefix('#')?.to_owned());
+        }
+        while let Some(start) = value.find("url(") {
+            value = &value[start + 4..];
+            let end = value.find(')')?;
+            ids.insert(
+                value[..end]
                     .trim()
                     .trim_matches(['\'', '"'])
-                    .strip_prefix('#')?;
-                ids.insert(id.to_owned());
-                value = &value[end + 1..];
-            }
+                    .strip_prefix('#')?
+                    .to_owned(),
+            );
+            value = &value[end + 1..];
         }
+    }
+    for child in &node.children {
+        refs(child, ids)?;
     }
     Some(())
 }
 
-fn documents(svg: &str) -> Option<(String, Vec<(String, std::ops::Range<usize>, usize)>)> {
-    let document = roxmltree::Document::parse(svg).ok()?;
-    let root = document.root_element();
-    if root.tag_name().name() != "svg"
-        || root.descendants().any(|n| n.has_tag_name("style"))
-        || root.attributes().any(|a| a.value().contains("url("))
+fn inert(node: &crate::svg_document::Element) -> bool {
+    node.name == "g"
+        && node.attributes.iter().all(|(name, value)| {
+            matches!(
+                name.as_str(),
+                "id" | "fill-rule" | "fill" | "stroke-linecap" | "stroke-linejoin"
+            ) && !value.contains("url(")
+        })
+}
+
+fn sources(svg: &Document) -> Option<Vec<DrawSource>> {
+    use crate::svg_document::Element;
+    fn contains(node: &Element, names: &[&str]) -> bool {
+        names.contains(&node.name.as_str()) || node.children.iter().any(|n| contains(n, names))
+    }
+    if svg.root().name != "svg"
+        || contains(&svg.root(), &["style"])
+        || svg
+            .root()
+            .attributes
+            .iter()
+            .any(|(_, v)| v.contains("url("))
     {
         return None;
     }
-    let begin = root.range().start;
-    let open = svg[begin..begin + svg[begin..].find('>')? + 1].to_owned();
+    // Definitions and their inherited context come directly from generated
+    // elements. Never parse the emitted XML to recover ownership or references.
+    fn index<'a>(
+        node: &'a Element,
+        ancestors: &mut Vec<&'a Element>,
+        defs: bool,
+        out: &mut HashMap<String, Option<Element>>,
+    ) {
+        let defs = defs || node.name == "defs";
+        if let Some(id) = node.attr("id") {
+            let resource = if defs {
+                Some(node.clone())
+            } else if ancestors.iter().all(|p| p.name == "svg" || inert(p)) {
+                let mut resource = node.clone();
+                for parent in ancestors.iter().rev().take_while(|p| p.name != "svg") {
+                    resource = Element {
+                        name: parent.name.clone(),
+                        attributes: parent.attributes.clone(),
+                        children: vec![resource],
+                    };
+                }
+                Some(resource)
+            } else {
+                None
+            };
+            out.insert(id.to_owned(), resource);
+        }
+        ancestors.push(node);
+        for child in &node.children {
+            index(child, ancestors, defs, out);
+        }
+        ancestors.pop();
+    }
     let mut resources = HashMap::new();
-    for defs in root.children().filter(|n| n.has_tag_name("defs")) {
-        for node in defs.children().filter(|n| n.is_element()) {
-            resources.insert(node.attribute("id")?, node);
-        }
-    }
-    // Colour-patch clips reference strokes in the rendered ink layer. Keep
-    // those definitions too, with their original inherited paint attributes.
-    for node in root.descendants().filter(|n| n.is_element()) {
-        if let Some(id) = node.attribute("id") {
-            resources.entry(id).or_insert(node);
-        }
-    }
-    fn visit<'a>(
-        node: roxmltree::Node<'a, 'a>,
-        svg: &str,
-        open: &str,
-        wrappers: &str,
-        depth: usize,
-        resources: &HashMap<&'a str, roxmltree::Node<'a, 'a>>,
-        out: &mut Vec<(String, std::ops::Range<usize>, usize)>,
+    index(&svg.root(), &mut Vec::new(), false, &mut resources);
+    fn visit(
+        node: &Element,
+        root: &Element,
+        wrappers: &mut Vec<(String, Vec<(String, String)>)>,
+        resources: &HashMap<String, Option<Element>>,
+        out: &mut Vec<DrawSource>,
     ) -> Option<()> {
-        if node.has_tag_name("defs") {
+        if node.name == "defs" {
             return Some(());
         }
-        if node.has_tag_name("g")
-            && !node.attributes().any(|a| a.value().contains("url("))
-            && node.attributes().all(|a| {
-                matches!(
-                    a.name(),
-                    "id" | "fill-rule" | "fill" | "stroke-linecap" | "stroke-linejoin"
-                )
-            })
-        {
-            let start = node.range().start;
-            let prefix = format!(
-                "{wrappers}{}",
-                &svg[start..start + svg[start..].find('>')? + 1]
-            );
-            for child in node.children().filter(|n| n.is_element()) {
-                visit(child, svg, open, &prefix, depth + 1, resources, out)?;
+        if inert(node) {
+            wrappers.push((node.name.clone(), node.attributes.clone()));
+            for child in &node.children {
+                visit(child, root, wrappers, resources, out)?;
             }
+            wrappers.pop();
             return Some(());
         }
-        // Nested viewports and definitions outside the root need their original
-        // document context; use the existing parser for those documents.
-        if node
-            .descendants()
-            .any(|n| n.has_tag_name("svg") || n.has_tag_name("defs"))
-        {
+        if contains(node, &["svg", "defs"]) {
             return None;
         }
         let mut needed = BTreeSet::new();
         refs(node, &mut needed)?;
         let mut done = BTreeSet::new();
         while let Some(id) = needed.iter().find(|id| !done.contains(*id)).cloned() {
-            let resource = *resources.get(id.as_str())?;
-            refs(resource, &mut needed)?;
+            refs(resources.get(&id)?.as_ref()?, &mut needed)?;
             done.insert(id);
         }
-        let mut fragment = String::from(open);
-        fragment.push_str("<defs>");
-        for id in needed {
-            let resource = resources[id.as_str()];
-            let outside_defs = !resource.ancestors().any(|n| n.has_tag_name("defs"));
-            let mut ancestors = Vec::new();
-            if outside_defs {
-                for parent in resource.ancestors().skip(1) {
-                    if parent.has_tag_name("svg") {
-                        break;
-                    }
-                    if !parent.has_tag_name("g")
-                        || !parent.attributes().all(|a| {
-                            matches!(
-                                a.name(),
-                                "id" | "fill-rule" | "fill" | "stroke-linecap" | "stroke-linejoin"
-                            ) && !a.value().contains("url(")
-                        })
-                    {
-                        return None;
-                    }
-                    ancestors.push(parent);
-                }
-                for parent in ancestors.iter().rev() {
-                    let start = parent.range().start;
-                    fragment.push_str(&svg[start..start + svg[start..].find('>')? + 1]);
-                }
-            }
-            fragment.push_str(&svg[resource.range()]);
-            for _ in ancestors {
-                fragment.push_str("</g>");
-            }
-        }
-        fragment.push_str("</defs>");
-        fragment.push_str(wrappers);
-        let document_body = fragment.len();
-        fragment.push_str(&svg[node.range()]);
-        for _ in 0..depth {
-            fragment.push_str("</g>");
-        }
-        fragment.push_str("</svg>");
-        out.push((fragment, node.range(), document_body));
+        out.push(DrawSource {
+            root: root.attributes.clone(),
+            wrappers: wrappers.clone(),
+            resources: needed
+                .into_iter()
+                .map(|id| resources[&id].as_ref().unwrap().clone())
+                .collect(),
+            element: node.clone(),
+        });
         Some(())
     }
-    let mut fragments = Vec::new();
-    for node in root.children().filter(|n| n.is_element()) {
-        visit(node, svg, &open, "", 0, &resources, &mut fragments)?;
+    let mut out = Vec::new();
+    for child in &svg.root().children {
+        visit(child, &svg.root(), &mut Vec::new(), &resources, &mut out)?;
     }
-    Some((open, fragments))
+    Some(out)
 }
-
 impl Cache {
-    pub(crate) fn new(svg: &str) -> Option<Self> {
-        let (root, documents) = documents(svg)?;
-        // Bound retained source text. Candidate-specific parses are temporary,
-        // so rejected trials cannot grow the cache without limit.
-        if documents.iter().map(|d| d.0.len()).sum::<usize>() > 64 * 1024 * 1024 {
-            return None;
-        }
-        let dom = roxmltree::Document::parse(svg).ok()?;
-        // A named ancestor can be referenced even when its child path has no
-        // ID. Such edits must rebuild all dependent resource documents.
-        let mut referenced_ids = BTreeSet::new();
-        refs(dom.root_element(), &mut referenced_ids)?;
-        let referenced: Vec<_> = dom
-            .descendants()
-            .filter(|n| n.is_element())
-            .filter(|n| !n.ancestors().any(|p| p.has_tag_name("defs")))
-            .filter(|n| {
-                n.attribute("id")
-                    .is_some_and(|id| referenced_ids.contains(id))
-            })
-            .map(|n| n.range())
-            .collect();
+    pub(crate) fn new(svg: &Document) -> Option<Self> {
+        let sources = sources(svg)?;
         let mut trees = HashMap::new();
-        let mut templates = Vec::new();
-        for (document, range, document_body) in documents {
-            let tree = match trees.entry(document.clone()) {
-                std::collections::hash_map::Entry::Occupied(entry) => Arc::clone(entry.get()),
-                std::collections::hash_map::Entry::Vacant(entry) => {
-                    let tree = Arc::new(Tree::from_str(&document, &Options::default()).ok()?);
-                    entry.insert(Arc::clone(&tree));
-                    tree
-                }
-            };
-            let raw = &svg[range.clone()];
-            // Hole simplification changes only the d attribute of anonymous
-            // emitted paths. Named paths may be referenced by another draw.
-            let path = if raw.starts_with("<path ")
-                && raw.ends_with("/>")
-                && !raw.contains(" id=")
-                && !referenced
-                    .iter()
-                    .any(|r| r.start <= range.start && range.end <= r.end)
-            {
-                raw.find(" d=\"").and_then(|i| {
-                    let start = i + 4;
-                    Some(start..start + raw[start..].find('"')?)
-                })
-            } else {
-                None
-            };
-            templates.push(Template {
-                range,
-                path,
-                document,
-                document_body,
-                draw: fragment(tree, true),
-            });
+        let mut bytes = 0;
+        for source in sources {
+            if trees.contains_key(&source) {
+                continue;
+            }
+            let document = source.document();
+            bytes += document.len();
+            if bytes > 64 * 1024 * 1024 {
+                return None;
+            }
+            let tree = Arc::new(Tree::from_str(&document, &Options::default()).ok()?);
+            trees.insert(source, tree);
         }
         Some(Self {
-            source: svg.to_owned(),
-            templates,
-            root,
+            root: svg.root().attributes.clone(),
             trees,
             layers: Arc::new(Mutex::new(Layers::default())),
         })
     }
-
-    // Check every unchanged byte, including definitions, group attributes and
-    // non-path draws. Only anonymous path data can vary. This avoids rebuilding
-    // a DOM and thousands of standalone documents for each small hole trial.
-    fn path_scene(&self, svg: &str) -> Option<Scene> {
-        let mut position = 0;
-        let mut previous = 0;
-        let mut draws = Vec::with_capacity(self.templates.len());
-        for template in &self.templates {
-            let gap = &self.source[previous..template.range.start];
-            if !svg.get(position..)?.starts_with(gap) {
-                return None;
-            }
-            position += gap.len();
-            let raw = &self.source[template.range.clone()];
-            if let Some(path) = &template.path {
-                if !svg.get(position..)?.starts_with(&raw[..path.start]) {
-                    return None;
-                }
-                position += path.start;
-                let end = position + svg.get(position..)?.find('"')?;
-                let data = &svg[position..end];
-                if !svg.get(end..)?.starts_with(&raw[path.end..]) {
-                    return None;
-                }
-                position = end + raw.len() - path.end;
-                if data == &raw[path.clone()] {
-                    draws.push(template.draw.clone());
-                } else {
-                    let start = template.document_body + path.start;
-                    let end = template.document_body + path.end;
-                    let mut document = String::with_capacity(template.document.len() + data.len());
-                    document.push_str(&template.document[..start]);
-                    document.push_str(data);
-                    document.push_str(&template.document[end..]);
-                    let tree = Arc::new(Tree::from_str(&document, &Options::default()).ok()?);
-                    draws.push(fragment(tree, false));
-                }
-            } else {
-                if !svg.get(position..)?.starts_with(raw) {
-                    return None;
-                }
-                position += raw.len();
-                draws.push(template.draw.clone());
-            }
-            previous = template.range.end;
-        }
-        if svg.get(position..)? != &self.source[previous..] {
-            return None;
-        }
-        Some(Scene {
-            draws,
-            layers: Arc::clone(&self.layers),
-        })
-    }
-
-    pub(crate) fn scene(&self, svg: &str) -> Option<Scene> {
-        if let Some(scene) = self.path_scene(svg) {
-            return Some(scene);
-        }
-        let (root, documents) = documents(svg)?;
-        if root != self.root {
+    pub(crate) fn scene(&self, svg: &Document) -> Option<Scene> {
+        if svg.root().attributes != self.root {
             return None;
         }
         let mut draws = Vec::new();
-        for (document, _, _) in documents {
-            let unchanged = self.trees.contains_key(&document);
-            let tree = match self.trees.get(&document) {
+        for source in sources(svg)? {
+            let unchanged = self.trees.contains_key(&source);
+            let tree = match self.trees.get(&source) {
                 Some(tree) => Arc::clone(tree),
-                None => Arc::new(Tree::from_str(&document, &Options::default()).ok()?),
+                None => Arc::new(Tree::from_str(&source.document(), &Options::default()).ok()?),
             };
             draws.push(fragment(tree, unchanged));
         }
@@ -538,7 +444,7 @@ mod tests {
     use super::*;
 
     fn compare(cache: &Cache, svg: &str) {
-        let scene = cache.scene(svg).unwrap();
+        let scene = cache.scene(&Document::from((svg).to_string())).unwrap();
         let full = Tree::from_str(svg, &Options::default()).unwrap();
         for scale in [1, 4] {
             for y in (0..193).step_by(64) {
@@ -570,7 +476,7 @@ mod tests {
 <path id="shape" d="M1 1L110 1L110 190L1 190Z"/>
 <filter id="f" x="-.2" y="-.2" width="1.4" height="1.4"><feGaussianBlur stdDeviation="2"/></filter>
 </defs><g id="paint-layer" fill-rule="evenodd"><path d="M0 0L139 0L139 193L0 193Z M10 90L20 90L20 100L10 100Z" fill="url(#g)"/><g fill="url(#linked)"><rect x="10.3" y="21.7" width="91.4" height="75.7"/></g><g clip-path="url(#c)"><use xlink:href="#shape" fill="#282" fill-opacity=".38"/></g><g transform="translate(1.7 14.3) rotate(3)"><rect width="30" height="60" fill="#39a" fill-opacity=".7"/></g><g filter="url(#f)"><rect x="65" y="57" width="20" height="30" fill="#eee" fill-opacity=".3"/></g></g><g fill="none" stroke-linecap="round" stroke-linejoin="round"><line x1="1" y1="60" x2="131" y2="60" stroke="#182" stroke-width="21" stroke-opacity=".6"/><path d="M68 2L68 190" stroke="url(#g)" stroke-width=".31"/><path d="M0 64.13L139 127.57" stroke="#382" stroke-width="1.15"/></g></svg>"##;
-        let cache = Cache::new(svg).unwrap();
+        let cache = Cache::new(&Document::from((svg).to_string())).unwrap();
         for changed in [
             svg.to_owned(),
             svg.replace(" M10 90L20 90L20 100L10 100Z", ""),
@@ -579,7 +485,7 @@ mod tests {
         ] {
             compare(&cache, &changed);
         }
-        let scene = cache.scene(svg).unwrap();
+        let scene = cache.scene(&Document::from((svg).to_string())).unwrap();
         assert!(scene.draws.iter().all(|draw| cache
             .trees
             .values()
@@ -589,7 +495,7 @@ mod tests {
     #[test]
     fn clip_references_keep_inherited_attributes_of_visible_strokes() {
         let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="139" height="193"><defs><clipPath id="coverage"><use xlink:href="#ink"/></clipPath></defs><g fill-rule="evenodd"><rect width="139" height="193" fill="#abc"/></g><g id="ink-layer" fill="none" stroke-linecap="round" stroke-linejoin="round"><path id="ink" d="M14 30L120 160L20 160" stroke="#123" stroke-width="13"/></g><g clip-path="url(#coverage)"><rect width="139" height="100" fill="#f20"/></g></svg>"##;
-        let cache = Cache::new(svg).unwrap();
+        let cache = Cache::new(&Document::from((svg).to_string())).unwrap();
         compare(&cache, svg);
         assert!(!cache.layers.lock().unwrap().entries.is_empty());
         compare(&cache, &svg.replace("L120 160", "L122 160"));
@@ -600,8 +506,9 @@ mod tests {
     fn emitted_core_fragments_match_full_renderer() {
         let path = std::env::var("PICVEC_FRAGMENT_SVG").unwrap();
         let svg = std::fs::read_to_string(path).unwrap();
-        let cache = Cache::new(&svg).expect("emitted core should support cached parsing");
-        let scene = cache.scene(&svg).unwrap();
+        let cache = Cache::new(&Document::from((&svg).to_string()))
+            .expect("emitted core should support cached parsing");
+        let scene = cache.scene(&Document::from((&svg).to_string())).unwrap();
         let tree = Tree::from_str(&svg, &Options::default()).unwrap();
         let w = tree.size().width().ceil() as u32;
         let h = tree.size().height().ceil() as usize;
@@ -646,22 +553,38 @@ mod tests {
     #[test]
     fn path_only_trials_preserve_context_and_rebuild_referenced_ancestors() {
         let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="139" height="193"><defs><linearGradient id="g"><stop stop-color="#f23"/><stop offset="1" stop-color="#29a" stop-opacity=".3"/></linearGradient></defs><g fill-rule="evenodd"><path d="M0 0H139V193H0Z M10 10H20V20H10Z" fill="url(#g)"/><path d="M30 30H50V50H30Z" fill="#237"/></g></svg>"##;
-        let cache = Cache::new(svg).unwrap();
+        let cache = Cache::new(&Document::from((svg).to_string())).unwrap();
         let changed = svg.replace(" M10 10H20V20H10Z", "");
-        assert!(cache.path_scene(&changed).is_some());
+        assert!(cache.scene(&Document::from(changed.clone())).is_some());
         compare(&cache, &changed);
         for changed in [
             svg.replace("#f23", "#000"),
             svg.replace("evenodd", "nonzero"),
             svg.replace("fill=\"#237\"", "fill=\"#234\""),
         ] {
-            assert!(cache.path_scene(&changed).is_none());
+            assert!(cache
+                .scene(&Document::from(changed.clone()))
+                .unwrap()
+                .draws
+                .iter()
+                .any(|draw| !cache
+                    .trees
+                    .values()
+                    .any(|tree| Arc::ptr_eq(tree, &draw.tree))));
             compare(&cache, &changed);
         }
         let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="139" height="193"><g id="outline"><path d="M10 10H40V40H10Z" fill="#f23"/></g><use href="#outline" x="70"/></svg>"##;
-        let cache = Cache::new(svg).unwrap();
+        let cache = Cache::new(&Document::from((svg).to_string())).unwrap();
         let changed = svg.replace("H40", "H50");
-        assert!(cache.path_scene(&changed).is_none());
+        assert!(cache
+            .scene(&Document::from(changed.clone()))
+            .unwrap()
+            .draws
+            .iter()
+            .any(|draw| !cache
+                .trees
+                .values()
+                .any(|tree| Arc::ptr_eq(tree, &draw.tree))));
         compare(&cache, &changed);
     }
 
@@ -675,7 +598,7 @@ mod tests {
             let svg = format!(
                 "<svg xmlns='http://www.w3.org/2000/svg' width='139' height='193'>{body}</svg>"
             );
-            assert!(Cache::new(&svg).is_none());
+            assert!(Cache::new(&Document::from((&svg).to_string())).is_none());
         }
     }
 }

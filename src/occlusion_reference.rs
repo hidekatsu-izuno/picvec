@@ -3,6 +3,7 @@
 //! code value at native size and 4x, except for filling AA gaps along opaque
 //! material boundaries. All accepted changes share one baseline,
 //! so tolerances cannot accumulate across overlapping faces.
+use crate::svg_document::Document;
 use crate::{geometry::RegionGeometry, svg::SvgSummary};
 use rayon::prelude::*;
 use resvg::{
@@ -48,13 +49,13 @@ impl Baseline {
         Some(Self { size, bands })
     }
 
-    fn equivalent(&self, after: &str, completion: Option<&Completion<'_>>) -> bool {
+    fn equivalent(&self, after: &Document, completion: Option<&Completion<'_>>) -> bool {
         self.equivalent_in(after, completion, &[])
     }
 
     fn equivalent_in(
         &self,
-        after: &str,
+        after: &Document,
         completion: Option<&Completion<'_>>,
         ranges: &[(f32, f32)],
     ) -> bool {
@@ -151,14 +152,14 @@ fn affected_rows(path: &str, width: usize, height: usize) -> (f32, f32) {
 
 pub(crate) fn simplify<F>(
     geometry: &mut [RegionGeometry],
-    original: (String, SvgSummary),
+    original: (Document, SvgSummary),
     labels: &[u32],
     width: usize,
     alpha: Option<&crate::chroma::AlphaMatte>,
     mut serialize: F,
-) -> (String, SvgSummary, usize)
+) -> (Document, SvgSummary, usize)
 where
-    F: FnMut(&[RegionGeometry]) -> (String, SvgSummary),
+    F: FnMut(&[RegionGeometry]) -> (Document, SvgSummary),
 {
     let height = labels.len() / width;
     let candidates: Vec<_> = geometry
@@ -205,11 +206,11 @@ where
         geometry: &mut [RegionGeometry],
         baseline: &Baseline,
         completion: &Completion<'_>,
-        current: &mut (String, SvgSummary),
+        current: &mut (Document, SvgSummary),
         removed: &mut usize,
         serialize: &mut F,
     ) where
-        F: FnMut(&[RegionGeometry]) -> (String, SvgSummary),
+        F: FnMut(&[RegionGeometry]) -> (Document, SvgSummary),
     {
         if items.is_empty() {
             return;

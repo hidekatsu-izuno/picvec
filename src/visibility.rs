@@ -2,6 +2,8 @@
 //! raster unchanged at both source scale and 4x. Work on spatial tiles, parse
 //! once, and stop at the first changed tile rather than rerendering the image
 //! once per object. Partial occlusion is deliberately left alone.
+use crate::svg_document::attrs;
+use crate::svg_document::Document;
 use rayon::prelude::*;
 use resvg::{
     tiny_skia::{Pixmap, PixmapPaint, Transform},
@@ -30,60 +32,82 @@ pub(crate) struct Removed {
 }
 
 struct Candidate {
-    start: usize,
-    end: usize,
+    path: Vec<usize>,
+    name: String,
     stroke: bool,
     ink: bool,
 }
 
-// This is intentionally a scanner for our own serializer's self-closing
-// geometry, not a general-purpose XML editor. Definitions/referenced objects
-// and complex compositing groups are never independently removed.
-fn annotate(document: &str) -> (String, Vec<Candidate>) {
-    let mut result = String::new();
-    let mut candidates = Vec::new();
-    let mut cursor = 0;
-    let mut definitions = false;
-    while let Some(offset) = document[cursor..].find('<') {
-        let start = cursor + offset;
-        let Some(end) = document[start..].find('>').map(|n| start + n + 1) else {
-            break;
-        };
-        let tag = &document[start..end];
-        result.push_str(&document[cursor..start]);
-        if tag.starts_with("<defs") {
-            definitions = true;
-        }
-        let geometry = [
-            "<path ",
-            "<rect ",
-            "<circle ",
-            "<ellipse ",
-            "<line ",
-            "<polygon ",
-            "<polyline ",
-        ]
-        .iter()
-        .any(|p| tag.starts_with(p));
-        if !definitions && geometry && tag.ends_with("/>") && !tag.contains(" id=") {
+fn annotate(document: &Document) -> (Document, Vec<Candidate>) {
+    fn visit(
+        node: &mut crate::svg_document::Element,
+        path: &mut Vec<usize>,
+        hidden: bool,
+        candidates: &mut Vec<Candidate>,
+    ) {
+        let hidden = hidden
+            || matches!(
+                node.name.as_str(),
+                "defs" | "clipPath" | "symbol" | "pattern" | "marker"
+            );
+        let geometry = matches!(
+            node.name.as_str(),
+            "path" | "rect" | "circle" | "ellipse" | "line" | "polygon" | "polyline"
+        );
+        if !hidden && geometry && node.children.is_empty() && node.attr("id").is_none() {
             let id = candidates.len();
-            result.push_str(&format!("<g id=\"{PREFIX}{id}\">{tag}</g>"));
             candidates.push(Candidate {
-                start,
-                end,
-                stroke: tag.contains("fill=\"none\""),
-                ink: tag.contains("data-structural-ink="),
+                path: path.clone(),
+                name: node.name.clone(),
+                stroke: node.attr("fill") == Some("none"),
+                ink: node.attr("data-structural-ink").is_some(),
             });
+            let mut group =
+                crate::svg_document::Element::new("g", attrs([("id", format!("{PREFIX}{id}"))]));
+            group.children.push(node.clone());
+            *node = group;
         } else {
-            result.push_str(tag);
+            for (i, child) in node.children.iter_mut().enumerate() {
+                path.push(i);
+                visit(child, path, hidden, candidates);
+                path.pop();
+            }
         }
-        if tag.starts_with("</defs") {
-            definitions = false;
-        }
-        cursor = end;
     }
-    result.push_str(&document[cursor..]);
-    (result, candidates)
+    let mut annotated = document.clone();
+    let mut candidates = Vec::new();
+    visit(
+        annotated.root_mut(),
+        &mut Vec::new(),
+        false,
+        &mut candidates,
+    );
+    (annotated, candidates)
+}
+
+fn omit(document: &Document, candidates: &[Candidate], removed: Vec<bool>) -> (Document, Removed) {
+    let mut output = document.clone();
+    let mut report = Removed::default();
+    // Reverse document order keeps sibling indices valid after removal.
+    for (candidate, remove) in candidates.iter().zip(removed).rev() {
+        if !remove {
+            continue;
+        }
+        let mut parent = output.root_mut();
+        for &i in &candidate.path[..candidate.path.len() - 1] {
+            parent = &mut parent.children[i];
+        }
+        parent.children.remove(*candidate.path.last().unwrap());
+        report.paths += usize::from(candidate.name == "path");
+        report.rects += usize::from(candidate.name == "rect");
+        report.circles += usize::from(candidate.name == "circle");
+        report.ellipses += usize::from(candidate.name == "ellipse");
+        report.lines += usize::from(candidate.name == "line");
+        report.shapes += 1;
+        report.strokes += usize::from(candidate.stroke);
+        report.ink += usize::from(candidate.ink);
+    }
+    (output, report)
 }
 
 struct Draw<'a> {
@@ -596,7 +620,7 @@ fn visibility_witnesses(
     visibility_evidence(draws, tiles, width, height, columns).witnesses
 }
 
-pub(crate) fn prune(document: &str, width: usize, height: usize) -> (String, Removed) {
+pub(crate) fn prune(document: &Document, width: usize, height: usize) -> (Document, Removed) {
     #[cfg(feature = "diagnostics")]
     if let Some(prefix) = std::env::var_os("PICVEC_VISIBILITY_DUMP") {
         let _ = std::fs::write(
@@ -607,24 +631,29 @@ pub(crate) fn prune(document: &str, width: usize, height: usize) -> (String, Rem
     prune_cached(document, width, height, CACHE_TILES)
 }
 
-fn prune_cached(document: &str, width: usize, height: usize, capacity: usize) -> (String, Removed) {
+fn prune_cached(
+    document: &Document,
+    width: usize,
+    height: usize,
+    capacity: usize,
+) -> (Document, Removed) {
     // A <use> can render the same source element again through a filter or
     // transform. Removing its source would alter both instances; do not treat
     // those instances as independently removable draw operations.
-    if document.contains("<use ") {
-        return (document.into(), Removed::default());
+    if document.root().contains_name("use") {
+        return (document.clone(), Removed::default());
     }
     let (annotated, candidates) = annotate(document);
     if candidates.is_empty() {
-        return (document.into(), Removed::default());
+        return (document.clone(), Removed::default());
     }
     let Ok(tree) = usvg::Tree::from_str(&annotated, &usvg::Options::default()) else {
-        return (document.into(), Removed::default());
+        return (document.clone(), Removed::default());
     };
     // The core serializer has no viewport transform. Leave other documents
     // intact rather than detaching children from their inherited transform.
     if !tree.root().transform().is_identity() {
-        return (document.into(), Removed::default());
+        return (document.clone(), Removed::default());
     }
     let mut draws = Vec::new();
     collect(tree.root(), &mut draws);
@@ -757,27 +786,7 @@ fn prune_cached(document: &str, width: usize, height: usize, capacity: usize) ->
     {
         eprintln!("picvec visibility proof shortcuts: {shortcuts} visible, {prefix_shortcuts} prefix no-op");
     }
-    let mut output = String::new();
-    let mut cursor = 0;
-    let mut report = Removed::default();
-    for (candidate, remove) in candidates.iter().zip(removed) {
-        if !remove {
-            continue;
-        }
-        output.push_str(&document[cursor..candidate.start]);
-        cursor = candidate.end;
-        let tag = &document[candidate.start..candidate.end];
-        report.paths += usize::from(tag.starts_with("<path "));
-        report.rects += usize::from(tag.starts_with("<rect "));
-        report.circles += usize::from(tag.starts_with("<circle "));
-        report.ellipses += usize::from(tag.starts_with("<ellipse "));
-        report.lines += usize::from(tag.starts_with("<line "));
-        report.shapes += 1;
-        report.strokes += usize::from(candidate.stroke);
-        report.ink += usize::from(candidate.ink);
-    }
-    output.push_str(&document[cursor..]);
-    (output, report)
+    omit(document, &candidates, removed)
 }
 
 #[cfg(test)]
@@ -804,7 +813,7 @@ mod tests {
     #[test]
     fn every_mixed_counterfactual_witness_matches_an_independent_omission() {
         let svg = layered_scene().replace("</svg>", r##"<defs><filter id="blur"><feGaussianBlur stdDeviation="1.3"/></filter></defs><g filter="url(#blur)"><rect x="13" y="9" width="77" height="35" fill="#892" fill-opacity=".3"/></g><g style="mix-blend-mode:multiply"><rect x="55" y="32" width="44" height="31" fill="#498" fill-opacity=".2"/></g></svg>"##);
-        let (svg, _) = annotate(&svg);
+        let (svg, _) = annotate(&Document::from((&svg).to_string()));
         let tree = usvg::Tree::from_str(&svg, &usvg::Options::default()).unwrap();
         let mut draws = Vec::new();
         collect(tree.root(), &mut draws);
@@ -837,7 +846,10 @@ mod tests {
             let svg = format!(
                 r##"<svg xmlns="http://www.w3.org/2000/svg" width="256" height="128"><defs><clipPath id="c"><rect width="256" height="128"/></clipPath><filter id="f" x="-200%" y="-200%" width="500%" height="500%"><feGaussianBlur stdDeviation="3"/></filter></defs><rect width="256" height="128" fill="white"/><path d="M125 62H132V67H125Z" fill="red"/><g clip-path="url(#c)"><path d="M2 2H4V4H2Z" fill="blue"/><path d="M244 119H247V123H244Z" fill="green"/><g{filter}><path d="M62 63H63V64H62Z" fill="black"/></g></g></svg>"##
             );
-            assert_eq!(prune(&svg, 256, 128), reference::prune(&svg, 256, 128));
+            assert_eq!(
+                prune(&Document::from((&svg).to_string()), 256, 128),
+                reference::prune(&Document::from((&svg).to_string()), 256, 128)
+            );
         }
     }
 
@@ -847,22 +859,25 @@ mod tests {
             let svg = format!(
                 r##"<svg xmlns="http://www.w3.org/2000/svg" width="192" height="128"><defs><clipPath id="c"><path d="M65.1 62.7H80.3V65.2H65.1Z"/></clipPath><linearGradient id="g"><stop stop-color="red" stop-opacity="0.2"/><stop offset="1" stop-color="blue" stop-opacity="0.8"/></linearGradient></defs><rect width="192" height="128" fill="white"/><g{transform}><rect width="192" height="128" fill="url(#g)" clip-path="url(#c)"/><rect width="192" height="128" fill="url(#g)" clip-path="url(#c)"/></g><path d="M64 62H85V63H64Z" fill="white"/></svg>"##
             );
-            assert_eq!(prune(&svg, 192, 128), reference::prune(&svg, 192, 128));
+            assert_eq!(
+                prune(&Document::from((&svg).to_string()), 192, 128),
+                reference::prune(&Document::from((&svg).to_string()), 192, 128)
+            );
         }
     }
 
     #[test]
     fn a_general_removal_invalidates_a_later_prefix_noop() {
         let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><rect id="fixed" width="64" height="64" fill="white"/><rect x="8" y="8" width="16" height="16" fill="red"/><rect x="8" y="8" width="16" height="16" fill="red"/></svg>"##;
-        let expected = reference::prune(svg, 64, 64);
+        let expected = reference::prune(&Document::from((svg).to_string()), 64, 64);
         assert_eq!(expected.1.shapes, 1);
-        assert_eq!(prune(svg, 64, 64), expected);
+        assert_eq!(prune(&Document::from((svg).to_string()), 64, 64), expected);
     }
 
     #[test]
     fn removing_a_covered_draw_invalidates_the_covering_draws_witness() {
         let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><rect id="fixed" width="64" height="64" fill="white"/><rect x="8" y="8" width="16" height="16" fill="red"/><rect x="8" y="8" width="16" height="16" fill="white"/></svg>"##;
-        let expected = reference::prune(svg, 64, 64);
+        let expected = reference::prune(&Document::from((svg).to_string()), 64, 64);
         assert_eq!(expected.1.shapes, 2);
         for threads in [1, 4] {
             rayon::ThreadPoolBuilder::new()
@@ -870,7 +885,7 @@ mod tests {
                 .build()
                 .unwrap()
                 .install(|| {
-                    assert_eq!(prune(svg, 64, 64), expected);
+                    assert_eq!(prune(&Document::from((svg).to_string()), 64, 64), expected);
                 });
         }
     }
@@ -890,7 +905,7 @@ mod tests {
 
     #[test]
     fn incremental_framebuffers_match_full_redraw_at_every_candidate() {
-        let (svg, _) = annotate(&layered_scene());
+        let (svg, _) = annotate(&Document::from((&layered_scene()).to_string()));
         let tree = usvg::Tree::from_str(&svg, &usvg::Options::default()).unwrap();
         let mut draws = Vec::new();
         collect(tree.root(), &mut draws);
@@ -986,10 +1001,10 @@ mod tests {
         }
         wide.push_str("</svg>");
         for (svg, w, h) in [(layered_scene(), 160, 80), (wide, width, 72)] {
-            let expected = reference::prune(&svg, w, h);
+            let expected = reference::prune(&Document::from((&svg).to_string()), w, h);
             assert!(expected.1.shapes > 0, "fixture {w}x{h} needs covered marks");
             for capacity in [1, 3, CACHE_TILES] {
-                let actual = prune_cached(&svg, w, h, capacity);
+                let actual = prune_cached(&Document::from((&svg).to_string()), w, h, capacity);
                 assert_eq!(actual, expected);
             }
             for scale in [1, 4] {
@@ -1019,9 +1034,9 @@ mod tests {
             let measure = |reference_version| {
                 let start = std::time::Instant::now();
                 let result = if reference_version {
-                    reference::prune(&svg, w, h)
+                    reference::prune(&Document::from((&svg).to_string()), w, h)
                 } else {
-                    prune(&svg, w, h)
+                    prune(&Document::from((&svg).to_string()), w, h)
                 };
                 (result, start.elapsed().as_secs_f64())
             };
@@ -1078,7 +1093,7 @@ mod tests {
     #[test]
     fn removes_hidden_faces_and_redundant_lines_but_keeps_partial_overlap() {
         let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><g fill="red"><rect x="5" y="5" width="5" height="5"/><rect width="20" height="20"/><path d="M5 5L15 15" fill="none" stroke="red" stroke-width="2"/><rect x="15" y="15" width="10" height="10" fill="blue"/></g></svg>"##;
-        let (output, report) = prune(svg, 32, 32);
+        let (output, report) = prune(&Document::from((svg).to_string()), 32, 32);
         assert_eq!(report.shapes, 2);
         assert_eq!(report.strokes, 1);
         for scale in [1, 4, 8] {
@@ -1088,7 +1103,7 @@ mod tests {
     #[test]
     fn tile_boundaries_and_multiple_removals_preserve_the_complete_render() {
         let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="256" height="32"><rect width="256" height="32" fill="red"/><rect x="60.2" y="4" width="120" height="16" fill="red"/><path d="M10 15.3H200" fill="none" stroke="red" stroke-width="2"/><rect x="128" y="16" width="80" height="16" fill="blue"/></svg>"##;
-        let (output, report) = prune(svg, 256, 32);
+        let (output, report) = prune(&Document::from((svg).to_string()), 256, 32);
         assert_eq!(report.shapes, 2);
         for scale in [1, 4, 8] {
             assert_eq!(image(svg, scale), image(&output, scale));
@@ -1097,21 +1112,21 @@ mod tests {
     #[test]
     fn zero_area_paint_is_removed_but_its_stroked_counterpart_is_kept() {
         let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><path d="M2 2H20" fill="red"/><path d="M2 2H20" fill="none" stroke="red"/></svg>"##;
-        let (output, report) = prune(svg, 32, 32);
+        let (output, report) = prune(&Document::from((svg).to_string()), 32, 32);
         assert_eq!(report.shapes, 1);
         assert_eq!(image(svg, 4), image(&output, 4));
     }
     #[test]
     fn preserves_alpha_accumulation_gradients_and_subpixel_lines() {
         let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><defs><linearGradient id="g"><stop stop-color="red"/><stop offset="1" stop-color="blue"/></linearGradient></defs><rect width="25" height="25" fill="red" fill-opacity="0.5"/><rect width="25" height="25" fill="red" fill-opacity="0.5"/><rect x="10" width="10" height="25" fill="url(#g)"/><path d="M1 1L30 30" fill="none" stroke="black" stroke-width="0.1"/></svg>"##;
-        let (output, report) = prune(svg, 32, 32);
+        let (output, report) = prune(&Document::from((svg).to_string()), 32, 32);
         assert_eq!(report.shapes, 0);
-        assert_eq!(output, svg);
+        assert_eq!(output, Document::from(svg));
     }
     #[test]
     fn preserves_clip_context_and_referenced_geometry() {
         let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><defs><clipPath id="c"><rect width="10" height="10"/></clipPath></defs><rect id="base" width="32" height="32" fill="red"/><g clip-path="url(#c)"><rect width="32" height="32" fill="blue"/></g></svg>"##;
-        let (output, report) = prune(svg, 32, 32);
+        let (output, report) = prune(&Document::from((svg).to_string()), 32, 32);
         assert_eq!(report.shapes, 0);
         assert_eq!(image(svg, 4), image(&output, 4));
     }

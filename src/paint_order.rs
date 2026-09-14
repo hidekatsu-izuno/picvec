@@ -1,5 +1,6 @@
 //! Source-supported ordering of filled stroke shapes. This preserves fills:
 //! it neither generates duplicate strokes nor infers semantic object depth.
+use crate::svg_document::Document;
 use crate::{
     color::{delta_e_ok, rgb_to_oklab},
     raster::Raster,
@@ -337,8 +338,8 @@ fn order_graph(
 /// are compared in premultiplied RGBA, on black and white simultaneously.
 /// At 4x, changes outside a two-source-pixel boundary corridor are forbidden.
 pub(crate) fn validate(
-    before: &str,
-    after: &str,
+    before: &Document,
+    after: &Document,
     source: &Raster,
     matte: Option<&crate::chroma::AlphaMatte>,
     labels: &[u32],
@@ -360,13 +361,15 @@ pub(crate) fn validate(
     // Reuse the existing fragment renderer only when there are multiple bands
     // and clips to cull; ordinary small/unclipped documents keep the direct
     // renderer. Unsupported SVG contexts also keep the direct renderer.
-    let scenes = (h > 128 && (before.contains("clip-path=") || after.contains("clip-path=")))
-        .then(|| {
-            let ca = crate::svg_fragments::Cache::new(before)?;
-            let cb = crate::svg_fragments::Cache::new(after)?;
-            Some((ca.scene(before)?, cb.scene(after)?))
-        })
-        .flatten();
+    let scenes = (h > 128
+        && (before.root().contains_attribute("clip-path")
+            || after.root().contains_attribute("clip-path")))
+    .then(|| {
+        let ca = crate::svg_fragments::Cache::new(before)?;
+        let cb = crate::svg_fragments::Cache::new(after)?;
+        Some((ca.scene(before)?, cb.scene(after)?))
+    })
+    .flatten();
 
     let mut boundary = vec![false; w * h];
     for i in 0..w * h {
@@ -511,8 +514,16 @@ mod tests {
                     .build()
                     .unwrap();
                 let mut actual = Summary::default();
-                let accepted =
-                    pool.install(|| validate(before, &after, &source, None, &labels, &mut actual));
+                let accepted = pool.install(|| {
+                    validate(
+                        &Document::from((before).to_string()),
+                        &Document::from((&after).to_string()),
+                        &source,
+                        None,
+                        &labels,
+                        &mut actual,
+                    )
+                });
                 assert_eq!(accepted, result);
                 assert_eq!(format!("{actual:?}"), format!("{expected:?}"));
             }
@@ -539,8 +550,16 @@ mod tests {
                     .build()
                     .unwrap();
                 let mut actual = Summary::default();
-                let accepted =
-                    pool.install(|| validate(before, &after, &source, None, &labels, &mut actual));
+                let accepted = pool.install(|| {
+                    validate(
+                        &Document::from((before).to_string()),
+                        &Document::from((&after).to_string()),
+                        &source,
+                        None,
+                        &labels,
+                        &mut actual,
+                    )
+                });
                 assert_eq!(accepted, result);
                 assert_eq!(format!("{actual:?}"), format!("{expected:?}"));
             }
@@ -637,8 +656,8 @@ mod tests {
                 .collect(),
         );
         assert!(validate(
-            &svg(15.3),
-            &svg(15.0),
+            &Document::from((&svg(15.3)).to_string()),
+            &Document::from((&svg(15.0)).to_string()),
             &source,
             None,
             &labels,
@@ -646,8 +665,8 @@ mod tests {
         ));
         let erased = svg(15.0).replace("#000", "#fff");
         assert!(!validate(
-            &svg(15.0),
-            &erased,
+            &Document::from((&svg(15.0)).to_string()),
+            &Document::from((&erased).to_string()),
             &source,
             None,
             &labels,
@@ -663,8 +682,8 @@ mod tests {
             .replace("#a0a0a0", "#909090");
         let mut report = Summary::default();
         assert!(!validate(
-            before,
-            &after,
+            &Document::from((before).to_string()),
+            &Document::from((&after).to_string()),
             &Raster::blank(512, 64, [128.0 / 255.0; 3]),
             None,
             &vec![0; 512 * 64],
@@ -681,8 +700,8 @@ mod tests {
         let a = r##"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><path fill="#000" d="M0 0H16V16H0Z"/></svg>"##;
         let b = a.replace("#000", "#fff");
         assert!(!validate(
-            a,
-            &b,
+            &Document::from((a).to_string()),
+            &Document::from((&b).to_string()),
             &Raster::blank(16, 16, [0.0; 3]),
             None,
             &vec![0; 256],
