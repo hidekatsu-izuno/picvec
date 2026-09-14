@@ -2031,20 +2031,16 @@ fn vectorize_processing(
             &segmentation.labels,
             processing.width,
             material_alpha.as_ref().or(chroma_matte),
-            |geometry| {
-                serialize_svg(
-                    processing.width,
-                    processing.height,
-                    geometry,
-                    &paints,
-                    &structural,
-                    paint_overlap,
-                    excluded_regions.iter().all(|&excluded| !excluded),
-                    &excluded_regions,
-                    face_alpha.as_ref(),
-                    &mut geometry_cache,
-                )
-            },
+            crate::svg::hole_serializer(
+                processing.width,
+                processing.height,
+                &paints,
+                &structural,
+                paint_overlap,
+                &excluded_regions,
+                face_alpha.as_ref(),
+                &mut geometry_cache,
+            ),
         );
         document = filled;
         svg_report = report;

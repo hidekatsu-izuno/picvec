@@ -1027,6 +1027,136 @@ pub(crate) fn serialize_filtered_with_alpha_cached(
     face_alpha: Option<&crate::face_alpha::FaceAlpha>,
     geometry_cache: &mut GeometryCache,
 ) -> (String, SvgSummary) {
+    serialize_prepared(
+        width,
+        height,
+        geometries,
+        paints,
+        structural,
+        paint_overlap,
+        excluded_regions,
+        face_alpha,
+        geometry_cache,
+        None,
+    )
+}
+
+/// Hole trials keep the complete paint context borrowed and immutable. Only
+/// geometry may change, so gradient IDs and fill attributes can be prepared
+/// once without comparing approximate paint keys or reusing stale context.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn hole_serializer<'a>(
+    width: usize,
+    height: usize,
+    paints: &'a [Paint],
+    structural: &'a StructuralInk,
+    paint_overlap: f32,
+    excluded_regions: &'a [bool],
+    face_alpha: Option<&'a crate::face_alpha::FaceAlpha>,
+    geometry_cache: &'a mut GeometryCache,
+) -> impl FnMut(&[RegionGeometry]) -> (String, SvgSummary) + 'a {
+    // RGBA fields can register gradients in geometry order and reconstruct
+    // source-dependent boundary colours. Keep their full serialization path.
+    let mut prepared = None;
+    move |geometries| {
+        if face_alpha.is_none() && prepared.is_none() {
+            prepared = Some(FixedPaints::new(paints, structural, excluded_regions));
+        }
+        serialize_prepared(
+            width,
+            height,
+            geometries,
+            paints,
+            structural,
+            paint_overlap,
+            excluded_regions,
+            face_alpha,
+            geometry_cache,
+            prepared.as_ref(),
+        )
+    }
+}
+
+struct FixedPaints {
+    gradient_ids: HashMap<String, String>,
+    definitions: String,
+    summary: SvgSummary,
+    attributes: Vec<Vec<(String, bool)>>,
+}
+
+impl FixedPaints {
+    fn new(paints: &[Paint], structural: &StructuralInk, excluded: &[bool]) -> Self {
+        let (gradient_ids, definitions, summary) =
+            paint_definitions(paints, structural, excluded, None);
+        let attributes = paints
+            .iter()
+            .enumerate()
+            .map(|(region, paint)| {
+                if excluded.get(region).copied().unwrap_or(false)
+                    || structural.outlines.iter().any(|band| {
+                        band.hidden.contains(&(region as u32))
+                            && !band.boundary_underpaint.contains(&(region as u32))
+                    })
+                {
+                    return Vec::new();
+                }
+                let mut elements = Vec::new();
+                append_paint_elements(
+                    &mut elements,
+                    OptimizedElement::Path {
+                        data: String::new(),
+                        bbox: None,
+                    },
+                    paint,
+                    &gradient_ids,
+                    0.0,
+                );
+                elements
+                    .into_iter()
+                    .flatten()
+                    .map(|e| (e.attributes, e.batchable))
+                    .collect()
+            })
+            .collect();
+        Self {
+            gradient_ids,
+            definitions,
+            summary,
+            attributes,
+        }
+    }
+
+    fn append(
+        &self,
+        elements: &mut Vec<Option<PaintElement>>,
+        geometry: OptimizedElement,
+        region: usize,
+    ) {
+        let mut attributes = self.attributes[region].iter().peekable();
+        while let Some((text, batchable)) = attributes.next() {
+            if attributes.peek().is_none() {
+                elements.push(Some(PaintElement {
+                    geometry,
+                    attributes: text.clone(),
+                    batchable: *batchable,
+                }));
+                break;
+            }
+            elements.push(Some(PaintElement {
+                geometry: geometry.clone(),
+                attributes: text.clone(),
+                batchable: *batchable,
+            }));
+        }
+    }
+}
+
+fn paint_definitions(
+    paints: &[Paint],
+    structural: &StructuralInk,
+    excluded_regions: &[bool],
+    face_alpha: Option<&crate::face_alpha::FaceAlpha>,
+) -> (HashMap<String, String>, String, SvgSummary) {
     let mut gradient_ids = HashMap::<String, String>::new();
     let mut definitions = String::new();
     let mut summary = SvgSummary::default();
@@ -1104,6 +1234,30 @@ pub(crate) fn serialize_filtered_with_alpha_cached(
         }
         let _ = write!(definitions, "<clipPath id=\"outline-inner-{i}\"><path d=\"{}\"/></clipPath><clipPath id=\"outline-outer-{i}\"><path d=\"{}\"/></clipPath>", band.inner, band.outer);
     }
+    (gradient_ids, definitions, summary)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn serialize_prepared(
+    width: usize,
+    height: usize,
+    geometries: &[RegionGeometry],
+    paints: &[Paint],
+    structural: &StructuralInk,
+    paint_overlap: f32,
+    excluded_regions: &[bool],
+    face_alpha: Option<&crate::face_alpha::FaceAlpha>,
+    geometry_cache: &mut GeometryCache,
+    prepared: Option<&FixedPaints>,
+) -> (String, SvgSummary) {
+    let (mut gradient_ids, mut definitions, mut summary) = match prepared {
+        Some(p) => (
+            p.gradient_ids.clone(),
+            p.definitions.clone(),
+            p.summary.clone(),
+        ),
+        None => paint_definitions(paints, structural, excluded_regions, face_alpha),
+    };
     let mut paint_elements = Vec::<Option<PaintElement>>::with_capacity(geometries.len());
     let mut band_elements: Vec<Vec<Option<PaintElement>>> =
         structural.outlines.iter().map(|_| Vec::new()).collect();
@@ -1214,13 +1368,21 @@ pub(crate) fn serialize_filtered_with_alpha_cached(
                 // Shared geometry may extend a fraction beyond the fitted
                 // outer contour. Preserve its coverage underneath the new
                 // opaque band, rather than cutting a hole in the backdrop.
-                append_paint_elements(
-                    &mut paint_elements,
-                    optimized.clone(),
-                    paint,
-                    &gradient_ids,
-                    paint_overlap,
-                );
+                if let Some(prepared) = prepared {
+                    prepared.append(
+                        &mut paint_elements,
+                        optimized.clone(),
+                        geometry.region as usize,
+                    );
+                } else {
+                    append_paint_elements(
+                        &mut paint_elements,
+                        optimized.clone(),
+                        paint,
+                        &gradient_ids,
+                        paint_overlap,
+                    );
+                }
             }
             if band.hidden.contains(&geometry.region) {
                 continue;
@@ -1232,7 +1394,11 @@ pub(crate) fn serialize_filtered_with_alpha_cached(
             &mut paint_elements
         };
         let first_element = elements.len();
-        append_paint_elements(elements, optimized, paint, &gradient_ids, paint_overlap);
+        if let Some(prepared) = prepared {
+            prepared.append(elements, optimized, geometry.region as usize);
+        } else {
+            append_paint_elements(elements, optimized, paint, &gradient_ids, paint_overlap);
+        }
         if let Some((i, _)) = band {
             for element in elements[first_element..].iter_mut().flatten() {
                 let _ = write!(element.attributes, " clip-path=\"url(#outline-inner-{i})\"");
@@ -1541,6 +1707,151 @@ mod tests {
             attributes: attributes.to_string(),
             batchable: true,
         })
+    }
+
+    #[test]
+    fn hole_trials_preserve_serialization_across_geometry_and_alpha_changes() {
+        use crate::geometry::Point;
+        let gradient = Paint::Radial {
+            origin: crate::gradient::RadialOrigin::Fitted,
+            center: Point { x: 16.0, y: 16.0 },
+            radius: Point { x: 12.0, y: 8.0 },
+            rotation: 0.3,
+            stops: vec![
+                ColorStop {
+                    offset: 0.0,
+                    color: [0.1, 0.2, 0.3],
+                },
+                ColorStop {
+                    offset: 1.0,
+                    color: [0.7, 0.8, 0.9],
+                },
+            ],
+        };
+        let overlay = PaintOverlay {
+            paint: Box::new(gradient.clone()),
+            opacity_stops: vec![
+                OpacityStop {
+                    offset: 0.0,
+                    opacity: 0.65,
+                },
+                OpacityStop {
+                    offset: 1.0,
+                    opacity: 0.0,
+                },
+            ],
+        };
+        let mut transparent_overlay = overlay.clone();
+        for stop in &mut transparent_overlay.opacity_stops {
+            stop.opacity = 0.0;
+        }
+        let paints = vec![
+            gradient.clone(),
+            gradient.clone(),
+            Paint::Layered {
+                base: Box::new(gradient.clone()),
+                overlays: vec![overlay, transparent_overlay],
+            },
+            Paint::Solid {
+                color: [0.2, 0.3, 0.4],
+            },
+            gradient,
+        ];
+        let mut geometry: Vec<_> = (0..paints.len())
+            .map(|i| RegionGeometry {
+                region: i as u32,
+                loops: vec![],
+                path_data: format!("M{} 0h24v24h-24Z", i * 32),
+                occlusion_path_data: Some(format!(
+                    "M{} 0h24v24h-24Z M{} 8h8v8h-8Z",
+                    i * 32,
+                    i * 32 + 8
+                )),
+                covered_hole_paths: vec![],
+                primitive: None,
+            })
+            .collect();
+        let excluded = [false, false, false, false, true];
+        let alpha = crate::face_alpha::FaceAlpha {
+            fields: vec![Paint::Solid { color: [0.5; 3] }; paints.len()],
+            ink_opacity: 0.5,
+            bands: vec![],
+            composite_layers: vec![],
+            source_fields: vec![],
+        };
+        for outlined in [false, true] {
+            let mut structural = StructuralInk::empty();
+            if outlined {
+                structural.outlines.push(crate::outline::OutlineBand {
+                    outer: "M0 0h160v32h-160Z".into(),
+                    inner: "M1 1h158v30H1Z".into(),
+                    underpaint: Paint::Solid { color: [0.8; 3] },
+                    inner_underpaint: None,
+                    patches: vec![],
+                    regions: [1, 3].into_iter().collect(),
+                    hidden: [3].into_iter().collect(),
+                    boundary_underpaint: [1].into_iter().collect(),
+                    contour: vec![],
+                    width: 1.0,
+                    pixels: vec![],
+                });
+            }
+            for alpha in [None, Some(&alpha)] {
+                let mut cache = GeometryCache::default();
+                let mut serialize = hole_serializer(
+                    160,
+                    32,
+                    &paints,
+                    &structural,
+                    0.3,
+                    &excluded,
+                    alpha,
+                    &mut cache,
+                );
+                // Trials change paths, revert an earlier edit, change primitive
+                // type and drawing order, and omit geometry entirely.
+                for trial in 0..6 {
+                    geometry[0].occlusion_path_data = Some(
+                        match trial {
+                            0 | 3 => "M0 0h24v24H0Z M8 8h8v8H8Z",
+                            1 | 4 => "M0 0h24v24H0Z",
+                            _ => "",
+                        }
+                        .into(),
+                    );
+                    geometry[2].primitive = (trial == 2).then_some(Primitive::Rect {
+                        x: 64.0,
+                        y: 0.0,
+                        width: 24.0,
+                        height: 24.0,
+                    });
+                    let mut g = geometry.clone();
+                    if trial == 4 {
+                        g.reverse();
+                    }
+                    if trial == 5 {
+                        g.clear();
+                    }
+                    let expected = serialize_filtered_with_alpha(
+                        160,
+                        32,
+                        &g,
+                        &paints,
+                        &structural,
+                        0.3,
+                        true,
+                        &excluded,
+                        alpha,
+                    );
+                    let actual = serialize(&g);
+                    assert_eq!(actual.0, expected.0, "outlined={outlined}, trial={trial}");
+                    assert_eq!(
+                        serde_json::to_value(actual.1).unwrap(),
+                        serde_json::to_value(expected.1).unwrap()
+                    );
+                }
+            }
+        }
     }
 
     #[test]

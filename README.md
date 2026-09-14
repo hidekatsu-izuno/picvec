@@ -98,31 +98,10 @@ additional output bytes, **not** evaluation time or peak memory.
   remove contributions only when the rendered RGBA result permits it. Useful
   partial overlaps and authored translucent details remain.
 
-## Samples and regeneration
-
-Regenerate all current inputs, then rebuild their comparisons:
-
-```sh
-mise exec -- bash scripts/generate_sample_svgs.sh
-bash scripts/generate_sample_comparisons.sh
-```
-
-The SVG script builds with diagnostics enabled and selects the worker count
-automatically (`PICVEC_THREADS` overrides it). It also accepts input file names to regenerate a subset, for example:
-
-```sh
-mise exec -- bash scripts/generate_sample_svgs.sh car.png cliparts.png
-```
+## Samples
 
 `cliparts-6x6.png` uses the sample's explicit
 `--remove-chroma-key-background` setting. Other samples use the normal defaults.
-The comparison script discovers the current `sample/input` files and requires
-the corresponding SVGs. It uses `rsvg-convert` and ImageMagick, with the raster
-on the left and SVG rendering on the right, both on white.
-
-The previews below display the original files at a reduced width. SVG previews
-load the SVG directly, without raster conversion; click either preview to open
-the full-size file.
 
 | Sample | Original | SVG |
 | --- | --- | --- |
@@ -141,44 +120,6 @@ the full-size file.
 | [Viewport 1](sample/input/viewport1.jpg) | [SVG](sample/output/viewport1.svg) | [PNG](sample/comparison/viewport1.png) | 5,652 | 6,258 |
 | [Viewport 2](sample/input/viewport2.jpg) | [SVG](sample/output/viewport2.svg) | [PNG](sample/comparison/viewport2.png) | 30,500 | 35,501 |
 | [Wikipedia logo](sample/input/wikipedia_logo_1_0.png) | [SVG](sample/output/wikipedia_logo_1_0.svg) | [PNG](sample/comparison/wikipedia_logo_1_0.png) | 1,917 | 2,623 |
-
-To time regeneration against the committed SVG bytes (with a 300-second limit
-per image), run after building:
-
-```sh
-python3 scripts/benchmark_committed_svgs.py --output-dir /tmp/picvec-sample-check
-```
-
-Use `--update-output` to replace only outputs that match the reference exactly.
-See [the SVG compatibility and timing report](docs/latest-svg-performance-2026-09-14.md)
-for the reference revision, measurements, and validation conditions.
-The subsequent [generic performance improvements and paired measurements](docs/generic-refinement-performance-2026-09-14.md)
-cover component-local residual checks and reuse of clipped render bands.
-
-## Validation and current limitations
-
-```sh
-mise exec -- cargo test --release --locked --features diagnostics
-mise exec -- cargo test --release --locked --features diagnostics \
-  scanned_annotations_retain_ink_through_the_common_pipeline -- --ignored
-```
-
-Tests cover shared topology, paint merging, ordering, visible thin lines,
-transparency and refinement composition. Enlarged source comparisons remain
-necessary: a lower raster error alone does not prove a sharper or more faithful
-editable contour.
-
-The common source-resolution model improves `booster-layout` over the earlier
-coarse normal conversion, but **does not yet match the removed dedicated
-coverage generator in quality, output size or speed**. The original native-core
-experiment took about 14 minutes; the original base-plus-refinement evaluation
-took about 16 minutes. Current timings are recorded in the report above. Display-scale grayscale MAE was 4.36, versus 6.06 for the
-old coarse result and 2.85 for the removed shortcut. These figures describe this
-sample and test environment, not general performance guarantees.
-
-- [Common pipeline changes and measurements](docs/common-refinement.md)
-- [Cactus material ownership, enlarged comparisons and RGBA checks](docs/cliparts-spines.md)
-- [Rectangular seam correction and enlarged comparisons](docs/cliparts-patch-boundaries.md)
 
 ## Optional x4 evaluation
 
