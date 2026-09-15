@@ -469,6 +469,15 @@ pub(crate) fn matching_refinement_core(
     None
 }
 
+// SplitMix64's fixed integer mixer makes sampling reproducible across runs,
+// worker counts and platforms, without a periodic pixel-grid phase.
+fn dispersed_sample(index: usize) -> u64 {
+    let mut value = (index as u64).wrapping_add(0x9e3779b97f4a7c15);
+    value = (value ^ (value >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94d049bb133111eb);
+    value ^ (value >> 31)
+}
+
 /// Compare one source-space region with a raster that represents a possibly
 /// larger source rectangle.  The local tail prevents small icon details from
 /// disappearing into a large flat background; only source edges not present
@@ -480,37 +489,73 @@ pub(crate) fn perceptual_score<S: RasterSource + ?Sized>(
     candidate_source: SourceRect,
 ) -> PerceptualScore {
     const MAXIMUM_SAMPLES: usize = 32_768;
-    let step = ((region.area().max(1) as f64 / MAXIMUM_SAMPLES as f64)
-        .sqrt()
-        .ceil() as usize)
-        .max(1);
-    let sample_capacity = region.area().div_ceil(step * step);
+    // Stratify the flattened source region, rather than always visiting the
+    // same phase of a two-dimensional grid. Each stratum contributes one
+    // deterministic, dispersed colour sample. Small regions remain exhaustive.
+    let stride = region.area().div_ceil(MAXIMUM_SAMPLES).max(1);
+    let sample_capacity = region.area().div_ceil(stride);
     let mut source_samples = Vec::<Oklab>::with_capacity(sample_capacity);
     let mut represented_samples = Vec::<Oklab>::with_capacity(sample_capacity);
     let mut source_edge_starts = Vec::<Oklab>::with_capacity(sample_capacity * 2);
     let mut source_edge_ends = Vec::<Oklab>::with_capacity(sample_capacity * 2);
     let mut represented_edge_starts = Vec::<Oklab>::with_capacity(sample_capacity * 2);
     let mut represented_edge_ends = Vec::<(usize, usize)>::with_capacity(sample_capacity * 2);
-    for y in (region.y..region.y + region.height).step_by(step) {
-        for x in (region.x..region.x + region.width).step_by(step) {
-            let source_pixel = source.get(x, y);
-            let represented = mapped_sample(candidate, candidate_source, x as f32, y as f32);
-            let source_lab = rgb_to_oklab(source_pixel);
-            let represented_lab = rgb_to_oklab(represented);
-            source_samples.push(source_lab);
-            represented_samples.push(represented_lab);
-            for (following_x, following_y) in [
-                ((x + 1).min(region.x + region.width - 1), y),
-                (x, (y + 1).min(region.y + region.height - 1)),
-            ] {
-                if following_x == x && following_y == y {
-                    continue;
+    let position = |index: usize| {
+        (
+            region.x + index % region.width,
+            region.y + index / region.width,
+        )
+    };
+    for start in (0..region.area()).step_by(stride) {
+        let end = (start + stride).min(region.area());
+        let index = start + (dispersed_sample(start / stride) % (end - start) as u64) as usize;
+        let (x, y) = position(index);
+        source_samples.push(rgb_to_oklab(source.get(x, y)));
+        represented_samples.push(rgb_to_oklab(mapped_sample(
+            candidate,
+            candidate_source,
+            x as f32,
+            y as f32,
+        )));
+
+        // Discover edge evidence independently of the colour samples. A thin
+        // line or isolated dot must not vanish simply because it lies between
+        // sample points. Scan native neighbours with cheap RGB differences;
+        // keep the strongest horizontal and vertical edge in each stratum.
+        // OKLab still decides visibility below, and candidate pixels play no
+        // part in selecting source evidence. Scratch and perceptual work stay
+        // bounded even for very large source regions.
+        let mut edges = [None; 2];
+        let mut strengths = [0.0_f32; 2];
+        for index in start..end {
+            let (x, y) = position(index);
+            let rgb = source.get(x, y);
+            for (axis, following) in [
+                (x + 1 < region.x + region.width).then_some((x + 1, y)),
+                (y + 1 < region.y + region.height).then_some((x, y + 1)),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let Some((xx, yy)) = following else { continue };
+                let next = source.get(xx, yy);
+                let strength = (0..3).map(|c| (rgb[c] - next[c]).powi(2)).sum::<f32>();
+                if strength > strengths[axis] {
+                    strengths[axis] = strength;
+                    edges[axis] = Some((x, y, xx, yy, rgb, next));
                 }
-                source_edge_starts.push(source_lab);
-                source_edge_ends.push(rgb_to_oklab(source.get(following_x, following_y)));
-                represented_edge_starts.push(represented_lab);
-                represented_edge_ends.push((following_x, following_y));
             }
+        }
+        for (x, y, xx, yy, rgb, next) in edges.into_iter().flatten() {
+            source_edge_starts.push(rgb_to_oklab(rgb));
+            source_edge_ends.push(rgb_to_oklab(next));
+            represented_edge_starts.push(rgb_to_oklab(mapped_sample(
+                candidate,
+                candidate_source,
+                x as f32,
+                y as f32,
+            )));
+            represented_edge_ends.push((xx, yy));
         }
     }
     let deltas = delta_e_ok_pairs(&source_samples, &represented_samples);
@@ -830,6 +875,98 @@ pub(crate) fn refinements_cover_canvas(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn perceptual_sampling_detects_every_phase_of_periodic_thin_lines() {
+        let (width, height) = (1024, 1024);
+        let whole = SourceRect {
+            x: 0,
+            y: 0,
+            width,
+            height,
+        };
+        let blank = Raster::blank(width, height, [1.0; 3]);
+        // The previous 6-pixel grid missed phase 3 completely, including edges.
+        for vertical in [false, true] {
+            for phase in 0..6 {
+                let source = Raster::new(
+                    width,
+                    height,
+                    (0..width * height)
+                        .map(|i| {
+                            let coordinate = if vertical { i % width } else { i / width };
+                            if coordinate % 6 == phase {
+                                [0.0; 3]
+                            } else {
+                                [1.0; 3]
+                            }
+                        })
+                        .collect(),
+                );
+                let score = perceptual_score(&source, whole, &blank, whole);
+                assert!(
+                    score.mean_delta_e > 10.0,
+                    "phase {phase}, vertical {vertical}: {score:?}"
+                );
+                assert_eq!(score.missing_edge_fraction, 1.0);
+                let exact = perceptual_score(&source, whole, &source, whole);
+                assert_eq!(exact.combined, 0.0);
+            }
+        }
+    }
+
+    #[test]
+    fn edge_evidence_finds_an_isolated_dot_outside_colour_samples() {
+        let (width, height) = (512, 512);
+        let whole = SourceRect {
+            x: 0,
+            y: 0,
+            width,
+            height,
+        };
+        let blank = Raster::blank(width, height, [1.0; 3]);
+        let mut source = blank.clone();
+        // Pick a location explicitly outside the dispersed colour sample.
+        let start = (200 * width + 200) / 8 * 8;
+        let selected = (dispersed_sample(start / 8) % 8) as usize;
+        source.pixels[start + (selected + 3) % 8] = [0.0; 3];
+        let score = perceptual_score(&source, whole, &blank, whole);
+        assert_eq!(score.mean_delta_e, 0.0);
+        assert_eq!(score.missing_edge_fraction, 1.0);
+        assert!(score.combined >= 3.0);
+        assert_eq!(
+            perceptual_score(&source, whole, &blank, whole).combined,
+            score.combined
+        );
+    }
+
+    #[test]
+    fn perceptual_sampling_handles_offset_and_one_pixel_wide_regions() {
+        let mut source = Raster::blank(9, 19, [1.0; 3]);
+        source.pixels[10 * 9 + 4] = [0.0; 3];
+        for region in [
+            SourceRect {
+                x: 4,
+                y: 5,
+                width: 1,
+                height: 10,
+            },
+            SourceRect {
+                x: 3,
+                y: 10,
+                width: 3,
+                height: 1,
+            },
+        ] {
+            let crop = source.crop(region.x, region.y, region.width, region.height);
+            assert_eq!(
+                perceptual_score(&source, region, &crop, region).combined,
+                0.0
+            );
+            let blank = Raster::blank(region.width, region.height, [1.0; 3]);
+            assert!(perceptual_score(&source, region, &blank, region).combined > 0.0);
+        }
+    }
 
     #[test]
     fn refinement_namespaces_reused_soft_geometry() {
