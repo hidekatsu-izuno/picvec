@@ -21,6 +21,9 @@ import time
 
 ROOT = Path(__file__).resolve().parents[1]
 CASES = {
+    "booster": ("sample/input/booster-layout.jpg", []),
+    "cliparts": ("sample/input/cliparts.png", []),
+    "still-life": ("sample/input/vectorization-stress-still-life.png", []),
     "car": ("sample/input/car.png", []),
     "boy": ("sample/input/boy_and_turtle.png", []),
     "photo": ("sample/input/viewport2.jpg", []),

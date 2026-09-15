@@ -280,6 +280,26 @@ fn inert(node: &crate::svg_document::Element) -> bool {
 
 fn sources(svg: &Document) -> Option<Vec<DrawSource>> {
     use crate::svg_document::Element;
+    // Index borrowed resources first. Named paint/ink groups can contain most
+    // of the drawing, yet are often never referenced. Cloning them eagerly
+    // duplicates the whole scene on every trial. Materialize only actual refs.
+    struct Resource<'a> {
+        node: &'a Element,
+        wrappers: Vec<&'a Element>,
+    }
+    impl Resource<'_> {
+        fn materialize(&self) -> Element {
+            let mut resource = self.node.clone();
+            for parent in &self.wrappers {
+                resource = Element {
+                    name: parent.name.clone(),
+                    attributes: parent.attributes.clone(),
+                    children: vec![resource],
+                };
+            }
+            resource
+        }
+    }
     fn contains(node: &Element, names: &[&str]) -> bool {
         names.contains(&node.name.as_str()) || node.children.iter().any(|n| contains(n, names))
     }
@@ -299,26 +319,29 @@ fn sources(svg: &Document) -> Option<Vec<DrawSource>> {
         node: &'a Element,
         ancestors: &mut Vec<&'a Element>,
         defs: bool,
-        out: &mut HashMap<String, Option<Element>>,
+        out: &mut HashMap<&'a str, Option<Resource<'a>>>,
     ) {
         let defs = defs || node.name == "defs";
         if let Some(id) = node.attr("id") {
             let resource = if defs {
-                Some(node.clone())
+                Some(Resource {
+                    node,
+                    wrappers: Vec::new(),
+                })
             } else if ancestors.iter().all(|p| p.name == "svg" || inert(p)) {
-                let mut resource = node.clone();
-                for parent in ancestors.iter().rev().take_while(|p| p.name != "svg") {
-                    resource = Element {
-                        name: parent.name.clone(),
-                        attributes: parent.attributes.clone(),
-                        children: vec![resource],
-                    };
-                }
-                Some(resource)
+                Some(Resource {
+                    node,
+                    wrappers: ancestors
+                        .iter()
+                        .rev()
+                        .take_while(|p| p.name != "svg")
+                        .copied()
+                        .collect(),
+                })
             } else {
                 None
             };
-            out.insert(id.to_owned(), resource);
+            out.insert(id, resource);
         }
         ancestors.push(node);
         for child in &node.children {
@@ -332,7 +355,7 @@ fn sources(svg: &Document) -> Option<Vec<DrawSource>> {
         node: &Element,
         root: &Element,
         wrappers: &mut Vec<(String, Vec<(String, String)>)>,
-        resources: &HashMap<String, Option<Element>>,
+        resources: &HashMap<&str, Option<Resource<'_>>>,
         out: &mut Vec<DrawSource>,
     ) -> Option<()> {
         if node.name == "defs" {
@@ -353,7 +376,9 @@ fn sources(svg: &Document) -> Option<Vec<DrawSource>> {
         refs(node, &mut needed)?;
         let mut done = BTreeSet::new();
         while let Some(id) = needed.iter().find(|id| !done.contains(*id)).cloned() {
-            refs(resources.get(&id)?.as_ref()?, &mut needed)?;
+            // Eligible wrappers are inert and contain no referenced paints;
+            // all transitive references are in the borrowed node itself.
+            refs(resources.get(id.as_str())?.as_ref()?.node, &mut needed)?;
             done.insert(id);
         }
         out.push(DrawSource {
@@ -361,7 +386,7 @@ fn sources(svg: &Document) -> Option<Vec<DrawSource>> {
             wrappers: wrappers.clone(),
             resources: needed
                 .into_iter()
-                .map(|id| resources[&id].as_ref().unwrap().clone())
+                .map(|id| resources[id.as_str()].as_ref().unwrap().materialize())
                 .collect(),
             element: node.clone(),
         });
@@ -402,10 +427,14 @@ impl Cache {
         }
         let mut draws = Vec::new();
         for source in sources(svg)? {
-            let unchanged = self.trees.contains_key(&source);
-            let tree = match self.trees.get(&source) {
-                Some(tree) => Arc::clone(tree),
-                None => Arc::new(Tree::from_str(&source.document(), &Options::default()).ok()?),
+            // Hashing and comparing the full source is substantial for large
+            // paths and definitions. Obtain both results with one lookup.
+            let (tree, unchanged) = match self.trees.get(&source) {
+                Some(tree) => (Arc::clone(tree), true),
+                None => (
+                    Arc::new(Tree::from_str(&source.document(), &Options::default()).ok()?),
+                    false,
+                ),
             };
             draws.push(fragment(tree, unchanged));
         }
@@ -442,6 +471,15 @@ fn fragment(tree: Arc<Tree>, unchanged: bool) -> Fragment {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lazy_resources_preserve_inherited_context_and_ignore_unused_definitions() {
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="139" height="193"><defs><g id="unused"><use href="#missing"/></g></defs><g id="parent" fill="#39a" fill-rule="evenodd"><path id="shape" d="M4 4H28V38H4Z M10 10H20V20H10Z"/></g><use href="#shape" x="50"/><use href="#parent" y="100"/></svg>"##;
+        let cache = Cache::new(&svg.into()).unwrap();
+        compare(&cache, svg);
+        compare(&cache, &svg.replace("#39a", "#c52"));
+        compare(&cache, &svg.replace("H28", "H32"));
+    }
 
     fn compare(cache: &Cache, svg: &str) {
         let scene = cache.scene(&Document::from((svg).to_string())).unwrap();
@@ -599,6 +637,33 @@ mod tests {
                 "<svg xmlns='http://www.w3.org/2000/svg' width='139' height='193'>{body}</svg>"
             );
             assert!(Cache::new(&Document::from((&svg).to_string())).is_none());
+        }
+    }
+    #[test]
+    #[ignore = "manual profiling of an emitted SVG; set PICVEC_FRAGMENT_SVG"]
+    fn profile_scene_preparation() {
+        use std::{hint::black_box, time::Instant};
+        let svg = std::fs::read_to_string(std::env::var("PICVEC_FRAGMENT_SVG").unwrap()).unwrap();
+        let doc = Document::from(svg);
+        black_box(doc.root());
+        for _ in 0..3 {
+            let start = Instant::now();
+            let extracted = sources(&doc).unwrap();
+            eprintln!(
+                "source preparation: {:.6}s, {} draws",
+                start.elapsed().as_secs_f64(),
+                black_box(&extracted).len()
+            );
+        }
+        let cache = Cache::new(&doc).unwrap();
+        for _ in 0..3 {
+            let start = Instant::now();
+            let scene = cache.scene(&doc).unwrap();
+            eprintln!(
+                "scene preparation: {:.6}s, {} draws",
+                start.elapsed().as_secs_f64(),
+                black_box(&scene).draws.len()
+            );
         }
     }
 }

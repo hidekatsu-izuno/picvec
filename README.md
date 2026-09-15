@@ -121,17 +121,36 @@ evaluation background by default.
 
 See [the evaluator guide](scripts/picvec_eval/README.md) for NCNN/PyTorch setup,
 model paths, source/reference matching, caching and reproducibility controls.
-<!-- 
-## Publish
 
-```sh
-1. Update to vX.X.X on cargo.toml and README.md.
+## GitHub Releases
 
-2. Run commnads
-cargo test
-cargo publish --dry-run
-git tag vX.X.X
-git push origin --tags
-cargo publish
-```
--->
+The [Release binaries workflow](.github/workflows/release.yml) runs manually
+from GitHub's **Actions → Release binaries → Run workflow** menu. Select the
+branch to release and click **Run workflow**. The workflow must first be pushed
+to the repository's default branch for the manual button to appear.
+
+Before a release, update `[package].version` in `Cargo.toml`, refresh `Cargo.lock`
+with `cargo check`, run `cargo test`, and push those changes. No version input or
+manual tag creation is needed: the workflow reads `Cargo.toml` from the selected
+commit and creates `v<version>` (for example, `v1.0.0`) at that exact commit.
+
+| Platform | CPUs | Archive |
+| --- | --- | --- |
+| Linux (GNU libc, built on Ubuntu 24.04) | x86_64, ARM64 | `.tar.gz` |
+| macOS | Intel x86_64, Apple Silicon ARM64 | `.tar.gz` |
+| Windows (MSVC) | x86_64, ARM64 | `.zip` |
+
+Each archive contains the executable, README, license, and third-party notices.
+Linux builds require a compatible GNU libc environment; they are not static musl
+builds. Builds use the Rust version declared by `package.rust-version`, the locked
+dependencies, and the default Cargo features. All six native builds and CLI smoke
+tests must succeed before publication. The release includes `SHA256SUMS` and
+automatically generated release notes. Versions containing a prerelease suffix
+(such as `1.1.0-rc.1`) are published as prereleases.
+
+An existing release or tag with the same version stops the workflow without
+overwriting it. Build failures can be retried with the same version. If an upload
+failure leaves a draft release or tag, inspect and remove that incomplete release
+and tag before retrying, or use a new version. Publication uses the built-in
+`GITHUB_TOKEN` with `contents: write`; no personal access token is needed. Repository
+or organization rules must allow this workflow to create releases and version tags.
