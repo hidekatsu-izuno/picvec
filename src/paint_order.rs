@@ -343,6 +343,7 @@ fn order_graph(
 /// Raster validation is independent of line classification. Both renderings
 /// are compared in premultiplied RGBA, on black and white simultaneously.
 /// At 4x, changes outside a two-source-pixel boundary corridor are forbidden.
+#[cfg(test)]
 pub(crate) fn validate(
     before: &Document,
     after: &Document,
@@ -350,6 +351,20 @@ pub(crate) fn validate(
     matte: Option<&crate::chroma::AlphaMatte>,
     labels: &[u32],
     summary: &mut Summary,
+) -> bool {
+    validate_cached(before, after, source, matte, labels, summary, &mut None)
+}
+
+/// Keep unchanged draw operations available to subsequent covered-hole trials.
+/// Cache keys include geometry, paint definitions and inherited SVG context.
+pub(crate) fn validate_cached(
+    before: &Document,
+    after: &Document,
+    source: &Raster,
+    matte: Option<&crate::chroma::AlphaMatte>,
+    labels: &[u32],
+    summary: &mut Summary,
+    fragments: &mut Option<crate::svg_fragments::Cache>,
 ) -> bool {
     use resvg::{
         tiny_skia::{Pixmap, Transform},
@@ -367,13 +382,15 @@ pub(crate) fn validate(
     // Reuse the existing fragment renderer only when there are multiple bands
     // and clips to cull; ordinary small/unclipped documents keep the direct
     // renderer. Unsupported SVG contexts also keep the direct renderer.
+    *fragments = None;
     let scenes = (h > 128
         && (before.root().contains_attribute("clip-path")
             || after.root().contains_attribute("clip-path")))
     .then(|| {
-        let ca = crate::svg_fragments::Cache::new(before)?;
-        let cb = crate::svg_fragments::Cache::new(after)?;
-        Some((ca.scene(before)?, cb.scene(after)?))
+        let cache = crate::svg_fragments::Cache::new(before)?;
+        let scenes = (cache.scene(before)?, cache.scene(after)?);
+        *fragments = Some(cache);
+        Some(scenes)
     })
     .flatten();
 

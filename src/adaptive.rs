@@ -55,6 +55,7 @@ pub(crate) struct PerceptualScore {
 #[derive(Clone, Debug)]
 pub(crate) struct RefinementCandidate {
     pub core: SourceRect,
+    #[cfg(any(test, feature = "diagnostics"))]
     pub baseline: PerceptualScore,
     #[cfg(any(test, feature = "diagnostics"))]
     pub model_cost: f32,
@@ -93,8 +94,11 @@ pub struct AdaptiveRefinementSummary {
     pub rejected_for_complexity: usize,
     /// Subset of complexity rejections caused by the global byte budget.
     pub rejected_for_budget: usize,
+    /// Error of the coarse planning preview, not a source-resolution render.
     pub baseline_mean_delta_e: f32,
+    /// Planning error minus estimated gains; not measured completed-SVG quality.
     pub refined_mean_delta_e: f32,
+    /// Area-weighted source-resolution gains of the accepted replacements.
     pub estimated_global_delta_e_reduction: f32,
     pub added_svg_bytes: usize,
 }
@@ -693,6 +697,7 @@ pub(crate) fn plan_candidates<S: RasterSource + ?Sized>(
             );
             Some(RefinementCandidate {
                 core,
+                #[cfg(any(test, feature = "diagnostics"))]
                 baseline,
                 #[cfg(any(test, feature = "diagnostics"))]
                 model_cost,

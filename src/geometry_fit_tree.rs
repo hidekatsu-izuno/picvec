@@ -43,20 +43,19 @@ impl<'a> FitTree<'a> {
             let right_tangent = self.right;
             let parameters = chord_parameters(points);
             let curve = least_squares_cubic(points, &parameters, left_tangent, right_tangent);
-            let mut errors = Vec::with_capacity(points.len());
             let predicted = cubic_points(curve, &parameters);
-            for (&point, predicted) in points.iter().zip(predicted) {
+            let mut split = 0_usize;
+            let mut error = 0.0;
+            for (index, (&point, predicted)) in points.iter().zip(predicted).enumerate() {
                 let dx = predicted.x - point.x;
                 let dy = predicted.y - point.y;
-                errors.push(dx * dx + dy * dy);
-            }
-            let mut split = 0_usize;
-            for index in 1..errors.len() {
-                if errors[index] > errors[split] {
+                let squared = dx * dx + dy * dy;
+                // Preserve the first maximum, including the original NaN behavior.
+                if index == 0 || squared > error {
                     split = index;
+                    error = squared;
                 }
             }
-            let error = errors[split];
             if split == 0 || split + 1 == points.len() {
                 split = points.len() / 2;
             }

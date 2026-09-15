@@ -44,7 +44,7 @@ struct Arguments {
     /// Rayon workers; zero selects min(4, half the detected CPU count).
     #[arg(long, default_value_t = 0)]
     threads: usize,
-    /// Render the completed SVG and report 100-scaled OKLab distance/SSIM diagnostics.
+    /// Report completed-SVG OKLab errors, global/local SSIM and worst tiles at processing resolution.
     #[cfg(feature = "diagnostics")]
     #[arg(long)]
     quality_metrics: bool,

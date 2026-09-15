@@ -76,19 +76,26 @@ fn estimate(
 ) -> Option<CurveSegment> {
     let a = points[0];
     let b = *points.last()?;
-    let mut basis = Vec::new();
+    // At most two free coordinates per control point; avoid a heap allocation
+    // on every least-squares iteration.
+    let mut basis = [(0usize, Point::default()); 4];
+    let mut n = 0;
+    let mut push = |value| {
+        basis[n] = value;
+        n += 1;
+    };
     for (side, tangent) in [start, end].into_iter().enumerate() {
         if let Some(tangent) = tangent.filter(|p| dot(*p, *p) > 1e-12) {
-            basis.push((
+            push((
                 side,
                 scale(normalized(tangent), if side == 0 { 1.0 } else { -1.0 }),
             ));
         } else {
-            basis.push((side, Point { x: 1.0, y: 0.0 }));
-            basis.push((side, Point { x: 0.0, y: 1.0 }));
+            push((side, Point { x: 1.0, y: 0.0 }));
+            push((side, Point { x: 0.0, y: 1.0 }));
         }
     }
-    let n = basis.len();
+    let basis = &basis[..n];
     let mut matrix = [[0.0; 5]; 4];
     for (&p, &t) in points.iter().zip(ts) {
         let u = 1.0 - t;
@@ -105,10 +112,13 @@ fn estimate(
             Point { x: -d.y, y: d.x }
         });
         let product = |a, b| normal.map_or_else(|| dot(a, b), |n| dot(a, n) * dot(b, n));
-        for (i, &(side, v)) in basis.iter().enumerate() {
-            let q = scale(v, weights[side]);
-            for (j, &(other, w)) in basis.iter().enumerate() {
-                matrix[i][j] += product(q, scale(w, weights[other])) as f64;
+        let mut weighted = [Point::default(); 4];
+        for (q, &(side, v)) in weighted.iter_mut().zip(basis) {
+            *q = scale(v, weights[side]);
+        }
+        for (i, &q) in weighted[..n].iter().enumerate() {
+            for (j, &w) in weighted[..n].iter().enumerate() {
+                matrix[i][j] += product(q, w) as f64;
             }
             matrix[i][n] += product(q, residual) as f64;
         }

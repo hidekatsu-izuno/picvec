@@ -1,7 +1,7 @@
-//! Remove draw operations only when their omission leaves the final RGBA
-//! raster unchanged at both source scale and 4x. Work on spatial tiles, parse
-//! once, and stop at the first changed tile rather than rerendering the image
-//! once per object. Partial occlusion is deliberately left alone.
+//! Remove draw operations only when their omission leaves native RGBA unchanged
+//! and either a later opaque fill covers their padded bounds or the 4x raster
+//! is unchanged too. Work on spatial tiles, parse once, and stop at the first
+//! changed tile. Partial occlusion is deliberately left alone.
 use crate::svg_document::attrs;
 use crate::svg_document::Document;
 use rayon::prelude::*;
@@ -11,6 +11,9 @@ use resvg::{
 };
 use std::collections::HashMap;
 use std::sync::Mutex;
+
+#[path = "visibility_coverage.rs"]
+mod coverage;
 
 const TILE: usize = 64;
 const PREFIX: &str = "picvec-visibility-";
@@ -460,6 +463,7 @@ fn visibility_evidence(
     width: usize,
     height: usize,
     columns: usize,
+    covered: &[bool],
 ) -> VisibilityEvidence {
     let evidence: Vec<_> = tiles
         .par_iter()
@@ -568,7 +572,7 @@ fn visibility_evidence(
         .map(|(tile, members)| {
             let Some(last) = members
                 .iter()
-                .rposition(|&i| prefix_noop[i] && draws[i].candidate.is_some())
+                .rposition(|&i| !covered[i] && prefix_noop[i] && draws[i].candidate.is_some())
             else {
                 return Vec::new();
             };
@@ -586,8 +590,8 @@ fn visibility_evidence(
             // Only the prefix up to the last queried draw matters. Later
             // source-field composites cannot affect a prefix no-op proof.
             for &i in &members[..=last] {
-                let before =
-                    (prefix_noop[i] && draws[i].candidate.is_some()).then(|| pixels.clone());
+                let before = (!covered[i] && prefix_noop[i] && draws[i].candidate.is_some())
+                    .then(|| pixels.clone());
                 let node = draws[i].node;
                 let b = node.abs_layer_bounding_box().unwrap();
                 let transform = Transform::from_scale(4.0, 4.0)
@@ -603,6 +607,11 @@ fn visibility_evidence(
     for i in changed.into_iter().flatten() {
         prefix_noop[i] = false;
     }
+    for (i, &hidden) in covered.iter().enumerate() {
+        if hidden {
+            prefix_noop[i] = false;
+        }
+    }
     VisibilityEvidence {
         witnesses,
         prefix_noop,
@@ -617,7 +626,15 @@ fn visibility_witnesses(
     height: usize,
     columns: usize,
 ) -> Vec<Vec<usize>> {
-    visibility_evidence(draws, tiles, width, height, columns).witnesses
+    visibility_evidence(
+        draws,
+        tiles,
+        width,
+        height,
+        columns,
+        &vec![false; draws.len()],
+    )
+    .witnesses
 }
 
 pub(crate) fn prune(document: &Document, width: usize, height: usize) -> (Document, Removed) {
@@ -636,6 +653,20 @@ fn prune_cached(
     width: usize,
     height: usize,
     capacity: usize,
+) -> (Document, Removed) {
+    // Prefer geometric coverage when it can be proved; retain the raster
+    // fallback for all other draws. Diagnostics can reproduce the old path.
+    let geometric = !(cfg!(feature = "diagnostics")
+        && std::env::var_os("PICVEC_VISIBILITY_GEOMETRY").is_some_and(|v| v == "0"));
+    prune_impl(document, width, height, capacity, geometric)
+}
+
+fn prune_impl(
+    document: &Document,
+    width: usize,
+    height: usize,
+    capacity: usize,
+    geometric: bool,
 ) -> (Document, Removed) {
     // A <use> can render the same source element again through a filter or
     // transform. Removing its source would alter both instances; do not treat
@@ -686,11 +717,51 @@ fn prune_cached(
             }
         }
     }
+    let geometry_started = std::time::Instant::now();
+    let mut covered = vec![false; draws.len()];
+    if geometric {
+        let covers: Vec<_> = draws.iter().map(|d| coverage::Cover::new(d.node)).collect();
+        covered.par_iter_mut().enumerate().for_each(|(i, hidden)| {
+            if draws[i].candidate.is_none() {
+                return;
+            }
+            // Any single covering draw must appear in every occupied tile.
+            // Search the shortest list and keep the cost bounded on dense art.
+            let Some(members) = memberships[i]
+                .iter()
+                .map(|&t| &tiles[t])
+                .min_by_key(|m| m.len())
+            else {
+                return;
+            };
+            *hidden = members
+                .iter()
+                .rev()
+                .copied()
+                .take_while(|&j| j > i)
+                .take(128)
+                .any(|j| {
+                    covers[j]
+                        .as_ref()
+                        .is_some_and(|c| c.contains(draws[i].bounds))
+                });
+        });
+    }
+    if cfg!(any(test, feature = "diagnostics"))
+        && std::env::var_os("PICVEC_VISIBILITY_DIAGNOSTICS").is_some()
+    {
+        eprintln!(
+            "picvec visibility geometric covers: {}/{}, {:.3}s",
+            covered.iter().filter(|&&b| b).count(),
+            draws.len(),
+            geometry_started.elapsed().as_secs_f64()
+        );
+    }
     let witness_started = std::time::Instant::now();
     let VisibilityEvidence {
         witnesses,
         prefix_noop,
-    } = visibility_evidence(&draws, &tiles, width, height, columns);
+    } = visibility_evidence(&draws, &tiles, width, height, columns, &covered);
     let mut prefix_dirty = Vec::<[f32; 4]>::new();
     let mut prefix_shortcuts = 0usize;
     if cfg!(feature = "diagnostics") && std::env::var_os("PICVEC_VISIBILITY_DIAGNOSTICS").is_some()
@@ -747,19 +818,22 @@ fn prune_cached(
             });
             raster.unchanged_without(view, &draws, &tiles[tile], &active, i)
         };
-        let unchanged = [1, 4].into_iter().all(|scale| {
-            // Most visible objects fail on the first tile. Preserve that cheap
-            // rejection before scheduling the rest of a large footprint.
-            let Some((&first, rest)) = memberships[i].split_first() else {
-                return true;
-            };
-            check(scale, first)
-                && if rest.len() >= 4 {
-                    rest.par_iter().all(|&tile| check(scale, tile))
-                } else {
-                    rest.iter().all(|&tile| check(scale, tile))
-                }
-        });
+        let unchanged = [1, 4]
+            .into_iter()
+            .filter(|&scale| scale == 1 || !covered[i])
+            .all(|scale| {
+                // Most visible objects fail on the first tile. Preserve that cheap
+                // rejection before scheduling the rest of a large footprint.
+                let Some((&first, rest)) = memberships[i].split_first() else {
+                    return true;
+                };
+                check(scale, first)
+                    && if rest.len() >= 4 {
+                        rest.par_iter().all(|&tile| check(scale, tile))
+                    } else {
+                        rest.iter().all(|&tile| check(scale, tile))
+                    }
+            });
         if cfg!(feature = "diagnostics")
             && std::env::var_os("PICVEC_VISIBILITY_DIAGNOSTICS").is_some()
             && check_started.elapsed().as_secs_f64() > 0.5
@@ -1071,6 +1145,142 @@ mod tests {
                     candidate.1
                 );
                 rows.push(serde_json::json!({"input": path, "repeat": repeat, "baseline_seconds": baseline.1, "candidate_seconds": candidate.1, "input_bytes": svg.len(), "output_bytes": candidate.0.0.len(), "removed_shapes": candidate.0.1.shapes, "outputs_equal": true}));
+                std::fs::write(&output, serde_json::to_vec_pretty(&rows).unwrap()).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn geometric_covers_preserve_holes_alpha_and_subpixel_exposure() {
+        let cases = [
+            // Opaque cubic encloses the mark with a wide margin.
+            (
+                r##"<rect x="28" y="28" width="8" height="8" fill="red"/><path fill="blue" d="M4 32C4 4 60 4 60 32C60 60 4 60 4 32Z"/>"##,
+                true,
+            ),
+            // A curved notch enters the query despite the broad outer bounds.
+            (
+                r##"<rect x="28" y="28" width="8" height="8" fill="red"/><path fill="blue" d="M2 2H62V62H2V40C50 40 50 24 2 24Z"/>"##,
+                false,
+            ),
+            // Opposite winding makes a nonzero-rule hole too.
+            (
+                r##"<rect x="28" y="28" width="8" height="8" fill="red"/><path fill="blue" d="M2 2H62V62H2Z M30 30V34H34V30Z"/>"##,
+                false,
+            ),
+            // A hole inside the queried bounds defeats boundary-only containment.
+            (
+                r##"<rect x="28" y="28" width="8" height="8" fill="red"/><path fill="blue" fill-rule="evenodd" d="M2 2H62V62H2Z M30 30H34V34H30Z"/>"##,
+                false,
+            ),
+            (
+                r##"<rect x="28" y="28" width="8" height="8" fill="red"/><rect x="2" y="2" width="60" height="60" fill="blue" fill-opacity=".5"/>"##,
+                false,
+            ),
+            // A broad object with only a subpixel strip exposed.
+            (
+                r##"<rect x="8" y="8" width="40.1" height="40" fill="red"/><rect x="2" y="2" width="46" height="60" fill="blue"/>"##,
+                false,
+            ),
+            // Implicit closure and a transformed quadratic boundary.
+            (
+                r##"<rect x="28" y="28" width="8" height="8" fill="red"/><path transform="translate(2 2)" fill="blue" d="M0 0H60V60H0 Q-5 30 0 0"/>"##,
+                true,
+            ),
+            (
+                r##"<rect x="28" y="28" width="8" height="8" fill="red"/><defs><clipPath id="c"><rect width="30" height="64"/></clipPath></defs><rect width="64" height="64" fill="blue" clip-path="url(#c)"/>"##,
+                false,
+            ),
+            // Shared boundaries are excluded even when both fills are opaque.
+            (
+                r##"<rect x="8" y="8" width="40" height="40" fill="red"/><rect x="8" y="8" width="40" height="40" fill="blue"/>"##,
+                false,
+            ),
+        ];
+        for (body, expected_cover) in cases {
+            let svg = format!(
+                r##"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64">{body}</svg>"##
+            );
+            let document = Document::from(svg.clone());
+            let (annotated, _) = annotate(&document);
+            let tree = usvg::Tree::from_str(&annotated, &usvg::Options::default()).unwrap();
+            let mut draws = Vec::new();
+            collect(tree.root(), &mut draws);
+            let covered = coverage::Cover::new(draws.last().unwrap().node)
+                .is_some_and(|cover| cover.contains(draws[0].bounds));
+            assert_eq!(covered, expected_cover, "{body}");
+            let baseline = prune_impl(&document, 64, 64, CACHE_TILES, false);
+            let candidate = prune_impl(&document, 64, 64, CACHE_TILES, true);
+            assert_eq!(baseline, candidate, "{body}");
+            for scale in [1, 4, 8, 16] {
+                assert!(
+                    image(&svg, scale) == image(&candidate.0, scale),
+                    "RGBA differs at scale {scale}: {body}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unresolved_subpixel_exposure_retains_the_legacy_fallback() {
+        // Characterize a pre-existing limitation, not a geometry shortcut:
+        // 1x/4x equality does not imply equality at arbitrary SVG zoom levels.
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><rect x="8" y="8" width="40.01" height="40" fill="red"/><rect x="2" y="2" width="46" height="60" fill="blue"/></svg>"##;
+        let document = Document::from(svg);
+        let baseline = prune_impl(&document, 64, 64, CACHE_TILES, false);
+        let candidate = prune_impl(&document, 64, 64, CACHE_TILES, true);
+        assert_eq!(baseline, candidate);
+        assert_eq!(candidate.1.shapes, 1);
+        for scale in [1, 4, 8] {
+            assert!(image(svg, scale) == image(&candidate.0, scale));
+        }
+        assert!(image(svg, 16) != image(&candidate.0, 16));
+    }
+
+    #[test]
+    #[ignore = "prototype A/B benchmark; set PICVEC_VISIBILITY_BENCH_INPUTS and PICVEC_VISIBILITY_BENCH_OUTPUT"]
+    fn benchmark_geometric_coverage() {
+        let paths = std::env::var_os("PICVEC_VISIBILITY_BENCH_INPUTS").unwrap();
+        let output = std::env::var_os("PICVEC_VISIBILITY_BENCH_OUTPUT").unwrap();
+        let repeats = std::env::var("PICVEC_VISIBILITY_BENCH_REPEATS")
+            .map(|v| v.parse::<usize>().unwrap())
+            .unwrap_or(3);
+        let mut rows = Vec::new();
+        for path in std::env::split_paths(&paths) {
+            let document = Document::from(std::fs::read_to_string(&path).unwrap());
+            let tree = usvg::Tree::from_str(&document, &usvg::Options::default()).unwrap();
+            let (w, h) = (
+                tree.size().width().ceil() as usize,
+                tree.size().height().ceil() as usize,
+            );
+            drop(tree);
+            let measure = |geometric| {
+                let start = std::time::Instant::now();
+                let result = prune_impl(&document, w, h, CACHE_TILES, geometric);
+                (result, start.elapsed().as_secs_f64())
+            };
+            // Warm both implementations; alternate order in measured trials.
+            assert_eq!(measure(false).0, measure(true).0);
+            for repeat in 0..repeats {
+                let (baseline, candidate) = if repeat % 2 == 0 {
+                    (measure(false), measure(true))
+                } else {
+                    let candidate = measure(true);
+                    (measure(false), candidate)
+                };
+                assert_eq!(baseline.0, candidate.0, "{}", path.display());
+                eprintln!(
+                    "geometry {} trial {}: {:.3}s -> {:.3}s",
+                    path.display(),
+                    repeat + 1,
+                    baseline.1,
+                    candidate.1
+                );
+                rows.push(
+                    serde_json::json!({"input": path, "repeat": repeat, "width": w, "height": h,
+                    "baseline_seconds": baseline.1, "candidate_seconds": candidate.1,
+                    "removed_shapes": candidate.0.1.shapes, "outputs_equal": true}),
+                );
                 std::fs::write(&output, serde_json::to_vec_pretty(&rows).unwrap()).unwrap();
             }
         }

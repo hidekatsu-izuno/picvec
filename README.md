@@ -41,8 +41,16 @@ summary) or `--quality-metrics` (completed-SVG OKLab/SSIM measurements):
 
 ```sh
 mise exec -- cargo build --release --locked --features diagnostics
-./target/release/picvec input.png output.svg --verbose
+./target/release/picvec input.png output.svg --verbose --quality-metrics
 ```
+
+Quality diagnostics report the evaluated width, height and composite background.
+They compare the completed SVG at the processing resolution with the processing
+reference. `global_ssim` covers the complete image; `local_ssim` averages uniform
+7×7 windows on linear luminance (smaller odd windows for tiny images). The
+`worst_tiles` list locates up to eight 64×64 tiles with the largest mean OKLab
+error, including their maximum error and local SSIM. Coordinates refer to the
+reported evaluation resolution. These RGB diagnostics use the reported backing.
 
 Diagnostic output goes to stderr. Segmentation and geometry diagnostics describe
 the base processing stages; the final object/contour counts describe the complete
@@ -64,11 +72,16 @@ All images and adaptive source refinements use the same vectorization core.
    faces reuse their common boundary. Authored transparency stays in paint.
 5. Determine paint order from line width, elongation and source contrast, then
    construct overlap beneath later faces to prevent seams. Validate ordering
-   and covered-hole simplification against rendered source evidence. Retain
+   and covered-hole simplification against rendered source evidence. These
+   checks share parsed draw operations and cached isolated layers; hole removal
+   also receives a complete final render check at native size and 4×. Retain
    structural lines only when they contribute to the painted result.
 6. Remove invisible contributions and serialize the core result. For downscaled
    inputs, evaluate finer source candidates through this same core. Accept only
    candidates that pass the common quality-gain, missing-edge and SVG-cost checks.
+   Planning uses a coarse preview; final gain and crop-join checks render both
+   the base and candidate SVG directly at the same source resolution. Upsampling
+   a preview cannot itself count as a quality improvement.
 7. Compose accepted refinements, discard superseded base geometry when the whole
    canvas is replaced, count the final drawing elements and write the SVG.
 

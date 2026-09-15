@@ -31,7 +31,12 @@ struct Baseline {
 }
 
 impl Baseline {
+    #[cfg(test)]
     fn new(svg: &Document) -> Option<Self> {
+        Self::with_fragments(svg, None)
+    }
+
+    fn with_fragments(svg: &Document, fragments: Option<crate::svg_fragments::Cache>) -> Option<Self> {
         let tree = Tree::from_str(svg, &Options::default()).ok()?;
         let size = tree.size();
         let (w, h) = (size.width().ceil() as usize, size.height().ceil() as usize);
@@ -51,7 +56,7 @@ impl Baseline {
         Some(Self {
             size,
             bands,
-            fragments: crate::svg_fragments::Cache::new(svg),
+            fragments: fragments.or_else(|| crate::svg_fragments::Cache::new(svg)),
             last_failure: AtomicUsize::new(usize::MAX),
         })
     }
@@ -275,12 +280,28 @@ impl RejectedTrials {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn simplify<F>(
     geometry: &mut [RegionGeometry],
     original: (Document, SvgSummary),
     labels: &[u32],
     width: usize,
     alpha: Option<&crate::chroma::AlphaMatte>,
+    serialize: F,
+) -> (Document, SvgSummary, usize)
+where
+    F: FnMut(&[RegionGeometry]) -> (Document, SvgSummary),
+{
+    simplify_cached(geometry, original, labels, width, alpha, None, serialize)
+}
+
+pub(crate) fn simplify_cached<F>(
+    geometry: &mut [RegionGeometry],
+    original: (Document, SvgSummary),
+    labels: &[u32],
+    width: usize,
+    alpha: Option<&crate::chroma::AlphaMatte>,
+    fragments: Option<crate::svg_fragments::Cache>,
     mut serialize: F,
 ) -> (Document, SvgSummary, usize)
 where
@@ -299,7 +320,7 @@ where
     if candidates.is_empty() {
         return (original.0, original.1, 0);
     }
-    let Some(baseline) = Baseline::new(&original.0) else {
+    let Some(baseline) = Baseline::with_fragments(&original.0, fragments) else {
         return (original.0, original.1, 0);
     };
     let mut boundary = vec![false; labels.len()];
@@ -460,6 +481,40 @@ mod reference;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn order_cache_preserves_hole_checks_after_adoption_or_rejection() {
+        let before = r##"<svg xmlns="http://www.w3.org/2000/svg" width="137" height="193"><defs><clipPath id="c"><path d="M1 1H135V191H1Z"/></clipPath><linearGradient id="p"><stop stop-color="#579"/><stop offset="1" stop-color="#ace" stop-opacity=".5"/></linearGradient></defs><g clip-path="url(#c)"><path fill="url(#p)" fill-rule="evenodd" d="M2 2H134V190H2Z M20 20H40V40H20Z"/><path d="M3 96H133" fill="none" stroke="#123" stroke-width=".3" stroke-opacity=".6"/></g></svg>"##;
+        let original = Document::from(before.to_owned());
+        let source = crate::raster::Raster::blank(137, 193, [0.5; 3]);
+        let labels = vec![0; 137 * 193];
+        for adopted in [before.to_owned(), before.replace("#579", "#975")] {
+            let mut cache = None;
+            crate::paint_order::validate_cached(
+                &original,
+                &original,
+                &source,
+                None,
+                &labels,
+                &mut crate::paint_order::Summary::default(),
+                &mut cache,
+            );
+            assert!(cache.is_some());
+            let document = Document::from(adopted.clone());
+            let cached = Baseline::with_fragments(&document, cache).unwrap();
+            let fresh = Baseline::new(&document).unwrap();
+            for (trial, expected) in [
+                (adopted.clone(), true),
+                (adopted.replace(" M20 20H40V40H20Z", ""), false),
+                (adopted.replace(".6", ".2"), false),
+                (adopted.replace("H135", "H35"), false),
+            ] {
+                let trial = Document::from(trial);
+                assert_eq!(fresh.equivalent(&trial, None), expected);
+                assert_eq!(cached.equivalent(&trial, None), expected);
+            }
+        }
+    }
+
     use super::*;
     #[test]
     fn reused_checks_match_full_final_render_for_partial_and_complete_acceptance() {

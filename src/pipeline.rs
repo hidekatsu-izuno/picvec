@@ -12,7 +12,8 @@ use std::collections::HashMap;
 
 use crate::adaptive::{
     compose_refinements, matching_refinement_core, perceptual_score, plan_candidates,
-    refinements_cover_canvas, AdaptiveRefinementSummary, EmbeddedRefinement, SourceRect,
+    refinements_cover_canvas, AdaptiveRefinementSummary, EmbeddedRefinement, PerceptualScore,
+    SourceRect,
 };
 use crate::chroma::{self, AlphaMatte, AlphaTransparencySummary, ChromaKeySummary};
 use crate::color::{rgb_to_oklab, Oklab};
@@ -484,6 +485,92 @@ fn parse_svg_document(document: &str) -> Result<resvg::usvg::Tree> {
     )
 }
 
+/// Render a document representing `document_source` directly onto a native
+/// source-space crop. Both axes use the actual document size; a crop may have
+/// a different origin and independently rounded processing dimensions.
+fn render_source_region(
+    tree: &resvg::usvg::Tree,
+    document_source: SourceRect,
+    region: SourceRect,
+    background: [f32; 3],
+) -> Result<Raster> {
+    render_svg_tree_on(
+        tree,
+        region.width,
+        region.height,
+        resvg::tiny_skia::Transform::from_row(
+            document_source.width as f32 / tree.size().width(),
+            0.0,
+            0.0,
+            document_source.height as f32 / tree.size().height(),
+            document_source.x as f32 - region.x as f32,
+            document_source.y as f32 - region.y as f32,
+        ),
+        background,
+    )
+}
+
+struct RefinementComparison {
+    core: SourceRect,
+    baseline: PerceptualScore,
+    refined: PerceptualScore,
+    boundary_matches: bool,
+}
+
+impl RefinementComparison {
+    fn gain(&self) -> f32 {
+        self.baseline.combined - self.refined.combined
+    }
+
+    fn improves(&self, config: &Config) -> bool {
+        self.boundary_matches
+            && self.gain() >= config.adaptive_min_perceptual_gain
+            && self.refined.p90_delta_e <= self.baseline.p90_delta_e + 0.25
+            && self.refined.missing_edge_fraction <= self.baseline.missing_edge_fraction + 0.025
+    }
+}
+
+/// The coarse planning preview must not decide the measured gain. Otherwise
+/// its interpolation blur looks like a vector defect, and a higher-resolution
+/// copy of the very same geometry can appear to improve the result.
+#[allow(clippy::too_many_arguments)]
+fn compare_refinement<S: RasterSource + ?Sized>(
+    source: &S,
+    matte: Option<&AlphaMatte>,
+    base_tree: &resvg::usvg::Tree,
+    child_tree: &resvg::usvg::Tree,
+    proposed_core: SourceRect,
+    expanded: SourceRect,
+    background: [f32; 3],
+) -> Result<RefinementComparison> {
+    let whole = SourceRect {
+        x: 0,
+        y: 0,
+        width: source.width(),
+        height: source.height(),
+    };
+    // Reuse these two crops for the join check and both quality scores. Never
+    // allocate a complete source-size canvas merely to validate a local patch.
+    let baseline = render_source_region(base_tree, whole, expanded, background)?;
+    let refined = render_source_region(child_tree, expanded, expanded, background)?;
+    let matched_core = matching_refinement_core(
+        &baseline,
+        &refined,
+        expanded,
+        whole,
+        proposed_core,
+        expanded,
+        matte,
+    );
+    let core = matched_core.unwrap_or(proposed_core);
+    Ok(RefinementComparison {
+        core,
+        baseline: perceptual_score(source, core, &baseline, expanded),
+        refined: perceptual_score(source, core, &refined, expanded),
+        boundary_matches: matched_core.is_some(),
+    })
+}
+
 /// Convert one raster into exactly the SVG path requested by the caller.
 /// No source copy, rendered PNG, or JSON sidecar is produced.
 pub fn vectorize(input: &Path, output: &Path, config: &Config) -> Result<Summary> {
@@ -664,10 +751,12 @@ fn adaptively_refine(
     let reference_source = reference_source.ok_or_else(|| -> Error {
         "adaptive reference raster was released before refinement".into()
     })?;
-    let base_render = render_svg_document_on(
-        &core.document,
+    let base_tree = parse_svg_document(&core.document)?;
+    let base_render = render_svg_tree_on(
+        &base_tree,
         core.processing_reference.width,
         core.processing_reference.height,
+        resvg::tiny_skia::Transform::identity(),
         core.preview_background,
     )?;
     let whole = SourceRect {
@@ -732,10 +821,7 @@ fn adaptively_refine(
     let parallel_jobs =
         adaptive_parallel_jobs(&candidates, (input_width, input_height), execution_threads);
     summary.parallel_jobs = parallel_jobs;
-    // Compare the actual vector join at source resolution. Upsampling the
-    // coarse preview invents an antialias halo across otherwise clear gaps.
-    // Parse once; render only the small child bounds, not a full-size sheet.
-    let base_tree = parse_svg_document(&core.document)?;
+    // Reuse the parsed base for source-resolution join and quality validation.
     let outcomes = bounded_map(&candidates, parallel_jobs,
             |candidate| -> Result<RefinementOutcome> {
                 let margin = (candidate.core.width.min(candidate.core.height) / 64).clamp(8, 24);
@@ -787,37 +873,19 @@ fn adaptively_refine(
                     core.preview_background,
                     &child_config,
                 )?;
-                let child_render = render_svg_document_on(
-                    &child.document,
-                    child.processing_reference.width,
-                    child.processing_reference.height,
-                    core.preview_background,
-                )?;
-                let boundary_base = render_svg_tree_on(
+                let child_tree = parse_svg_document(&child.document)?;
+                let comparison = compare_refinement(
+                    reference_source,
+                    source_matte,
                     &base_tree,
-                    expanded.width,
-                    expanded.height,
-                    resvg::tiny_skia::Transform::from_row(
-                        input_width as f32 / base_tree.size().width(), 0.0,
-                        0.0, input_height as f32 / base_tree.size().height(),
-                        -(expanded.x as f32), -(expanded.y as f32),
-                    ),
-                    core.preview_background,
-                )?;
-                let matched_core = matching_refinement_core(
-                    &boundary_base,
-                    &child_render,
-                    expanded,
-                    whole,
+                    &child_tree,
                     candidate.core,
                     expanded,
-                    source_matte,
-                );
-                let core = matched_core.unwrap_or(candidate.core);
-                let baseline = if core == candidate.core { candidate.baseline }
-                    else { perceptual_score(reference_source, core, &base_render, whole) };
-                let refined = perceptual_score(reference_source, core, &child_render, expanded);
-                let boundary_matches = matched_core.is_some();
+                    core.preview_background,
+                )?;
+                let core = comparison.core;
+                let baseline = comparison.baseline;
+                let refined = comparison.refined;
                 #[cfg(feature = "diagnostics")]
                 if config.retain_diagnostics {
                     eprintln!(
@@ -828,22 +896,14 @@ fn adaptively_refine(
                         core.height,
                         baseline,
                         refined,
-                        boundary_matches,
+                        comparison.boundary_matches,
                         child.svg.bytes,
                     );
                 }
-                if !boundary_matches {
+                if !comparison.improves(config) {
                     return Ok(RefinementOutcome::QualityRejected);
                 }
-                let combined_gain = baseline.combined - refined.combined;
-                if combined_gain < config.adaptive_min_perceptual_gain
-                    || refined.p90_delta_e > baseline.p90_delta_e + 0.25
-                    || refined.missing_edge_fraction
-                        > baseline.missing_edge_fraction + 0.025
-                {
-                    return Ok(RefinementOutcome::QualityRejected);
-                }
-                let rate = candidate.measured_rate(combined_gain, core.area(), child.svg.bytes);
+                let rate = candidate.measured_rate(comparison.gain(), core.area(), child.svg.bytes);
                 if rate < config.adaptive_complexity_penalty {
                     return Ok(RefinementOutcome::ComplexityRejected);
                 }
@@ -955,9 +1015,10 @@ fn adaptively_refine(
         )?;
         #[cfg(feature = "diagnostics")]
         {
-            core.quality = Some(crate::metrics::compare(
+            core.quality = Some(crate::metrics::compare_on(
                 &core.processing_reference,
                 &final_render,
+                core.preview_background,
             ));
         }
         #[cfg(not(feature = "diagnostics"))]
@@ -1106,7 +1167,7 @@ fn vectorize_inner(
             processing_height,
             preview_background,
         )?;
-        core.quality = Some(crate::metrics::compare(&reference, &rendered));
+        core.quality = Some(crate::metrics::compare_on(&reference, &rendered, preview_background));
     }
     let to_u8 =
         |color: [f32; 3]| color.map(|channel| (channel.clamp(0.0, 1.0) * 255.0).round() as u8);
@@ -1945,6 +2006,7 @@ fn vectorize_processing(
         face_alpha.as_ref(),
         &mut geometry_cache,
     );
+    let mut validation_fragments = None;
     if order_proposal.summary.changed_ranks > 0 {
         // The old ordering is only a validation reference, never an input to
         // the ordered geometry's expansion decisions.
@@ -1975,13 +2037,14 @@ fn vectorize_processing(
             let _ = fs::write(format!("{prefix}-order-candidate.svg"), &document);
             let _ = fs::write(format!("{prefix}-order-baseline.svg"), &reference);
         }
-        if !crate::paint_order::validate(
+        if !crate::paint_order::validate_cached(
             &reference,
             &document,
             &processing,
             chroma_matte,
             &segmentation.labels,
             &mut order_proposal.summary,
+            &mut validation_fragments,
         ) {
             document = reference;
             svg_report = report;
@@ -2026,12 +2089,13 @@ fn vectorize_processing(
                     .collect(),
             )
         });
-        let (filled, report, removed) = crate::occlusion::simplify(
+        let (filled, report, removed) = crate::occlusion::simplify_cached(
             &mut geometry,
             (document, svg_report),
             &segmentation.labels,
             processing.width,
             material_alpha.as_ref().or(chroma_matte),
+            validation_fragments.take(),
             crate::svg::hole_serializer(
                 processing.width,
                 processing.height,
@@ -2053,6 +2117,7 @@ fn vectorize_processing(
             &mut checkpoint,
         );
     }
+    drop(validation_fragments);
     drop(geometry_cache);
     // Use a neutral comparison backing; the chroma diagnostic backing is
     // deliberately saturated and must not veto grayscale source evidence.
@@ -2086,9 +2151,10 @@ fn vectorize_processing(
             processing.height,
             preview_background,
         )?;
-        Some(crate::metrics::compare(
+        Some(crate::metrics::compare_on(
             &processing_reference,
             &final_render,
+            preview_background,
         ))
     } else {
         None
@@ -2134,6 +2200,148 @@ mod tests {
     use std::collections::HashSet;
     use std::sync::{Arc, Barrier};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn refinement_quality_does_not_reward_a_higher_resolution_copy() {
+        let body = r##"<path d="M12 80L62 12L116 80Z" fill="#1762ba"/><circle cx="64" cy="52" r="17" fill="#fbc950" fill-opacity="0.55"/>"##;
+        let fine = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="128" height="96">{body}</svg>"#
+        );
+        let coarse = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="12" viewBox="0 0 128 96">{body}</svg>"#
+        );
+        let background = [0.9, 0.95, 1.0];
+        let source = render_svg_document_on(&fine, 128, 96, background).unwrap();
+        let whole = SourceRect {
+            x: 0,
+            y: 0,
+            width: 128,
+            height: 96,
+        };
+        let coarse_preview = render_svg_document_on(&coarse, 16, 12, background).unwrap();
+        let old_baseline = perceptual_score(&source, whole, &coarse_preview, whole);
+        let comparison = compare_refinement(
+            &source,
+            None,
+            &parse_svg_document(&coarse).unwrap(),
+            &parse_svg_document(&fine).unwrap(),
+            whole,
+            whole,
+            background,
+        )
+        .unwrap();
+        assert!(
+            old_baseline.combined > Config::default().adaptive_min_perceptual_gain,
+            "coarse interpolation should reproduce the false gain: {old_baseline:?}"
+        );
+        assert!(comparison.boundary_matches);
+        assert_eq!(comparison.baseline.combined, 0.0);
+        assert_eq!(comparison.refined.combined, 0.0);
+        assert!(!comparison.improves(&Config::default()));
+    }
+
+    #[test]
+    fn refinement_quality_keeps_real_missing_line_improvements() {
+        let base = r#"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="12"/>"#;
+        let fine = r#"<svg xmlns="http://www.w3.org/2000/svg" width="128" height="96"><path d="M12 47H116V49H12Z" fill="black"/></svg>"#;
+        let source = render_svg_document_on(fine, 128, 96, [1.0; 3]).unwrap();
+        let whole = SourceRect {
+            x: 0,
+            y: 0,
+            width: 128,
+            height: 96,
+        };
+        let comparison = compare_refinement(
+            &source,
+            None,
+            &parse_svg_document(base).unwrap(),
+            &parse_svg_document(fine).unwrap(),
+            whole,
+            whole,
+            [1.0; 3],
+        )
+        .unwrap();
+        assert_eq!(comparison.refined.combined, 0.0);
+        assert_eq!(comparison.baseline.missing_edge_fraction, 1.0);
+        assert!(comparison.improves(&Config::default()));
+    }
+
+    #[test]
+    fn refinement_quality_aligns_offset_crops_and_both_scale_axes() {
+        let body = r##"<path d="M12 80L62 12L116 80Z" fill="#1762ba" fill-opacity="0.6"/><path d="M18 40H110" fill="none" stroke="#c82030" stroke-width="2"/>"##;
+        let fine = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="128" height="96">{body}</svg>"#
+        );
+        let coarse = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="12" viewBox="0 0 128 96">{body}</svg>"#
+        );
+        // Nonzero source origin; the child uses different X/Y processing scales.
+        let child = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="30" height="11" viewBox="28 20 60 44" preserveAspectRatio="none">{body}</svg>"#
+        );
+        let expanded = SourceRect {
+            x: 28,
+            y: 20,
+            width: 60,
+            height: 44,
+        };
+        let core = SourceRect {
+            x: 32,
+            y: 24,
+            width: 52,
+            height: 36,
+        };
+        for background in [[0.0; 3], [1.0; 3]] {
+            let source = render_svg_document_on(&fine, 128, 96, background).unwrap();
+            let comparison = compare_refinement(
+                &source,
+                None,
+                &parse_svg_document(&coarse).unwrap(),
+                &parse_svg_document(&child).unwrap(),
+                core,
+                expanded,
+                background,
+            )
+            .unwrap();
+            assert!(comparison.boundary_matches);
+            assert_eq!(comparison.core, core);
+            assert_eq!(comparison.baseline.combined, 0.0);
+            assert_eq!(comparison.refined.combined, 0.0);
+            assert!(!comparison.improves(&Config::default()));
+        }
+    }
+
+    #[test]
+    fn refinement_quality_still_rejects_a_changed_crop_join() {
+        let base = r#"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="12"/>"#;
+        let child = r#"<svg xmlns="http://www.w3.org/2000/svg" width="60" height="44"><path d="M0 0H60V44H0Z" fill="black"/></svg>"#;
+        let source = Raster::blank(128, 96, [0.0; 3]);
+        let expanded = SourceRect {
+            x: 28,
+            y: 20,
+            width: 60,
+            height: 44,
+        };
+        let core = SourceRect {
+            x: 32,
+            y: 24,
+            width: 52,
+            height: 36,
+        };
+        let comparison = compare_refinement(
+            &source,
+            None,
+            &parse_svg_document(base).unwrap(),
+            &parse_svg_document(child).unwrap(),
+            core,
+            expanded,
+            [1.0; 3],
+        )
+        .unwrap();
+        assert!(comparison.gain() > 1.0);
+        assert!(!comparison.boundary_matches);
+        assert!(!comparison.improves(&Config::default()));
+    }
 
     #[test]
     #[ignore = "source-resolution scanned drawing regression; run explicitly"]
@@ -4389,6 +4597,23 @@ mod tests {
         assert!(quality.delta_e_ok_p90.is_finite());
         assert!(quality.delta_e_ok_p99.is_finite());
         assert!(quality.global_ssim.is_finite());
+        assert!(quality.local_ssim.is_finite());
+        assert_eq!((quality.width, quality.height), (32, 24));
+        assert_eq!(quality.local_ssim_window, 7);
+        assert_eq!(quality.comparison_background, Some([1.0; 3]));
+        assert!(!quality.worst_tiles.is_empty());
+        let without_metrics = directory.join("without-metrics.svg");
+        vectorize(
+            &input,
+            &without_metrics,
+            &Config {
+                segmentation_min_size: 2,
+                minimum_gradient_area: 8,
+                ..Config::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(fs::read(&output).unwrap(), fs::read(without_metrics).unwrap());
         fs::remove_dir_all(directory).unwrap();
     }
 
