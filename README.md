@@ -1,21 +1,20 @@
 # picvec
 
-picvec converts raster images into editable SVG using Rust. Output consists of
-painted paths, geometric primitives and supported structural lines, with solid
-colours or linear/radial gradients. The converter uses the original image as
-its reference.
+picvec converts raster images into editable SVG using Rust.
 
 ## Build and convert
 
+### Build
+
 ```sh
 mise exec -- cargo build --release --locked
-./target/release/picvec input.png output.svg
-./target/release/picvec --help
 ```
 
-The second argument is the exact SVG file to write. The converter writes it
-atomically. It embeds `resvg` for internal rendering and uses portable `wide`
-SIMD.
+```sh
+picvec input.png output.svg
+```
+
+The second argument is the exact SVG file to write. 
 
 Completion reports the dimensions, **final SVG object count**, **path contour
 count** (`subpaths`) and elapsed time. Groups and definitions are excluded from
@@ -58,50 +57,46 @@ emitted document.
 
 ## Processing order
 
-All images and adaptive source refinements use the same vectorization core.
+picvec rebuilds an image as editable shapes and lines, using the original as a
+visual reference. It starts with the overall picture, then checks whether a
+closer look can improve the details.
 
-1. Decode and validate the source, distinguish paint opacity from edge coverage,
-   and select the base resolution.
-2. Analyse boundaries, shading and thin lines. Build material ownership and
-   absorb locally supported antialias fragments into their incident regions.
-   Preserve source-supported dots, highlights, colour and opacity boundaries.
-3. Fit solid/gradient paints and merge compatible ownership before tracing.
-   Narrow chromatic-rim recovery supplies ordinary ownership labels before
-   alpha partitioning.
-4. Construct shared boundaries and fit curves or geometric primitives. Adjacent
-   faces reuse their common boundary. Authored transparency stays in paint.
-5. Determine paint order from line width, elongation and source contrast, then
-   construct overlap beneath later faces to prevent seams. Validate ordering
-   and covered-hole simplification against rendered source evidence. These
-   checks share parsed draw operations and cached isolated layers; hole removal
-   also receives a complete final render check at native size and 4×. Retain
-   structural lines only when they contribute to the painted result.
-6. Remove invisible contributions and serialize the core result. For downscaled
-   inputs, evaluate finer source candidates through this same core. Accept only
-   candidates that pass the common quality-gain, missing-edge and SVG-cost checks.
-   Planning uses a coarse preview; final gain and crop-join checks render both
-   the base and candidate SVG directly at the same source resolution. Upsampling
-   a preview cannot itself count as a quality improvement.
-7. Compose accepted refinements, discard superseded base geometry when the whole
-   canvas is replaced, count the final drawing elements and write the SVG.
+1. **Read the image.** Check that it can be processed and choose a working size.
+   Large images may be reduced for the first pass.
+2. **Find the parts of the picture.** Identify coloured areas, shading and thin
+   lines. Fold tiny colour patches caused by softened pixel edges into nearby
+   areas, while preserving details such as dots and highlights.
+3. **Choose how to colour each part.** Represent its colour with a single fill
+   or a gradual colour transition. Combine areas that can share the same fill
+   without losing visible differences.
+4. **Turn pixel edges into shapes.** Follow the visible outlines with smooth
+   curves or simple shapes. Neighbouring shapes share an edge so they fit together.
+5. **Arrange the layers.** Decide which shapes appear in front and let them
+   overlap where needed to avoid gaps. Compare the result with the original
+   before removing hidden shapes or lines.
+6. **Check finer details.** If the first pass used a smaller image, revisit the
+   original at a larger size using the same steps. Keep changes only when they
+   improve the match, preserve edges and justify the added SVG size.
+7. **Save the SVG.** Combine the accepted improvements, remove shapes they have
+   replaced, and count and write the final drawing elements.
 
-When no safe local refinement core exists but background/foreground separation is supported
-by the source, the complete source can be evaluated as a candidate. Images with
-no such separation evidence retain the selected global model. This preserves one
-model for connected strokes and gradients, but can be much slower than the base
-conversion. A configured SVG budget limits accepted additional output bytes.
+The detail check may revisit a small area or, when the image supports it, the
+whole picture. Checking the whole picture helps keep connected lines and gradual
+colour transitions consistent, but can take much longer. If no suitable
+improvement is found, picvec keeps the first result. You can limit the extra file
+size with `--adaptive-svg-budget-mib`.
 
 ### Transparency and visible geometry
 
-- Alpha is expressed by fill/stroke opacity or gradient-stop opacity.
-- Edge coverage informs the fitted visible contour.
-- Geometric clipping may delimit adaptive source replacements or stroke outlines.
-  Local colour reconstructions explicitly composite each RGBA paint and the
-  completed patch before clipping, using a neutral sRGB filter and opaque boundary
-  support. Boundary colour matching preserves source alpha.
-- Redundant regions should be merged before fitting. Final visibility checks
-  remove contributions only when the rendered RGBA result permits it. Useful
-  partial overlaps and authored translucent details remain.
+- Transparency belongs to the colours of shapes and lines, including colours
+  that gradually become more transparent.
+- Soft pixel edges guide the shape's outline, so the SVG follows the visible
+  form rather than tracing each pixel step.
+- When replacing a small area with a more detailed version, picvec trims it to
+  fit and checks that its edges blend with the surrounding picture.
+- Shapes that make no visible difference are removed. Small or faint details
+  are kept when they affect the picture, with checks at both the original size
+  and an enlarged view that also account for transparency.
 
 ## Samples
 
@@ -125,51 +120,3 @@ conversion. A configured SVG budget limits accepted additional output bytes.
 | [Viewport 1](sample/input/viewport1.jpg) | [SVG](sample/output/viewport1.svg) | [PNG](sample/comparison/viewport1.png) | 5,652 | 6,258 |
 | [Viewport 2](sample/input/viewport2.jpg) | [SVG](sample/output/viewport2.svg) | [PNG](sample/comparison/viewport2.png) | 30,500 | 35,501 |
 | [Wikipedia logo](sample/input/wikipedia_logo_1_0.png) | [SVG](sample/output/wikipedia_logo_1_0.svg) | [PNG](sample/comparison/wikipedia_logo_1_0.png) | 1,917 | 2,623 |
-
-## Optional x4 evaluation
-
-The Python evaluator compares a completed SVG with a Real-ESRGAN x4 reference.
-Models are supplied separately. Transparent inputs use a white
-evaluation background by default.
-
-See [the evaluator guide](scripts/picvec_eval/README.md) for NCNN/PyTorch setup,
-model paths, source/reference matching, caching and reproducibility controls.
-
-## GitHub Releases
-
-The [Release binaries workflow](.github/workflows/release.yml) runs manually
-from GitHub's **Actions → Release binaries → Run workflow** menu. Select the
-branch (normally `main`) and click **Run workflow**. No tag or version input is
-needed: the workflow reads `[package].version` from `Cargo.toml` at the selected
-commit and uses the existing `v<version>` tag (for example, `v1.0.0`). The workflow
-must first be pushed to the repository's default branch for the manual button
-to appear.
-
-Before a release, update `[package].version` in `Cargo.toml`, refresh `Cargo.lock`
-with `cargo check`, run `cargo test`, and push those changes. Create and push a
-`v<version>` tag at the commit to release. If that tag already exists, reuse it.
-The workflow then reads `Cargo.toml` from the tag and checks that its version
-matches the tag name. All binaries are built from that tag's resolved commit,
-using its Rust version. The selected branch determines the release version;
-the tag determines the source to build. The workflow does not create tags.
-
-| Platform | CPUs | Archive |
-| --- | --- | --- |
-| Linux (GNU libc, built on Ubuntu 24.04) | x86_64, ARM64 | `.tar.gz` |
-| macOS | Intel x86_64, Apple Silicon ARM64 | `.tar.gz` |
-| Windows (MSVC) | x86_64, ARM64 | `.zip` |
-
-Each archive contains the executable, README, license, and third-party notices.
-Linux builds require a compatible GNU libc environment; they are not static musl
-builds. Builds use the Rust version declared by `package.rust-version`, the locked
-dependencies, and the default Cargo features. All six native builds and CLI smoke
-tests must succeed before publication. The release includes `SHA256SUMS` and
-automatically generated release notes. Versions containing a prerelease suffix
-(such as `1.1.0-rc.1`) are published as prereleases.
-
-An existing release with the same tag stops the workflow without overwriting it.
-Build failures can be retried with the same tag. If an upload failure leaves a
-draft release, inspect and remove that incomplete release before retrying,
-keeping the tag. Publication uses the built-in
-`GITHUB_TOKEN` with `contents: write`; no personal access token is needed. Repository
-or organization rules must allow this workflow to create releases.
