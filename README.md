@@ -126,13 +126,19 @@ model paths, source/reference matching, caching and reproducibility controls.
 
 The [Release binaries workflow](.github/workflows/release.yml) runs manually
 from GitHub's **Actions → Release binaries → Run workflow** menu. Select the
-branch to release and click **Run workflow**. The workflow must first be pushed
-to the repository's default branch for the manual button to appear.
+branch (normally `main`) and click **Run workflow**. No tag or version input is
+needed: the workflow reads `[package].version` from `Cargo.toml` at the selected
+commit and uses the existing `v<version>` tag (for example, `v1.0.0`). The workflow
+must first be pushed to the repository's default branch for the manual button
+to appear.
 
 Before a release, update `[package].version` in `Cargo.toml`, refresh `Cargo.lock`
-with `cargo check`, run `cargo test`, and push those changes. No version input or
-manual tag creation is needed: the workflow reads `Cargo.toml` from the selected
-commit and creates `v<version>` (for example, `v1.0.0`) at that exact commit.
+with `cargo check`, run `cargo test`, and push those changes. Create and push a
+`v<version>` tag at the commit to release. If that tag already exists, reuse it.
+The workflow then reads `Cargo.toml` from the tag and checks that its version
+matches the tag name. All binaries are built from that tag's resolved commit,
+using its Rust version. The selected branch determines the release version;
+the tag determines the source to build. The workflow does not create tags.
 
 | Platform | CPUs | Archive |
 | --- | --- | --- |
@@ -148,9 +154,9 @@ tests must succeed before publication. The release includes `SHA256SUMS` and
 automatically generated release notes. Versions containing a prerelease suffix
 (such as `1.1.0-rc.1`) are published as prereleases.
 
-An existing release or tag with the same version stops the workflow without
-overwriting it. Build failures can be retried with the same version. If an upload
-failure leaves a draft release or tag, inspect and remove that incomplete release
-and tag before retrying, or use a new version. Publication uses the built-in
+An existing release with the same tag stops the workflow without overwriting it.
+Build failures can be retried with the same tag. If an upload failure leaves a
+draft release, inspect and remove that incomplete release before retrying,
+keeping the tag. Publication uses the built-in
 `GITHUB_TOKEN` with `contents: write`; no personal access token is needed. Repository
-or organization rules must allow this workflow to create releases and version tags.
+or organization rules must allow this workflow to create releases.
