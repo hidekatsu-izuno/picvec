@@ -57,8 +57,11 @@ there is no separate Pages deployment workflow in this repository.
 - Complex images can still take minutes or exceed a device's available memory.
   Try a smaller processing size if conversion fails.
 
-The original preview is displayed after the Rust decoder validates and converts
-the image, so selecting a file does not trigger an unbounded browser image decode.
+Selecting or dropping an image immediately loads its original preview and starts
+conversion. The SVG panel shows a loading indicator until the result is ready.
+Changing an option automatically starts a new conversion, cancelling any previous
+run. The browser displays the source image independently of the Wasm decoder,
+which enforces the conversion input limits.
 
 ## API
 
