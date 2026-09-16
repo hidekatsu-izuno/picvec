@@ -2,6 +2,17 @@
 
 picvec converts raster images into editable SVG using Rust.
 
+## Demo
+
+Try the [browser demo](https://hidekatsu-izuno.github.io/picvec/), served from
+[`docs/index.html`](docs/index.html). Choose a PNG or JPEG to convert it into SVG
+locally in your browser using WebAssembly, preview the result and download it.
+Images are not uploaded to a server.
+
+Processing sizes are 512 px (default), 1024 px and 2048 px on the longest edge.
+Larger images are resized proportionally; smaller images keep their original size.
+Set the options before choosing an image to start conversion.
+
 ## Build and convert
 
 ### Build

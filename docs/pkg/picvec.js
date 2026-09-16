@@ -1,7 +1,7 @@
 /* @ts-self-types="./picvec.d.ts" */
 
 /**
- * Convert PNG/JPEG bytes to SVG with a 1024 or 8192 pixel maximum long edge.
+ * Convert PNG/JPEG bytes to SVG with a 512, 1024 or 2048 pixel maximum long edge.
  * Smaller images keep their size; larger images are resized proportionally.
  * Limits bound browser memory use before decoding.
  * @param {Uint8Array} input
@@ -49,7 +49,7 @@ function __wbg_get_imports() {
         __wbg___wbindgen_throw_bb96b2010945f0bc: function(arg0, arg1) {
             throw new Error(getStringFromWasm0(arg0, arg1));
         },
-        __wbg_error_cf021e7a41e21275: function(arg0, arg1) {
+        __wbg_error_ef1ad7b16eaf99d1: function(arg0, arg1) {
             console.error(getStringFromWasm0(arg0, arg1));
         },
         __wbg_now_e7c6795a7f81e10f: function(arg0) {

@@ -1,7 +1,7 @@
 //! Browser entry point. Rayon uses its single-thread fallback inside a Web Worker.
 use wasm_bindgen::prelude::*;
 
-/// Convert PNG/JPEG bytes to SVG with a 1024 or 8192 pixel maximum long edge.
+/// Convert PNG/JPEG bytes to SVG with a 512, 1024 or 2048 pixel maximum long edge.
 /// Smaller images keep their size; larger images are resized proportionally.
 /// Limits bound browser memory use before decoding.
 #[wasm_bindgen]
@@ -13,9 +13,9 @@ pub fn convert_image(
     if input.len() > 20 * 1024 * 1024 {
         return Err(JsValue::from_str("Choose an image smaller than 20 MiB."));
     }
-    if !matches!(maximum_dimension, 1024 | 8192) {
+    if !matches!(maximum_dimension, 512 | 1024 | 2048) {
         return Err(JsValue::from_str(
-            "Processing size must be 1024 or 8192 pixels.",
+            "Processing size must be 512, 1024 or 2048 pixels.",
         ));
     }
     let config = crate::Config {

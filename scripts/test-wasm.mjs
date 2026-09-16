@@ -15,10 +15,10 @@ assert.match(transparent, /<svg/);
 assert.doesNotMatch(transparent, /<(?:path|rect|circle|ellipse|polygon|polyline|line)\b/);
 assert.throws(() => convert_image(new Uint8Array([1, 2, 3]), 1024, false));
 assert.throws(() => convert_image(png128, 0, false));
-assert.throws(() => convert_image(png128, 2048, false));
+assert.throws(() => convert_image(png128, 8192, false));
 // Errors must not poison the module: a subsequent conversion still works.
 assert.equal(convert_image(png128, 1024, false), svg);
-// Tiny heights keep the 8192-pixel boundary tests inexpensive in Wasm.
+// Tiny heights keep the processing-size boundary tests inexpensive in Wasm.
 function transparentPng(width, height) {
   function chunk(type, data) {
     const body = Buffer.concat([Buffer.from(type), data]);
@@ -46,20 +46,24 @@ function transparentPng(width, height) {
   ]);
 }
 for (const [width, height, limit, expectedWidth, expectedHeight] of [
+  [16, 16, 512, 16, 16],
   [16, 16, 1024, 16, 16],
-  [16, 16, 8192, 16, 16],
+  [16, 16, 2048, 16, 16],
+  [512, 2, 512, 512, 2],
+  [1024, 4, 512, 512, 2],
+  [4, 1024, 512, 2, 512],
   [1024, 2, 1024, 1024, 2],
   [2048, 4, 1024, 1024, 2],
   [4, 2048, 1024, 2, 1024],
-  [8192, 2, 8192, 8192, 2],
-  [16384, 4, 8192, 8192, 2],
-  [4, 16384, 8192, 2, 8192],
+  [2048, 2, 2048, 2048, 2],
+  [4096, 4, 2048, 2048, 2],
+  [4, 4096, 2048, 2, 2048],
 ]) {
   const output = convert_image(transparentPng(width, height), limit, false);
   const root = output.match(/<svg\b[^>]*>/)[0];
   assert.match(root, new RegExp(`\\bwidth="${expectedWidth}"`));
   assert.match(root, new RegExp(`\\bheight="${expectedHeight}"`));
 }
-assert.throws(() => convert_image(png128, 512, false));
+assert.throws(() => convert_image(png128, 256, false));
 assert.throws(() => convert_image(png128, 16384, false));
-console.log('Wasm smoke tests passed (alpha, errors, reuse, original size and proportional resizing at 1024/8192).');
+console.log('Wasm smoke tests passed (alpha, errors, reuse, original size and proportional resizing at 512/1024/2048).');

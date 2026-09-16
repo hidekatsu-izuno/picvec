@@ -2,7 +2,7 @@
 /* eslint-disable */
 
 /**
- * Convert PNG/JPEG bytes to SVG with a 1024 or 8192 pixel maximum long edge.
+ * Convert PNG/JPEG bytes to SVG with a 512, 1024 or 2048 pixel maximum long edge.
  * Smaller images keep their size; larger images are resized proportionally.
  * Limits bound browser memory use before decoding.
  */

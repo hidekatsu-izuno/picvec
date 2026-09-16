@@ -18,10 +18,10 @@
           <h2>Start here</h2>
           <p>Drop a PNG or JPEG here.</p>
           <label class="file-button" for="file">Choose image</label><input id="file" type="file" accept="image/png,image/jpeg,.png,.jpg,.jpeg">
-          <p class="hint">Up to 20 MiB · 16 megapixels · 32,768 px per side</p>
+          <p class="hint">Up to 20 MiB · 16 megapixels · Max processing size: 2048 px</p>
         </div>
         <div class="settings" role="group" aria-label="Conversion options">
-          <label class="size-setting" for="size">Processing size<select id="size" aria-describedby="size-help"><option value="1024" selected>1024 px</option><option value="8192">8192 px</option></select></label>
+          <label class="size-setting" for="size">Processing size<select id="size" aria-describedby="size-help"><option value="512" selected>512 px</option><option value="1024">1024 px</option><option value="2048">2048 px</option></select></label>
           <p id="size-help" class="hint">Maximum long edge. Smaller images keep their original size.</p>
           <label class="background-setting" for="background"><span>Remove chroma key (solid red, green, blue, cyan, magenta or yellow) background</span><span class="switch"><input id="background" type="checkbox" role="switch"><span class="switch-track" aria-hidden="true"></span><span class="switch-state" aria-hidden="true"></span></span></label>
           <div class="actions"><button id="cancel" type="button" class="secondary" hidden>Cancel</button></div>
