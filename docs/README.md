@@ -16,8 +16,9 @@ python3 -m http.server 8080 --directory docs
 ```
 
 Open <http://localhost:8080>. The build writes `docs/pkg/picvec.js`,
-`picvec_bg.wasm`, and TypeScript declarations. Generated files are ignored by Git;
-build them before serving or deploying. The CLI version must match the pinned
+`picvec_bg.wasm`, and TypeScript declarations. These generated files are committed
+to Git so the checked-in `docs` directory is ready to serve. Rebuild them after
+changing Rust code. The CLI version must match the pinned
 `wasm-bindgen` dependency in `Cargo.toml`.
 
 Run the built-module smoke test with Node.js 22 or later:
@@ -26,11 +27,25 @@ Run the built-module smoke test with Node.js 22 or later:
 node scripts/test-wasm.mjs
 ```
 
-The **Build browser site** GitHub Actions workflow builds and checks the site on
-pull requests and can be run manually. Download its `picvec-web` artifact and
-serve its contents with any static web host. To publish with GitHub Pages, choose
-**GitHub Actions** as the repository's Pages source and run **Deploy browser site**.
-The deployment workflow builds the Wasm files before publishing the `docs` directory.
+There are two repository workflows:
+
+- **Update web Wasm** (manual, default branch only): builds and smoke-tests Wasm,
+  commits changes under `docs/pkg`, and requests a GitHub Pages rebuild. Configure
+  **Settings → Pages → Build and deployment → Source → Deploy from a branch**,
+  select the default branch (usually `main`), and choose **/docs**. The workflow
+  needs permission to push to that branch; it does not bypass branch protection.
+- **Release binaries** (manual): builds the six native packages and a
+  `picvec-v<VERSION>-wasm32-unknown-unknown.tar.gz` archive from the same release
+  tag, then publishes all seven archives with checksums. The Wasm archive contains
+  the browser page, JavaScript bindings, Wasm module, and TypeScript declarations.
+  Extract it and serve the extracted directory with any static HTTP server.
+
+The release workflow publishes downloadable assets; use **Update web Wasm** to
+update the hosted page. The explicit rebuild request is needed because commits
+made with `GITHUB_TOKEN` do not automatically trigger branch-based Pages builds
+([GitHub documentation](https://docs.github.com/en/pages/getting-started-with-github-pages/configuring-a-publishing-source-for-your-github-pages-site)).
+GitHub's built-in **pages build and deployment** may still appear in Actions;
+there is no separate Pages deployment workflow in this repository.
 
 ## Browser limits
 

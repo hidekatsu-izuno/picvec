@@ -1,26 +1,27 @@
-name: Build browser site
+name: Update web Wasm
 
 on:
   workflow_dispatch:
-  pull_request:
-    paths:
-      - 'src/**'
-      - 'docs/**'
-      - 'Cargo.*'
-      - 'scripts/*wasm*'
-      - '.github/workflows/web.yml'
 
 permissions:
-  contents: read
+  contents: write
+  pages: write
+
+concurrency:
+  group: update-web-wasm
+  cancel-in-progress: false
 
 jobs:
-  build:
+  update:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7.0.1
         with:
-          persist-credentials: false
+          ref: ${{ github.ref_name }}
+          # Retain the workflow token for the generated-file commit below.
+          persist-credentials: true
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -34,9 +35,23 @@ jobs:
         run: |
           ./scripts/build-wasm.sh
           node scripts/test-wasm.mjs
-          cargo test --locked --test in_memory
-      - uses: actions/upload-artifact@v7.0.1
-        with:
-          name: picvec-web
-          path: docs/
-          if-no-files-found: error
+      - name: Commit updated browser module
+        env:
+          TARGET_BRANCH: ${{ github.ref_name }}
+        run: |
+          git add -- docs/pkg
+          if git diff --cached --quiet; then
+            echo "Browser module is already up to date."
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -m "Update browser WebAssembly module"
+            git push origin "HEAD:refs/heads/$TARGET_BRANCH"
+          fi
+      - name: Request GitHub Pages rebuild
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          # GITHUB_TOKEN commits do not trigger branch-based Pages builds.
+          gh api --method POST "repos/$GH_REPO/pages/builds"

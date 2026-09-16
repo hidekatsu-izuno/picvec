@@ -143,8 +143,47 @@ jobs:
           compression-level: 0
           retention-days: 7
 
+  build-wasm:
+    needs: prepare
+    name: Build wasm32-unknown-unknown
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CARGO_TERM_COLOR: always
+      RUST_VERSION: ${{ needs.prepare.outputs.rust }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ needs.prepare.outputs.commit }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install Rust and bindings generator
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal --target wasm32-unknown-unknown
+          rustup override set "$RUST_VERSION"
+          cargo install wasm-bindgen-cli --version 0.2.127 --locked
+      - name: Build, smoke test and package
+        run: |
+          ./scripts/build-wasm.sh
+          node scripts/test-wasm.mjs
+          package="picvec-v$VERSION-wasm32-unknown-unknown"
+          mkdir -p "staging/$package" dist
+          cp -R docs/. "staging/$package/"
+          cp LICENSE "staging/$package/"
+          tar -czf "dist/$package.tar.gz" -C staging "$package"
+      - uses: actions/upload-artifact@v7.0.1
+        with:
+          name: binary-wasm32-unknown-unknown
+          path: dist/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
   release:
-    needs: [prepare, build]
+    needs: [prepare, build, build-wasm]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -160,8 +199,8 @@ jobs:
         run: |
           shopt -s nullglob
           archives=(*.tar.gz *.zip)
-          if [[ "${#archives[@]}" -ne 6 ]]; then
-            echo "::error::Expected six binary archives."
+          if [[ "${#archives[@]}" -ne 7 ]]; then
+            echo "::error::Expected six native archives and one WebAssembly archive."
             exit 1
           fi
           sha256sum "${archives[@]}" > SHA256SUMS
