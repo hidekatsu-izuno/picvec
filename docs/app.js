@@ -37,6 +37,7 @@ function stop() {
 async function selectFile(file) {
   if (!file || !supported) return;
   const current = ++selection;
+  const options = { size: Number($('size').value), removeBackground: $('background').checked };
   stop();
   selectedFile = undefined;
   clearResult();
@@ -71,7 +72,7 @@ async function selectFile(file) {
     $('original').src = originalURL;
     $('original').hidden = false;
     $('original-placeholder').hidden = true;
-    await convertImage();
+    await convertImage(options);
   } catch (error) {
     if (current !== selection) return;
     stop();
@@ -103,9 +104,9 @@ $('cancel').addEventListener('click', () => {
   ++selection;
   stop();
   $('result-placeholder').textContent = 'Conversion cancelled.';
-  status('Conversion cancelled. Change an option or choose an image to try again.');
+  status('Conversion cancelled. Choose an image to try again.');
 });
-async function convertImage() {
+async function convertImage(options) {
   if (!selectedFile) return;
   stop();
   clearResult();
@@ -150,7 +151,7 @@ async function convertImage() {
     };
     const bytes = await file.arrayBuffer();
     if (worker !== active) return;
-    active.postMessage({ bytes, size: Number($('size').value), removeBackground: $('background').checked }, [bytes]);
+    active.postMessage({ bytes, ...options }, [bytes]);
   } catch (error) {
     if (active && worker !== active) return;
     stop();
@@ -159,9 +160,6 @@ async function convertImage() {
   }
 }
 $('form').addEventListener('submit', (event) => event.preventDefault());
-for (const id of ['size', 'background']) {
-  $(id).addEventListener('change', () => void convertImage());
-}
 $('original').addEventListener('error', () => {
   $('original').hidden = true;
   $('original-placeholder').hidden = false;

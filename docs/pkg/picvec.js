@@ -1,7 +1,9 @@
 /* @ts-self-types="./picvec.d.ts" */
 
 /**
- * Convert PNG/JPEG bytes to SVG. Limits bound browser memory use before decoding.
+ * Convert PNG/JPEG bytes to SVG with a 1024 or 8192 pixel maximum long edge.
+ * Smaller images keep their size; larger images are resized proportionally.
+ * Limits bound browser memory use before decoding.
  * @param {Uint8Array} input
  * @param {number} maximum_dimension
  * @param {boolean} remove_background
