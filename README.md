@@ -10,6 +10,8 @@ picvec converts raster images into editable SVG using Rust.
 mise exec -- cargo build --release --locked
 ```
 
+### Convert
+
 ```sh
 picvec input.png output.svg
 ```
@@ -42,34 +44,6 @@ summary) or `--quality-metrics` (completed-SVG OKLab/SSIM measurements):
 mise exec -- cargo build --release --locked --features diagnostics
 ./target/release/picvec input.png output.svg --verbose --quality-metrics
 ```
-
-Quality diagnostics report the evaluated width, height and composite background.
-They compare the completed SVG at the processing resolution with the processing
-reference. `global_ssim` covers the complete image; `local_ssim` averages uniform
-7×7 windows on linear luminance (smaller odd windows for tiny images). The
-`worst_tiles` list locates up to eight 64×64 tiles with the largest mean OKLab
-error, including their maximum error and local SSIM. Coordinates refer to the
-reported evaluation resolution. These RGB diagnostics use the reported backing.
-
-Diagnostic output goes to stderr. Segmentation and geometry diagnostics describe
-the base processing stages; the final object/contour counts describe the complete
-emitted document.
-
-## WebAssembly and browser converter
-
-An English, entirely client-side image-to-SVG page lives in [`docs`](docs/README.md).
-Build its Wasm module and serve it locally:
-
-```sh
-rustup target add wasm32-unknown-unknown
-cargo install wasm-bindgen-cli --version 0.2.127 --locked
-./scripts/build-wasm.sh
-python3 -m http.server 8080 --directory docs
-```
-
-Open <http://localhost:8080>. PNG/JPEG conversion runs in a cancellable Web Worker
-with previews, transparency support, optional chroma key removal, and SVG download.
-See [the web documentation](docs/README.md) for browser limits, API usage, and deployment.
 
 ## Processing order
 
