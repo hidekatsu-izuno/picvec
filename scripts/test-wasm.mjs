@@ -1,9 +1,15 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { deflateSync } from 'node:zlib';
 import init, { convert_image } from '../docs/pkg/picvec.js';
 
-await init({ module_or_path: await readFile(new URL('../docs/pkg/picvec_bg.wasm', import.meta.url)) });
+const wasm = await readFile(new URL('../docs/pkg/picvec_bg.wasm', import.meta.url));
+const bindings = await readFile(new URL('../docs/pkg/picvec.js', import.meta.url));
+const { version } = JSON.parse(await readFile(new URL('../docs/pkg/version.json', import.meta.url), 'utf8'));
+assert.equal(version, createHash('sha256').update(bindings).update(wasm).digest('hex'),
+  'The browser cache version must match the generated bindings and Wasm.');
+await init({ module_or_path: wasm });
 const png128 = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAGUlEQVR4nGO4pGHTQAlmGDVg1IBRA4aLAQBZNrYQKNcSzgAAAABJRU5ErkJggg==', 'base64');
 const png0 = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAG0lEQVR4nGO4pGHDQAmmSPOoAaMGjBowmAwAAAoJNhApr+wgAAAAAElFTkSuQmCC', 'base64');
 const svg = convert_image(png128, 1024, false);

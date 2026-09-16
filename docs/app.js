@@ -118,8 +118,16 @@ async function convertImage(options) {
   timer = setInterval(() => { $('elapsed').textContent = `${Math.floor((performance.now() - started) / 1000)}s`; }, 1000);
   status('Loading the converter…');
   let active;
+  const current = selection;
   try {
-    active = new Worker(new URL('./worker.js', import.meta.url), { type: 'module' });
+    const response = await fetch(new URL('./pkg/version.json', import.meta.url), { cache: 'no-cache' });
+    if (!response.ok) throw new Error('Could not load the converter version.');
+    const { version } = await response.json();
+    if (current !== selection) return;
+    if (!/^[a-f0-9]{64}$/.test(version)) throw new Error('Invalid converter version.');
+    const workerURL = new URL('./worker.js', import.meta.url);
+    workerURL.searchParams.set('v', version);
+    active = new Worker(workerURL, { type: 'module' });
     worker = active;
     const fail = (message) => {
       if (worker !== active) return;
@@ -153,6 +161,7 @@ async function convertImage(options) {
     if (worker !== active) return;
     active.postMessage({ bytes, ...options }, [bytes]);
   } catch (error) {
+    if (current !== selection) return;
     if (active && worker !== active) return;
     stop();
     $('result-placeholder').textContent = 'Conversion failed.';
