@@ -11,15 +11,21 @@ keywords = ["svg", "vectorization", "image", "graphics"]
 categories = ["command-line-utilities", "graphics", "multimedia::images"]
 include = [
     "/src/**",
+    "/tests/**/*.rs",
+    "/tests/data/**",
+    "/scripts/color_batch_performance.rs",
     "/Cargo.toml",
     "/Cargo.lock",
     "/README.md",
-    "/LICENSE",
-    "/THIRD_PARTY_NOTICES.md"
+    "/LICENSE"
 ]
 
 [lib]
 crate-type = ["rlib", "cdylib"]
+
+[[example]]
+name = "color_batch_performance"
+path = "scripts/color_batch_performance.rs"
 
 [features]
 default = []

@@ -6,9 +6,7 @@ use picvec::{
 use rayon::prelude::*;
 use std::{hint::black_box, time::Instant};
 
-#[test]
-#[ignore = "manual timing; run alone with --nocapture --test-threads=1"]
-fn color_batch_scheduling() {
+fn main() {
     for threads in [1, 4] {
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(threads)

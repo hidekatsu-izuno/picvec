@@ -129,7 +129,7 @@ jobs:
           "$executable" --help
           package="picvec-v$VERSION-$TARGET"
           mkdir -p "staging/$package" dist
-          cp "$executable" README.md LICENSE docs/THIRD_PARTY_NOTICES.md "staging/$package/"
+          cp "$executable" README.md LICENSE "staging/$package/"
           if [[ "$TARGET" == *-windows-* ]]; then
             (cd staging && 7z a -tzip "../dist/$package.zip" "$package")
           else

@@ -5,8 +5,7 @@ not change the MIT license that applies to picvec's own source code.
 
 The provenance and redistribution terms of the raster fixtures under
 `sample/input/` are not recorded. They are excluded from the published Rust
-crate and are not asserted to be covered by picvec's MIT license; see
-`sample/README.md` before redistributing them.
+crate and are not asserted to be covered by picvec's MIT license.
 
 ## Real-ESRGAN model
 
