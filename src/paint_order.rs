@@ -451,6 +451,13 @@ pub(crate) fn validate_cached(
                         let pv = [p.red(), p.green(), p.blue(), p.alpha()];
                         let qv = [q.red(), q.green(), q.blue(), q.alpha()];
                         if scale == 4 {
+                            // Boundary alignment may change RGB, but must not
+                            // punch a hole through previously opaque coverage.
+                            // A tiny gap can disappear in native-size averages.
+                            if pv[3] >= 250 && qv[3] < 128 && matte.is_none_or(|m| m.get(i) >= 1.0)
+                            {
+                                return Err("opaque coverage lost at 4x".to_owned());
+                            }
                             if !boundary[i] && pv.iter().zip(qv).any(|(&p, q)| p.abs_diff(q) > 2) {
                                 return Err("interior changed at 4x".to_owned());
                             }
@@ -698,6 +705,38 @@ mod tests {
     }
 
     #[test]
+    fn rejects_subpixel_pinholes_at_opaque_paint_boundaries() {
+        let before = r##"<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><path fill="#808080" fill-rule="evenodd" d="M0 0H32V32H0Z"/></svg>"##;
+        let after = before.replace("H0Z", "H0Z M16.25 16.25h0.25v0.25h-0.25Z");
+        let labels: Vec<u32> = (0..1024).map(|i| u32::from(i % 32 >= 16)).collect();
+        let source = Raster::blank(32, 32, [128.0 / 255.0; 3]);
+        let mut summary = Summary::default();
+        assert!(!validate(
+            &Document::from(before.to_owned()),
+            &Document::from(after.clone()),
+            &source,
+            None,
+            &labels,
+            &mut summary,
+        ));
+        assert_eq!(
+            summary.rejection.as_deref(),
+            Some("opaque coverage lost at 4x")
+        );
+        let mut coverage = vec![1.0; 1024];
+        coverage[16 * 32 + 16] = 0.0;
+        let matte = crate::chroma::AlphaMatte::new(32, 32, coverage);
+        assert!(validate(
+            &Document::from(before.to_owned()),
+            &Document::from(after),
+            &source,
+            Some(&matte),
+            &labels,
+            &mut Summary::default(),
+        ));
+    }
+
+    #[test]
     fn wide_render_bands_keep_the_original_local_error_budget() {
         let before = r##"<svg xmlns="http://www.w3.org/2000/svg" width="512" height="64"><rect width="512" height="64" fill="#808080"/><rect x="448" width="64" height="64" fill="#a0a0a0"/></svg>"##;
         let after = before
@@ -798,6 +837,10 @@ fn validate_reference(
                 let pv = [p.red(), p.green(), p.blue(), p.alpha()];
                 let qv = [q.red(), q.green(), q.blue(), q.alpha()];
                 if scale == 4 {
+                    if pv[3] >= 250 && qv[3] < 128 && matte.is_none_or(|m| m.get(i) >= 1.0) {
+                        summary.rejection = Some("opaque coverage lost at 4x".into());
+                        return false;
+                    }
                     if !boundary[i] && pv.iter().zip(qv).any(|(&p, q)| p.abs_diff(q) > 2) {
                         summary.rejection = Some("interior changed at 4x".into());
                         return false;

@@ -1465,7 +1465,10 @@ fn serialize_prepared(
         "g",
         attrs([
             ("id", "paint-layer".into()),
-            ("fill-rule", "evenodd".into()),
+            // Shared contours have oriented outer loops and holes. Hidden-edge
+            // expansion can make parts of one face overlap; parity would cut
+            // transparent pinholes into those overlaps instead of filling them.
+            ("fill-rule", "nonzero".into()),
         ]),
     );
     write_paint_elements(&mut body, &paint_elements, &mut summary);
@@ -1491,6 +1494,8 @@ fn serialize_prepared(
                     (if layer.white { "#fff" } else { "#000" }).to_string(),
                 ),
                 ("fill-opacity", format!("{0:.7}", layer.opacity)),
+                // Coverage isolines are undirected, unlike shared face loops.
+                ("fill-rule", "evenodd".into()),
             ]);
             let kind = write_geometry(&mut body, &optimized, &attributes);
             count_element(&mut summary, kind);
@@ -1967,6 +1972,77 @@ mod tests {
                             stroke_outline(path, width, butt)
                         );
                     }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn overlapping_face_contours_fill_without_closing_oriented_holes() {
+        // Two expanded lobes of the same face overlap at x=15..17. The
+        // counterclockwise inner loop is a real hole and must stay transparent.
+        let geometry = RegionGeometry {
+            region: 0,
+            loops: vec![],
+            path_data: "M2 2H17V30H2Z M15 2H30V30H15Z M6 10V22H12V10Z".into(),
+            occlusion_path_data: None,
+            covered_hole_paths: vec![],
+            primitive: None,
+        };
+        for opacity in [1.0, 0.5] {
+            let alpha = crate::face_alpha::FaceAlpha {
+                fields: vec![Paint::Solid {
+                    color: [opacity; 3],
+                }],
+                ink_opacity: 0.0,
+                bands: vec![],
+                composite_layers: vec![],
+                source_fields: vec![],
+            };
+            let (document, _) = serialize_filtered_with_alpha(
+                32,
+                32,
+                std::slice::from_ref(&geometry),
+                &[Paint::Solid {
+                    color: [1.0, 0.0, 0.0],
+                }],
+                &StructuralInk::empty(),
+                0.3,
+                false,
+                &[false],
+                (opacity < 1.0).then_some(&alpha),
+            );
+            let tree =
+                resvg::usvg::Tree::from_str(&document, &resvg::usvg::Options::default()).unwrap();
+            for scale in [1.0, 3.3, 8.0] {
+                let size = (32.0_f32 * scale).ceil() as u32;
+                let mut pixmap = resvg::tiny_skia::Pixmap::new(size, size).unwrap();
+                resvg::render(
+                    &tree,
+                    resvg::tiny_skia::Transform::from_scale(scale, scale),
+                    &mut pixmap.as_mut(),
+                );
+                for (x, y, filled) in [
+                    (16.0, 16.0, true),
+                    (24.0, 16.0, true),
+                    (9.0, 16.0, false),
+                    (0.0, 16.0, false),
+                ] {
+                    let pixel = pixmap
+                        .pixel((x * scale) as u32, (y * scale) as u32)
+                        .unwrap();
+                    let expected = if filled {
+                        (opacity * 255.0).round() as u8
+                    } else {
+                        0
+                    };
+                    assert!(
+                        pixel.alpha().abs_diff(expected) <= 1,
+                        "scale={scale}, opacity={opacity}, x={x}: {pixel:?}"
+                    );
+                    assert_eq!(pixel.red(), pixel.alpha());
+                    assert_eq!(pixel.green(), 0);
+                    assert_eq!(pixel.blue(), 0);
                 }
             }
         }

@@ -11,19 +11,18 @@
 <body>
   <header><a class="wordmark" href="./">picvec<span>↗</span></a><a href="https://github.com/hidekatsu-izuno/picvec">View on GitHub ↗</a></header>
   <main>
-    <div class="intro"><p class="eyebrow">FROM PIXELS TO POSSIBILITIES</p><h1>Your image.<br>A new dimension.</h1><p>Turn raster artwork into editable SVG shapes.<br>All in your browser. Your images stay on your device.</p></div>
+    <div class="intro"><h1>Image to SVG</h1><p>Turn your artwork into editable vectors. Your images stay on your device.</p></div>
     <section class="workspace" aria-label="Image converter">
       <form id="form">
         <div id="drop-zone" class="drop-zone">
-          <span class="upload-icon" aria-hidden="true">↥</span><h2>Start with an image</h2>
-          <p>Drop a PNG or JPEG here, or choose a file.</p>
+          <h2>Choose your image</h2>
+          <p>Drop a PNG or JPEG here.</p>
           <label class="file-button" for="file">Choose image</label><input id="file" type="file" accept="image/png,image/jpeg,.png,.jpg,.jpeg">
           <p class="hint">Up to 20 MiB · 16 megapixels · 8,192 px per side</p>
         </div>
         <div class="settings">
           <label for="size">Processing size<select id="size"><option value="256">256 px — quick</option><option value="512" selected>512 px — balanced</option><option value="768">768 px — detailed</option><option value="1024">1024 px — extra detail</option></select></label>
-          <label class="checkbox"><input id="background" type="checkbox"> Remove chroma key background</label>
-          <p class="hint">For solid, saturated red, green, blue, cyan, magenta or yellow backdrops. Existing transparency is preserved automatically.</p>
+          <label class="checkbox"><input id="background" type="checkbox" aria-describedby="background-help"> Remove chroma key background</label>
           <div class="actions"><button id="convert" type="submit" disabled>Convert to SVG <span aria-hidden="true">↗</span></button><button id="cancel" type="button" class="secondary" hidden>Cancel</button></div>
         </div>
       </form>
@@ -34,7 +33,7 @@
       </div>
       <div class="download-row"><p id="filename">Made for a closer look.</p><a id="download" class="download" hidden>Download SVG ↓</a></div>
     </section>
-    <div class="notes"><p><strong>Editable by design.</strong><br>Real vector shapes, curves and gradients. Open your SVG in your favorite design tool.</p><p><strong>A little patience, a lot of detail.</strong><br>Illustrations and icons work best. Detailed photos can take several minutes; try a smaller processing size first.</p><p><strong>Local from start to finish.</strong><br>Powered by Rust and WebAssembly. Processing size limits the output resolution; source-resolution refinement is disabled for the web.</p></div>
+    <details class="about"><summary>About this converter</summary><div class="notes"><p id="background-help"><strong>Background removal.</strong><br>For solid, saturated red, green, blue, cyan, magenta or yellow backdrops. Existing transparency is preserved automatically.</p><p><strong>Editable by design.</strong><br>Real vector shapes, curves and gradients. Open your SVG in your favorite design tool.</p><p><strong>A little patience, a lot of detail.</strong><br>Illustrations and icons work best. Detailed photos can take several minutes; try a smaller processing size first.</p><p><strong>Local from start to finish.</strong><br>Powered by Rust and WebAssembly. Processing size limits the output resolution; source-resolution refinement is disabled for the web.</p></div></details>
   </main>
   <footer><span>picvec / raster → vector</span><a href="THIRD_PARTY_NOTICES.md">Third-party notices</a></footer>
   <noscript>This converter needs JavaScript and WebAssembly. Please enable JavaScript to continue.</noscript>

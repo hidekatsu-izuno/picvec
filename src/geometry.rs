@@ -3090,9 +3090,23 @@ pub(crate) fn fitted_colour_contour_path_data(points: &[Point]) -> String {
 }
 
 pub(crate) fn fitted_alpha_contour_path_data(points: &[Point]) -> String {
-    let (source, curves) = fit_alpha_contour(points);
+    oriented_alpha_contour_path_data(points, signed_area(points))
+}
+
+fn oriented_alpha_contour_path_data(points: &[Point], winding: f32) -> String {
+    let (mut source, mut curves) = fit_alpha_contour(points);
     if source.is_empty() {
         return String::new();
+    }
+    // Reverse the fitted curves, not the input to the fitter. Direction can
+    // affect fitting decisions; changing winding must not move the silhouette.
+    if signed_area(&source) * winding < 0.0 {
+        source.reverse();
+        curves = curves
+            .into_iter()
+            .rev()
+            .map(CurveSegment::reversed)
+            .collect();
     }
     if curves.is_empty() {
         let mut cubics = 0;
@@ -8166,8 +8180,12 @@ impl<'a> PreparedGeometry<'a> {
                             && (signed_area(contour).abs() - source_area.abs()).abs()
                                 <= source_area.abs() * 0.03
                     });
-                    let path = fitted_alpha_contour_path_data(
-                        contour.map_or(source_points.as_slice(), Vec::as_slice),
+                    // Marching-squares alpha contours are undirected. Preserve
+                    // the face loop's winding when replacing its silhouette,
+                    // so a true transparent hole cancels the outer fill.
+                    let path = oriented_alpha_contour_path_data(
+                        contour.unwrap_or(&source_points),
+                        source_area,
                     );
                     summary.cubic_segments += path.matches("C ").count();
                     summary.line_segments += path.matches("L ").count();
@@ -8980,6 +8998,42 @@ mod tests {
         assert_eq!(band.outer_edges.len(), band.inner_edges.len());
         for (a, b) in [(0.0, 0.25), (0.25, 0.5), (0.5, 1.0)] {
             assert!(!band.patch(a, b).is_empty());
+        }
+    }
+
+    #[test]
+    fn changing_alpha_winding_preserves_the_fitted_silhouette() {
+        let input = image::load_from_memory(include_bytes!("test-data/cube-alpha.png"))
+            .unwrap()
+            .to_luma8();
+        let (width, height) = input.dimensions();
+        let matte =
+            crate::chroma::AlphaMatte::from_u8(width as usize, height as usize, input.into_raw());
+        for contour in matte.isocontours(0.5) {
+            let render = |winding, scale| {
+                let path = oriented_alpha_contour_path_data(&contour, winding);
+                let svg = format!(
+                    "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width}\" height=\"{height}\"><path d=\"{path}\" fill=\"red\" fill-opacity=\"0.5\"/></svg>"
+                );
+                let tree = resvg::usvg::Tree::from_str(&svg, &Default::default()).unwrap();
+                let mut image =
+                    resvg::tiny_skia::Pixmap::new(width * scale, height * scale).unwrap();
+                resvg::render(
+                    &tree,
+                    resvg::tiny_skia::Transform::from_scale(scale as f32, scale as f32),
+                    &mut image.as_mut(),
+                );
+                image
+            };
+            for scale in [1, 4] {
+                let before = render(1.0, scale);
+                let after = render(-1.0, scale);
+                assert!(before
+                    .data()
+                    .iter()
+                    .zip(after.data())
+                    .all(|(&a, &b)| a.abs_diff(b) <= 1));
+            }
         }
     }
 
