@@ -55,6 +55,22 @@ Diagnostic output goes to stderr. Segmentation and geometry diagnostics describe
 the base processing stages; the final object/contour counts describe the complete
 emitted document.
 
+## WebAssembly and browser converter
+
+An English, entirely client-side image-to-SVG page lives in [`docs`](docs/README.md).
+Build its Wasm module and serve it locally:
+
+```sh
+rustup target add wasm32-unknown-unknown
+cargo install wasm-bindgen-cli --version 0.2.127 --locked
+./scripts/build-wasm.sh
+python3 -m http.server 8080 --directory docs
+```
+
+Open <http://localhost:8080>. PNG/JPEG conversion runs in a cancellable Web Worker
+with previews, transparency support, optional chroma key removal, and SVG download.
+See [the web documentation](docs/README.md) for browser limits, API usage, and deployment.
+
 ## Processing order
 
 picvec rebuilds an image as editable shapes and lines, using the original as a

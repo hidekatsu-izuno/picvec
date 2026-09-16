@@ -255,7 +255,7 @@ impl TileView {
                     );
                     continue;
                 }
-                let started = std::time::Instant::now();
+                let started = crate::time::Instant::now();
                 let mut raster = self.blank();
                 resvg::render_node(node, transform, &mut raster.as_mut());
                 let cost = started.elapsed().as_nanos();
@@ -717,7 +717,7 @@ fn prune_impl(
             }
         }
     }
-    let geometry_started = std::time::Instant::now();
+    let geometry_started = crate::time::Instant::now();
     let mut covered = vec![false; draws.len()];
     if geometric {
         let covers: Vec<_> = draws.iter().map(|d| coverage::Cover::new(d.node)).collect();
@@ -757,7 +757,7 @@ fn prune_impl(
             geometry_started.elapsed().as_secs_f64()
         );
     }
-    let witness_started = std::time::Instant::now();
+    let witness_started = crate::time::Instant::now();
     let VisibilityEvidence {
         witnesses,
         prefix_noop,
@@ -805,7 +805,7 @@ fn prune_impl(
             shortcuts += 1;
             continue;
         }
-        let check_started = std::time::Instant::now();
+        let check_started = crate::time::Instant::now();
         let check = |scale, tile: usize| {
             let x = tile % columns * TILE;
             let y = tile / columns * TILE;
@@ -1106,7 +1106,7 @@ mod tests {
             );
             drop(tree);
             let measure = |reference_version| {
-                let start = std::time::Instant::now();
+                let start = crate::time::Instant::now();
                 let result = if reference_version {
                     reference::prune(&Document::from((&svg).to_string()), w, h)
                 } else {
@@ -1255,7 +1255,7 @@ mod tests {
             );
             drop(tree);
             let measure = |geometric| {
-                let start = std::time::Instant::now();
+                let start = crate::time::Instant::now();
                 let result = prune_impl(&document, w, h, CACHE_TILES, geometric);
                 (result, start.elapsed().as_secs_f64())
             };

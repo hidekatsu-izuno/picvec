@@ -1,0 +1,42 @@
+name: Build browser site
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'docs/**'
+      - 'Cargo.*'
+      - 'scripts/*wasm*'
+      - '.github/workflows/web.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install Rust and bindings generator
+        run: |
+          rust_version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["rust-version"])')
+          rustup toolchain install "$rust_version" --profile minimal --target wasm32-unknown-unknown
+          rustup override set "$rust_version"
+          cargo install wasm-bindgen-cli --version 0.2.127 --locked
+      - name: Build and test
+        run: |
+          ./scripts/build-wasm.sh
+          node scripts/test-wasm.mjs
+          cargo test --locked --test in_memory
+      - uses: actions/upload-artifact@v7.0.1
+        with:
+          name: picvec-web
+          path: docs/
+          if-no-files-found: error

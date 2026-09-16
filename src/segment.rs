@@ -2927,7 +2927,7 @@ pub(crate) fn segment_with_paint_owned_lines(
     config: &Config,
     protected_lines: &[bool],
 ) -> Segmentation {
-    let segment_started = std::time::Instant::now();
+    let segment_started = crate::time::Instant::now();
     let mut substage_started = segment_started;
     let source_lab = oklab_pixels(image);
     let maximum_area = effective_minimum_area(config, image.width, image.height);
@@ -2937,7 +2937,7 @@ pub(crate) fn segment_with_paint_owned_lines(
             "picvec segmentation substage setup: {:.3}s",
             substage_started.elapsed().as_secs_f64()
         );
-        substage_started = std::time::Instant::now();
+        substage_started = crate::time::Instant::now();
     }
     let (mut palette_map, palette_lab, histogram_cells) =
         build_palette(&source_lab, &roles.bright_ridge_support, config);
@@ -2947,7 +2947,7 @@ pub(crate) fn segment_with_paint_owned_lines(
             substage_started.elapsed().as_secs_f64(),
             palette_lab.len(),
         );
-        substage_started = std::time::Instant::now();
+        substage_started = crate::time::Instant::now();
     }
     #[cfg(feature = "diagnostics")]
     if let Ok(prefix) = std::env::var("PICVEC_PIPELINE_DIAGNOSTICS") {
@@ -2969,7 +2969,7 @@ pub(crate) fn segment_with_paint_owned_lines(
             "picvec segmentation substage initial-components: {:.3}s",
             substage_started.elapsed().as_secs_f64()
         );
-        substage_started = std::time::Instant::now();
+        substage_started = crate::time::Instant::now();
     }
     // The reference pass visits palette owners in stable palette order and
     // updates later owners' bounds as pixels move.  Repeating the complete
@@ -2992,7 +2992,7 @@ pub(crate) fn segment_with_paint_owned_lines(
             "picvec segmentation substage small-components: {:.3}s",
             substage_started.elapsed().as_secs_f64()
         );
-        substage_started = std::time::Instant::now();
+        substage_started = crate::time::Instant::now();
     }
     let (labels, count) = compact_connected(&palette_map, image.width, image.height);
     if cfg!(feature = "diagnostics") && config.retain_diagnostics {
@@ -3000,7 +3000,7 @@ pub(crate) fn segment_with_paint_owned_lines(
             "picvec segmentation substage compact: {:.3}s",
             substage_started.elapsed().as_secs_f64()
         );
-        substage_started = std::time::Instant::now();
+        substage_started = crate::time::Instant::now();
     }
     #[cfg(feature = "diagnostics")]
     if let Ok(prefix) = std::env::var("PICVEC_PIPELINE_DIAGNOSTICS") {
@@ -3028,7 +3028,7 @@ pub(crate) fn segment_with_paint_owned_lines(
             "picvec segmentation substage antialias: {:.3}s",
             substage_started.elapsed().as_secs_f64()
         );
-        substage_started = std::time::Instant::now();
+        substage_started = crate::time::Instant::now();
     }
     let labels = correction.labels;
     let count = labels

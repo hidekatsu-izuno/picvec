@@ -94,7 +94,20 @@ impl Raster {
         maximum_pixels: u64,
         maximum_decode_bytes: u64,
     ) -> Result<DynamicImage> {
-        let mut reader = ImageReader::open(path)?;
+        Self::decode_reader(
+            ImageReader::open(path)?,
+            maximum_dimension,
+            maximum_pixels,
+            maximum_decode_bytes,
+        )
+    }
+
+    pub(crate) fn decode_reader<R: std::io::BufRead + std::io::Seek>(
+        mut reader: ImageReader<R>,
+        maximum_dimension: u32,
+        maximum_pixels: u64,
+        maximum_decode_bytes: u64,
+    ) -> Result<DynamicImage> {
         let mut limits = Limits::default();
         limits.max_image_width = Some(maximum_dimension);
         limits.max_image_height = Some(maximum_dimension);
@@ -220,6 +233,7 @@ impl RasterSource for Raster {
 }
 
 impl SourceRaster {
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn load_with_alpha(
         path: &Path,
         maximum_dimension: u32,
@@ -232,6 +246,10 @@ impl SourceRaster {
             maximum_pixels,
             maximum_decode_bytes,
         )?;
+        Ok(Self::from_decoded(decoded))
+    }
+
+    pub(crate) fn from_decoded(decoded: DynamicImage) -> (Self, Option<Vec<u8>>) {
         let rgba = decoded.into_rgba8();
         let (width, height) = rgba.dimensions();
         let len = width as usize * height as usize;
@@ -248,14 +266,14 @@ impl SourceRaster {
                 values.push(pixel[3]);
             }
         }
-        Ok((
+        (
             Self {
                 width: width as usize,
                 height: height as usize,
                 pixels: SourcePixels::Rgb8(Arc::new(pixels)),
             },
             alpha,
-        ))
+        )
     }
 
     pub(crate) fn from_unorm16_fn(

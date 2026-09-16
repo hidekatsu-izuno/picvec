@@ -36,7 +36,10 @@ impl Baseline {
         Self::with_fragments(svg, None)
     }
 
-    fn with_fragments(svg: &Document, fragments: Option<crate::svg_fragments::Cache>) -> Option<Self> {
+    fn with_fragments(
+        svg: &Document,
+        fragments: Option<crate::svg_fragments::Cache>,
+    ) -> Option<Self> {
         let tree = Tree::from_str(svg, &Options::default()).ok()?;
         let size = tree.size();
         let (w, h) = (size.width().ceil() as usize, size.height().ceil() as usize);
@@ -388,10 +391,10 @@ where
             .collect();
         timings.0 += 1;
         if !rejections.contains(&paths, &selected) {
-            let started = std::time::Instant::now();
+            let started = crate::time::Instant::now();
             let candidate = serialize(geometry);
             timings.1 += started.elapsed();
-            let started = std::time::Instant::now();
+            let started = crate::time::Instant::now();
             let profitable = candidate.0.len() < current.0.len();
             let accepted =
                 profitable && baseline.equivalent_bands(&candidate.0, Some(completion), &selected);

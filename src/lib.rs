@@ -41,7 +41,19 @@ mod visibility;
 
 pub use chroma::{AlphaTransparencySummary, ChromaKeySummary};
 pub use config::Config;
-pub use pipeline::{vectorize, Summary};
+#[cfg(not(target_arch = "wasm32"))]
+pub use pipeline::vectorize;
+pub use pipeline::{vectorize_bytes, Summary};
+
+#[cfg(target_arch = "wasm32")]
+mod wasm;
+
+mod time {
+    #[cfg(not(target_arch = "wasm32"))]
+    pub use std::time::Instant;
+    #[cfg(target_arch = "wasm32")]
+    pub use web_time::Instant;
+}
 
 pub type Error = Box<dyn std::error::Error + Send + Sync + 'static>;
 pub type Result<T> = std::result::Result<T, Error>;

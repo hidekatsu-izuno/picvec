@@ -7165,7 +7165,7 @@ fn fit_all_internal(
     strong_branches: &crate::ridge::StrongRidgeBranches,
     config: &Config,
 ) -> (Vec<Paint>, GradientSummary, PaintEvidence) {
-    let fit_started = std::time::Instant::now();
+    let fit_started = crate::time::Instant::now();
     let source_labs = oklab_pixels(source);
     let mut region_indices = vec![Vec::<usize>::new(); segmentation.regions.len()];
     let mut region_paint_indices = vec![Vec::<usize>::new(); segmentation.regions.len()];
@@ -7185,7 +7185,7 @@ fn fit_all_internal(
             fit_started.elapsed().as_secs_f64()
         );
     }
-    let initial_started = std::time::Instant::now();
+    let initial_started = crate::time::Instant::now();
     let region_density = segmentation.regions.len() as f32
         / (segmentation.width * segmentation.height).max(1) as f32;
     let use_primary_gate = region_density >= config.paint_primary_min_region_density;
@@ -7380,7 +7380,7 @@ fn fit_all_internal(
             let _ = std::fs::write(format!("{prefix}-boundaries.json"), document);
         }
     }
-    let harmonize_started = std::time::Instant::now();
+    let harmonize_started = crate::time::Instant::now();
     let (coupled, harmonized_owners) = harmonize_adjacent_paints(
         source,
         &source_labs,
@@ -7403,7 +7403,7 @@ fn fit_all_internal(
         save_paint_kinds(&format!("{prefix}-harmonized.json"), &paints);
         save_paint_details(&format!("{prefix}-harmonized-details.json"), &paints);
     }
-    let coupling_started = std::time::Instant::now();
+    let coupling_started = crate::time::Instant::now();
     // Keep a reconciled field group indivisible. Pairwise adjustment of just
     // one member would reintroduce the seam removed by harmonization.
     let mut group_sizes = vec![0; paints.len()];

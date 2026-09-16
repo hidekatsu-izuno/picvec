@@ -1,11 +1,15 @@
 use crate::svg_document::Document;
+use crate::time::Instant;
+#[cfg(any(not(target_arch = "wasm32"), feature = "diagnostics"))]
 use std::fs;
-use std::path::{Path, PathBuf};
-use std::time::Instant;
+#[cfg(not(target_arch = "wasm32"))]
+use std::path::Path;
+use std::path::PathBuf;
 
 #[cfg(test)]
 use rayon::prelude::*;
 use serde::Serialize;
+#[cfg(not(target_arch = "wasm32"))]
 use tempfile::{Builder as TemporaryFileBuilder, NamedTempFile};
 
 use std::collections::HashMap;
@@ -379,6 +383,7 @@ fn estimate_dimension<R: RasterSource + ?Sized>(image: &R, config: &Config) -> C
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn output_parent(output: &Path) -> &Path {
     output
         .parent()
@@ -386,6 +391,7 @@ fn output_parent(output: &Path) -> &Path {
         .unwrap_or_else(|| Path::new("."))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn temporary_svg(output: &Path, purpose: &str) -> Result<NamedTempFile> {
     let parent = output_parent(output);
     TemporaryFileBuilder::new()
@@ -573,6 +579,7 @@ fn compare_refinement<S: RasterSource + ?Sized>(
 
 /// Convert one raster into exactly the SVG path requested by the caller.
 /// No source copy, rendered PNG, or JSON sidecar is produced.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn vectorize(input: &Path, output: &Path, config: &Config) -> Result<Summary> {
     config.validate()?;
     if output
@@ -598,10 +605,12 @@ pub fn vectorize(input: &Path, output: &Path, config: &Config) -> Result<Summary
     pool.install(|| vectorize_inner(input, output, config, threads))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn default_execution_thread_count(cpu_count: usize) -> usize {
     (cpu_count / 2).clamp(1, 10)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn execution_thread_count(config: &Config) -> usize {
     let logical = std::thread::available_parallelism()
         .map(usize::from)
@@ -1029,6 +1038,7 @@ fn adaptively_refine(
     Ok(summary)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn vectorize_inner(
     input: &Path,
     output: &Path,
@@ -1043,6 +1053,52 @@ fn vectorize_inner(
         config.maximum_input_pixels,
         config.maximum_decode_bytes,
     )?;
+    let (document, mut summary) =
+        vectorize_decoded(decoded, decoded_alpha, config, execution_threads, started)?;
+    let temporary = temporary_svg(output, "output")?;
+    fs::write(temporary.path(), document.as_bytes())?;
+    temporary
+        .persist(output)
+        .map_err(|error| -> Error { error.error.into() })?;
+    summary.output = output.to_path_buf();
+    summary.elapsed_seconds = started.elapsed().as_secs_f64();
+    Ok(summary)
+}
+
+/// Convert encoded PNG/JPEG bytes entirely in memory. `Summary::output` is empty.
+pub fn vectorize_bytes(input: &[u8], config: &Config) -> Result<(String, Summary)> {
+    config.validate()?;
+    let run = || {
+        let started = Instant::now();
+        let decoded = Raster::decode_reader(
+            image::ImageReader::new(std::io::Cursor::new(input)).with_guessed_format()?,
+            config.maximum_input_dimension,
+            config.maximum_input_pixels,
+            config.maximum_decode_bytes,
+        )?;
+        let (source, alpha) = SourceRaster::from_decoded(decoded);
+        vectorize_decoded(source, alpha, config, rayon::current_num_threads(), started)
+    };
+    #[cfg(target_arch = "wasm32")]
+    {
+        run()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(execution_thread_count(config))
+            .build()?;
+        pool.install(run)
+    }
+}
+
+fn vectorize_decoded(
+    decoded: SourceRaster,
+    decoded_alpha: Option<Vec<u8>>,
+    config: &Config,
+    execution_threads: usize,
+    started: Instant,
+) -> Result<(String, Summary)> {
     let input_width = decoded.width;
     let input_height = decoded.height;
     let source_has_alpha = decoded_alpha.is_some();
@@ -1167,7 +1223,11 @@ fn vectorize_inner(
             processing_height,
             preview_background,
         )?;
-        core.quality = Some(crate::metrics::compare_on(&reference, &rendered, preview_background));
+        core.quality = Some(crate::metrics::compare_on(
+            &reference,
+            &rendered,
+            preview_background,
+        ));
     }
     let to_u8 =
         |color: [f32; 3]| color.map(|channel| (channel.clamp(0.0, 1.0) * 255.0).round() as u8);
@@ -1197,35 +1257,33 @@ fn vectorize_inner(
             ..ChromaKeySummary::default()
         });
     (core.svg.objects, core.svg.path_subpaths) = core.document.counts();
-    let temporary = temporary_svg(output, "output")?;
-    fs::write(temporary.path(), core.document.as_bytes())?;
-    temporary
-        .persist(output)
-        .map_err(|error| -> Error { error.error.into() })?;
-    Ok(Summary {
-        input_width,
-        input_height,
-        processing_width,
-        processing_height,
-        output: output.to_path_buf(),
-        elapsed_seconds: started.elapsed().as_secs_f64(),
-        execution_threads,
-        complexity,
-        source_alpha,
-        chroma_key,
-        adaptive_refinement,
-        hierarchical_topology: core.hierarchical_topology,
-        edge_roles: core.edge_roles,
-        segmentation: core.segmentation,
-        structural: core.structural,
-        ownership: core.ownership,
-        paint_order: core.paint_order,
-        gradients: core.gradients,
-        geometry: core.geometry,
-        optimization: core.optimization,
-        svg: core.svg,
-        quality: core.quality,
-    })
+    Ok((
+        core.document.to_string(),
+        Summary {
+            input_width,
+            input_height,
+            processing_width,
+            processing_height,
+            output: PathBuf::new(),
+            elapsed_seconds: started.elapsed().as_secs_f64(),
+            execution_threads,
+            complexity,
+            source_alpha,
+            chroma_key,
+            adaptive_refinement,
+            hierarchical_topology: core.hierarchical_topology,
+            edge_roles: core.edge_roles,
+            segmentation: core.segmentation,
+            structural: core.structural,
+            ownership: core.ownership,
+            paint_order: core.paint_order,
+            gradients: core.gradients,
+            geometry: core.geometry,
+            optimization: core.optimization,
+            svg: core.svg,
+            quality: core.quality,
+        },
+    ))
 }
 
 struct CoreVectorization {
@@ -4613,7 +4671,10 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(fs::read(&output).unwrap(), fs::read(without_metrics).unwrap());
+        assert_eq!(
+            fs::read(&output).unwrap(),
+            fs::read(without_metrics).unwrap()
+        );
         fs::remove_dir_all(directory).unwrap();
     }
 
