@@ -2,144 +2,174 @@ mod tests {
     use super::*;
 
     #[test]
-    fn real_small_glyphs_keep_their_counters_and_leave_no_old_ink_in_the_base() {
-        // Unmodified 80x40 crop at (420, 860) in sample/input/catwhale.png.
-        let (source, alpha) = SourceRaster::from_decoded(
+    fn uniform_ring_repair_keeps_the_counter_in_both_polarities() {
+        for light in [false, true] {
+            let (bg, fg) = if light { (0.08, 0.94) } else { (0.94, 0.1) };
+            let source = SourceRaster::from_unorm16_fn(64, 64, |i| {
+                let r = ((i % 64) as f32 + 0.5 - 32.0).hypot((i / 64) as f32 + 0.5 - 32.0);
+                let a = ((r - 6.0).min(9.0 - r) + 0.5).clamp(0.0, 1.0);
+                [bg + a * (fg - bg); 3]
+            });
+            let mut body = Elements::new();
+            body.leaf(
+                "rect",
+                attrs([
+                    ("width", "64".into()),
+                    ("height", "64".into()),
+                    ("fill", hex([bg; 3])),
+                ]),
+            );
+            body.leaf(
+                "circle",
+                attrs([
+                    ("cx", "32".into()),
+                    ("cy", "32".into()),
+                    ("r", "9".into()),
+                    ("fill", hex([fg; 3])),
+                ]),
+            );
+            let mut doc = Document::from_parts(64, 64, Elements::new(), body);
+            assert!(refine(&source, &mut doc, (64, 64)) > 0);
+            for scale in [1, 4] {
+                let p = render(&doc, 64 * scale, 64 * scale).unwrap();
+                let c = p.pixels()[32 * scale * 64 * scale + 32 * scale];
+                assert!((c.red() as f32 / 255.0 - bg).abs() < 0.02);
+            }
+            assert!(!doc.contains("<circle"), "fully replaced old ink retained");
+            assert!(!doc.contains("<mask"));
+            assert!(!doc.contains("<image"));
+        }
+    }
+
+    #[test]
+    fn real_glyph_contours_keep_their_small_counters() {
+        let (source, _) = SourceRaster::from_decoded(
             image::load_from_memory(include_bytes!("../data/catwhale-small-text.png")).unwrap(),
         );
-        assert!(alpha.is_none());
-        let (ink, cleaned) = extract(&source);
-        assert!(ink.components > 0);
-        let cleaned = cleaned.unwrap();
-        // Stroke interiors from the three connected glyphs, not the accent.
-        for (x, y) in [(16, 16), (38, 20), (61, 26)] {
-            assert!(intensity(source.get(x, y)) < 0.65);
-            assert!(
-                intensity(cleaned.get(x, y)) > 0.8,
-                "old ink remains at {x},{y}"
-            );
+        let regions = regions(&source);
+        let patches: Vec<_> = regions.iter().filter_map(|r| patch(&source, r)).collect();
+        assert!(!patches.is_empty());
+        for (x, y) in [(23, 25), (35, 22), (59, 26)] {
+            let p = patches
+                .iter()
+                .find(|p| {
+                    x >= p.rect.x
+                        && y >= p.rect.y
+                        && x < p.rect.x + p.rect.width
+                        && y < p.rect.y + p.rect.height
+                })
+                .expect("glyph patch");
+            let c = p.pixels[(y - p.rect.y) * p.rect.width + x - p.rect.x];
+            assert!(intensity([c[0], c[1], c[2]]) > 0.65, "counter at {x},{y}");
         }
-        let mut document = Document::from_parts(80, 40, Elements::new(), Elements::new());
-        ink.append(&mut document, [1.0, 1.0]);
-        let tree =
-            resvg::usvg::Tree::from_str(&document, &resvg::usvg::Options::default()).unwrap();
+    }
+
+    #[test]
+    fn broad_shapes_are_not_local_ink() {
+        let source = SourceRaster::from_unorm16_fn(100, 100, |i| {
+            if (20..80).contains(&(i % 100)) && (20..80).contains(&(i / 100)) {
+                [0.1; 3]
+            } else {
+                [0.9; 3]
+            }
+        });
+        assert!(regions(&source).iter().all(|r| patch(&source, r).is_none()));
+    }
+
+    #[test]
+    fn a_separate_colour_is_not_erased_as_antialiasing() {
+        let source = SourceRaster::from_unorm16_fn(64, 64, |i| {
+            if i == 32 * 64 + 39 {
+                return [0.9, 0.05, 0.05];
+            }
+            let r = ((i % 64) as f32 + 0.5 - 32.0).hypot((i / 64) as f32 + 0.5 - 32.0);
+            let a = ((r - 6.0).min(9.0 - r) + 0.5).clamp(0.0, 1.0);
+            [0.94 - a * 0.84; 3]
+        });
+        let region = Region {
+            rect: SourceRect {
+                x: 18,
+                y: 18,
+                width: 28,
+                height: 28,
+            },
+            foreground: [0.1; 3],
+            background: [0.94; 3],
+        };
+        assert!(patch(&source, &region).is_none());
+    }
+
+    #[test]
+    fn distant_rgba_is_unchanged_on_an_unevenly_scaled_canvas() {
+        let source = SourceRaster::from_unorm16_fn(128, 64, |i| {
+            let r = ((i % 128) as f32 + 0.5 - 32.0).hypot((i / 128) as f32 + 0.5 - 32.0);
+            let a = ((r - 6.0).min(9.0 - r) + 0.5).clamp(0.0, 1.0);
+            [0.94 - a * 0.84; 3]
+        });
+        let mut body = Elements::new();
+        body.open("g", attrs([("transform", "scale(0.625 0.640625)".into())]));
+        body.leaf(
+            "rect",
+            attrs([
+                ("width", "128".into()),
+                ("height", "64".into()),
+                ("fill", hex([0.94; 3])),
+            ]),
+        );
+        body.leaf(
+            "circle",
+            attrs([
+                ("cx", "32".into()),
+                ("cy", "32".into()),
+                ("r", "9".into()),
+                ("fill", hex([0.1; 3])),
+            ]),
+        );
+        body.leaf(
+            "path",
+            attrs([
+                ("d", "M90 8L120 57".into()),
+                ("stroke", "red".into()),
+                ("stroke-width", "0.4".into()),
+                ("stroke-opacity", "0.3".into()),
+                ("fill", "none".into()),
+            ]),
+        );
+        body.close();
+        let original = Document::from_parts(80, 41, Elements::new(), body);
+        let mut changed = original.clone();
+        assert!(refine(&source, &mut changed, (80, 41)) > 0);
         for scale in [1, 4] {
-            let mut pixmap = resvg::tiny_skia::Pixmap::new(80 * scale, 40 * scale).unwrap();
-            resvg::render(
-                &tree,
-                resvg::tiny_skia::Transform::from_scale(scale as f32, scale as f32),
-                &mut pixmap.as_mut(),
-            );
-            for (x, y) in [(23, 25), (35, 22), (59, 26)] {
-                let mut alpha = 0;
-                for yy in y * scale..(y + 1) * scale {
-                    for xx in x * scale..(x + 1) * scale {
-                        alpha += pixmap.pixels()[(yy * 80 * scale + xx) as usize].alpha() as u32;
-                    }
+            let a = render(&original, 128 * scale, 64 * scale).unwrap();
+            let b = render(&changed, 128 * scale, 64 * scale).unwrap();
+            for y in 0..64 * scale {
+                for x in 80 * scale..128 * scale {
+                    let i = y * 128 * scale + x;
+                    assert_eq!(
+                        a.pixels()[i],
+                        b.pixels()[i],
+                        "outside crop at {x},{y}, scale {scale}"
+                    );
                 }
-                assert!(
-                    alpha < 170 * scale * scale,
-                    "counter lost at {x},{y}, {scale}x"
-                );
             }
         }
-        assert!(!document.contains("<mask"));
-        assert!(!document.contains("<image"));
+        assert!(changed.contains("stroke-opacity"));
     }
 
     #[test]
-    fn broad_objects_and_nonuniform_backgrounds_are_not_removed() {
-        for gradient in [false, true] {
-            let source = SourceRaster::from_unorm16_fn(100, 100, |i| {
-                let (x, y) = (i % 100, i / 100);
-                if (20..80).contains(&x) && (20..80).contains(&y) {
-                    [0.1; 3]
-                } else if gradient {
-                    [x as f32 / 100.0, y as f32 / 100.0, 0.8]
-                } else {
-                    [0.9; 3]
-                }
-            });
-            let (ink, cleaned) = extract(&source);
-            assert_eq!(ink.components, 0);
-            assert!(cleaned.is_none());
-        }
-    }
-
-    #[test]
-    fn scanned_annotations_have_source_supported_compact_silhouettes() {
+    fn adjacent_paragraph_rows_remain_available_as_local_candidates() {
+        // Unmodified source crop: catwhale.png, (1070, 830), 270x190.
         let (source, _) = SourceRaster::from_decoded(
-            image::load_from_memory(include_bytes!("../data/booster-annotations.png")).unwrap(),
+            image::load_from_memory(include_bytes!("../data/catwhale-paragraph.png")).unwrap(),
         );
-        let (ink, cleaned) = extract(&source);
+        let patches = proposals(&source);
         assert!(
-            ink.components >= 20,
-            "only {} supported silhouettes",
-            ink.components
+            patches.iter().any(|p| p.rect.y < 30),
+            "first line lost through grouping"
         );
-        assert!(cleaned.is_some());
-        let cleaned = cleaned.unwrap();
-        let mut document = Document::from_parts(
-            source.width,
-            source.height,
-            Elements::new(),
-            Elements::new(),
-        );
-        ink.append(&mut document, [1.0, 1.0]);
-        let tree =
-            resvg::usvg::Tree::from_str(&document, &resvg::usvg::Options::default()).unwrap();
-        let mut pixmap =
-            resvg::tiny_skia::Pixmap::new(source.width as u32, source.height as u32).unwrap();
-        resvg::render(
-            &tree,
-            resvg::tiny_skia::Transform::identity(),
-            &mut pixmap.as_mut(),
-        );
-        let mut error = 0.0;
-        let mut ink_mass = 0.0;
-        for (i, p) in pixmap.pixels().iter().enumerate() {
-            let a = p.alpha() as f32 / 255.0;
-            let bg = cleaned.get(i % source.width, i / source.width);
-            let original = source.get(i % source.width, i / source.width);
-            let rgb = [p.red(), p.green(), p.blue()];
-            ink_mass += a;
-            for c in 0..3 {
-                error += (rgb[c] as f32 / 255.0 + bg[c] * (1.0 - a) - original[c]).abs();
-            }
-        }
         assert!(
-            error / (3.0 * ink_mass) < 0.18,
-            "serialized ink error: {}",
-            error / (3.0 * ink_mass)
+            patches.iter().any(|p| p.rect.y > 130),
+            "last lines lost through grouping"
         );
-    }
-
-    #[test]
-    fn two_colour_rings_work_in_both_polarities_but_do_not_erase_a_coloured_mark() {
-        for light in [false, true] {
-            for marked in [false, true] {
-                let background = if light { [0.08; 3] } else { [0.94; 3] };
-                let foreground = if light { [0.94; 3] } else { [0.1, 0.2, 0.3] };
-                let source = SourceRaster::from_unorm16_fn(64, 64, |i| {
-                    let (x, y) = ((i % 64) as f32 + 0.5, (i / 64) as f32 + 0.5);
-                    let r = (x - 32.0).hypot(y - 32.0);
-                    let a = ((r - 6.0).min(9.0 - r) + 0.5).clamp(0.0, 1.0);
-                    if marked && i == 32 * 64 + 39 {
-                        return [0.9, 0.05, 0.05];
-                    }
-                    std::array::from_fn(|c| background[c] + a * (foreground[c] - background[c]))
-                });
-                let (ink, cleaned) = extract(&source);
-                if marked {
-                    assert_eq!(ink.components, 0, "independent paint was erased");
-                } else {
-                    assert!(ink.components > 0);
-                    let clean = cleaned.unwrap();
-                    for c in 0..3 {
-                        assert!((clean.get(39, 32)[c] - background[c]).abs() < 0.01);
-                    }
-                }
-            }
-        }
     }
 }

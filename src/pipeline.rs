@@ -1145,19 +1145,7 @@ fn vectorize_decoded(
     };
     let mut separators = Vec::new();
     let mut separator_quality_reference = None;
-    let mut compact_ink = crate::compact_ink::CompactInk::default();
-    if input_matte.is_none() {
-        let (ink, cleaned) = crate::compact_ink::extract(&source);
-        if let Some(cleaned) = cleaned {
-            if config.compute_quality_metrics {
-                separator_quality_reference =
-                    Some(source_reference.resize_max(complexity.selected_dimension.max(64)));
-            }
-            source = cleaned;
-            source_reference = source.clone();
-            compact_ink = ink;
-        }
-    }
+    let compact_source = input_matte.is_none().then(|| source.clone());
     if config.adaptive_refinement && detected_key.is_some() {
         if let Some(matte) = &input_matte {
             let (bands, cleaned) =
@@ -1228,14 +1216,47 @@ fn vectorize_decoded(
         ],
     );
     core.svg.rect_elements += separators.len();
-    compact_ink.append(
-        &mut core.document,
-        [
-            processing_width as f32 / input_width as f32,
-            processing_height as f32 / input_height as f32,
-        ],
-    );
-    core.svg.path_elements += compact_ink.path_elements();
+    let compact_shapes_before = core.document.counts().0;
+    let compact_ink_components = compact_source.as_ref().map_or(0, |source| {
+        crate::compact_ink::refine(
+            source,
+            &mut core.document,
+            (processing_width, processing_height),
+        )
+    });
+    if compact_ink_components > 0 && config.compute_quality_metrics {
+        separator_quality_reference = Some(core.processing_reference.clone());
+    }
+    if compact_ink_components > 0 {
+        fn count(node: &crate::svg_document::Element, names: &mut [usize; 5]) {
+            if matches!(
+                node.name.as_str(),
+                "defs" | "clipPath" | "symbol" | "pattern" | "marker"
+            ) {
+                return;
+            }
+            for (i, name) in ["path", "rect", "circle", "ellipse", "line"]
+                .iter()
+                .enumerate()
+            {
+                if node.name == *name {
+                    names[i] += 1;
+                }
+            }
+            for child in &node.children {
+                count(child, names);
+            }
+        }
+        let mut counts = [0; 5];
+        count(core.document.root(), &mut counts);
+        core.svg.path_elements = counts[0];
+        core.svg.rect_elements = counts[1];
+        core.svg.circle_elements = counts[2];
+        core.svg.ellipse_elements = counts[3];
+        core.svg.line_elements = counts[4];
+        core.svg.invisible_elements_removed += (compact_shapes_before + 2 * compact_ink_components)
+            .saturating_sub(core.document.counts().0);
+    }
     core.svg.bytes = core.document.len();
     if let Some(reference) = separator_quality_reference {
         let rendered = render_svg_document_on(
@@ -1292,7 +1313,7 @@ fn vectorize_decoded(
             source_alpha,
             chroma_key,
             adaptive_refinement,
-            compact_ink_components: compact_ink.components,
+            compact_ink_components,
             hierarchical_topology: core.hierarchical_topology,
             edge_roles: core.edge_roles,
             segmentation: core.segmentation,

@@ -87,17 +87,20 @@ colour transitions consistent, but can take much longer. If no suitable
 improvement is found, picvec keeps the first result. You can limit the extra file
 size with `--adaptive-svg-budget-mib`.
 
-Small, thin shapes on a locally uniform opaque background can keep their
-source-resolution outlines before resizing. picvec estimates the two paint
-colours, reconstructs subpixel contours, and checks the rendered shape against
-the source, including small holes. Accepted ink is removed from the working
-raster before ordinary segmentation, so it is not fitted twice. This helps
-small lettering without recognizing characters or replacing them with fonts.
-Shaded backgrounds, larger shapes and images with transparency use the ordinary
-pipeline. OCR is used only by the optional [evaluation tool](scripts/ocr_eval/README.md).
-See the [sample comparison](sample/comparison/ocr/README.md) for measured results
-and remaining limitations. The [all-sample regression check](sample/comparison/regression/README.md)
-also documents local quality regressions outside text regions.
+Small, thin shapes on a locally uniform opaque background can recover their
+source-resolution outlines after the ordinary conversion. picvec tests local
+two-colour contours against the finished SVG, including counters, neighbouring
+marks and crop boundaries. Only regions with measured improvements are replaced;
+the global vectorizer always sees the unmodified source. Up to two validation
+passes allow repairs at neighbouring joins. Fully replaced old
+shapes are removed before the replacement is emitted.
+
+This helps small lettering without recognizing characters or replacing them
+with fonts. Images with transparency use the ordinary pipeline. OCR is used
+only by the optional [evaluation tool](scripts/ocr_eval/README.md).
+See the [local repair comparison](sample/comparison/local-ink/README.md) for
+results and remaining limitations. The earlier [all-sample regression check](sample/comparison/regression/README.md)
+documents the problems found in the superseded source-editing approach.
 
 ### Transparency and visible geometry
 

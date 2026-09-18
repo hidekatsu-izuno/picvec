@@ -1,0 +1,1672 @@
+{
+  "source": "sample/input/booster-layout.jpg",
+  "image_size": [
+    5770,
+    2058
+  ],
+  "ocrs_cjk_revision": "2f72f76ac2152ee1112ee6b6e36048bab069f391",
+  "regions": 54,
+  "totals": {
+    "original": {
+      "error": 147,
+      "characters": 306,
+      "exact": 1,
+      "recognized_regions": 33,
+      "ink_intersection": 49421,
+      "ink_union": 73388,
+      "absolute_rgb_error": 20214333.0,
+      "samples": 645399,
+      "source_ocr_disagreement": 0.4803921568627451,
+      "ink_iou": 0.6734207227339619,
+      "rgb_mae": 31.320676046910517
+    },
+    "previous": {
+      "error": 105,
+      "characters": 306,
+      "exact": 4,
+      "recognized_regions": 33,
+      "ink_intersection": 51056,
+      "ink_union": 68896,
+      "absolute_rgb_error": 16347234.0,
+      "samples": 645399,
+      "source_ocr_disagreement": 0.3431372549019608,
+      "ink_iou": 0.741058987459359,
+      "rgb_mae": 25.32888027406302
+    },
+    "revised": {
+      "error": 50,
+      "characters": 306,
+      "exact": 11,
+      "recognized_regions": 33,
+      "ink_intersection": 55343,
+      "ink_union": 62954,
+      "absolute_rgb_error": 9764538.0,
+      "samples": 645399,
+      "source_ocr_disagreement": 0.16339869281045752,
+      "ink_iou": 0.879102201607523,
+      "rgb_mae": 15.129459450665403
+    }
+  },
+  "details": [
+    {
+      "id": 0,
+      "bbox": [
+        539,
+        487,
+        812,
+        514
+      ],
+      "reference": "LUBRICATORAOR",
+      "variants": {
+        "original": {
+          "text": "LUBRICAIOO.OR",
+          "edit_distance": 3,
+          "ink_iou": 0.6796729840208101,
+          "rgb_mae": 33.410527743861074
+        },
+        "previous": {
+          "text": "LUBRICAO.",
+          "edit_distance": 5,
+          "ink_iou": 0.6432561851556265,
+          "rgb_mae": 34.12413512413512
+        },
+        "revised": {
+          "text": "LUBRICATORTOK",
+          "edit_distance": 2,
+          "ink_iou": 0.9305135951661632,
+          "rgb_mae": 13.801655134988469
+        }
+      }
+    },
+    {
+      "id": 1,
+      "bbox": [
+        731,
+        516,
+        774,
+        550
+      ],
+      "reference": "",
+      "variants": {
+        "original": {
+          "text": "",
+          "edit_distance": null,
+          "ink_iou": 0.802784222737819,
+          "rgb_mae": 18.285225718194255
+        },
+        "previous": {
+          "text": "",
+          "edit_distance": null,
+          "ink_iou": 0.6805896805896806,
+          "rgb_mae": 25.33310533515732
+        },
+        "revised": {
+          "text": "",
+          "edit_distance": null,
+          "ink_iou": 0.9568527918781726,
+          "rgb_mae": 9.019151846785226
+        }
+      }
+    },
+    {
+      "id": 2,
+      "bbox": [
+        591,
+        520,
+        737,
+        548
+      ],
+      "reference": "BOOSTER",
+      "variants": {
+        "original": {
+          "text": "DOQSTEN",
+          "edit_distance": 3,
+          "ink_iou": 0.7004264392324094,
+          "rgb_mae": 39.3894324853229
+        },
+        "previous": {
+          "text": "DOQSTER",
+          "edit_distance": 2,
+          "ink_iou": 0.7697107203630176,
+          "rgb_mae": 30.8089530332681
+        },
+        "revised": {
+          "text": "BOQSTER",
+          "edit_distance": 1,
+          "ink_iou": 0.926,
+          "rgb_mae": 14.212818003913894
+        }
+      }
+    },
+    {
+      "id": 3,
+      "bbox": [
+        554,
+        655,
+        746,
+        679
+      ],
+      "reference": "3WAYCOCK",
+      "variants": {
+        "original": {
+          "text": "SWNCOC",
+          "edit_distance": 4,
+          "ink_iou": 0.6163069544364509,
+          "rgb_mae": 38.100911458333336
+        },
+        "previous": {
+          "text": "XYCOC",
+          "edit_distance": 4,
+          "ink_iou": 0.5289655172413793,
+          "rgb_mae": 40.39800347222222
+        },
+        "revised": {
+          "text": "3WAYCOC",
+          "edit_distance": 1,
+          "ink_iou": 0.764344262295082,
+          "rgb_mae": 23.76519097222222
+        }
+      }
+    },
+    {
+      "id": 4,
+      "bbox": [
+        1377,
+        161,
+        1751,
+        187
+      ],
+      "reference": "AIACONTROLPIPES",
+      "variants": {
+        "original": {
+          "text": "ANIODIOES",
+          "edit_distance": 9,
+          "ink_iou": 0.6266634980988594,
+          "rgb_mae": 41.75606746194981
+        },
+        "previous": {
+          "text": "ACONTWULPIPES",
+          "edit_distance": 4,
+          "ink_iou": 0.7627981774323238,
+          "rgb_mae": 27.215034965034967
+        },
+        "revised": {
+          "text": "AIACONTROLDIPES",
+          "edit_distance": 1,
+          "ink_iou": 0.8944631385744876,
+          "rgb_mae": 15.20979020979021
+        }
+      }
+    },
+    {
+      "id": 5,
+      "bbox": [
+        1216,
+        671,
+        1618,
+        696
+      ],
+      "reference": "BOOSTERSTEAMGAUGE",
+      "variants": {
+        "original": {
+          "text": "OOBSTR SYEAMGAITE",
+          "edit_distance": 6,
+          "ink_iou": 0.7150025087807326,
+          "rgb_mae": 32.11094527363184
+        },
+        "previous": {
+          "text": "BOOSTERSTEAMGAUGE",
+          "edit_distance": 0,
+          "ink_iou": 0.8423259714844842,
+          "rgb_mae": 20.562686567164178
+        },
+        "revised": {
+          "text": "BOOSTERSTEAMGAUGE",
+          "edit_distance": 0,
+          "ink_iou": 0.9515731030228254,
+          "rgb_mae": 11.781293532338308
+        }
+      }
+    },
+    {
+      "id": 6,
+      "bbox": [
+        1223,
+        823,
+        1469,
+        851
+      ],
+      "reference": "CUT-OUTVALVE",
+      "variants": {
+        "original": {
+          "text": "CUT-OUTYALUE",
+          "edit_distance": 2,
+          "ink_iou": 0.7206531332744925,
+          "rgb_mae": 27.602932636469223
+        },
+        "previous": {
+          "text": "UUT-OUTVALVE",
+          "edit_distance": 1,
+          "ink_iou": 0.8040345821325648,
+          "rgb_mae": 19.4647212543554
+        },
+        "revised": {
+          "text": "CUT-OUTVALVE",
+          "edit_distance": 0,
+          "ink_iou": 0.9490278507619548,
+          "rgb_mae": 10.359465737514517
+        }
+      }
+    },
+    {
+      "id": 7,
+      "bbox": [
+        1229,
+        933,
+        1537,
+        965
+      ],
+      "reference": "STANDARDCHOKE",
+      "variants": {
+        "original": {
+          "text": "STAHYDOROCWONE",
+          "edit_distance": 6,
+          "ink_iou": 0.70040959625512,
+          "rgb_mae": 30.299005681818183
+        },
+        "previous": {
+          "text": "STANOAOEMONE",
+          "edit_distance": 6,
+          "ink_iou": 0.6622734761120264,
+          "rgb_mae": 35.50608766233766
+        },
+        "revised": {
+          "text": "STANDARDCHOKE",
+          "edit_distance": 0,
+          "ink_iou": 0.9565540289639807,
+          "rgb_mae": 10.355418019480519
+        }
+      }
+    },
+    {
+      "id": 8,
+      "bbox": [
+        1738,
+        903,
+        2305,
+        938
+      ],
+      "reference": "B\"STFAM INLET DIPE LEELSIDE(E",
+      "variants": {
+        "original": {
+          "text": "TSTEAM LNET OIOE LESLSIOEE",
+          "edit_distance": 10,
+          "ink_iou": 0.7280847528043207,
+          "rgb_mae": 19.683043587805493
+        },
+        "previous": {
+          "text": "3\"STEAMINLEYOIPE LESYSOEE",
+          "edit_distance": 9,
+          "ink_iou": 0.7609838133277276,
+          "rgb_mae": 18.5949609473419
+        },
+        "revised": {
+          "text": "3\"STFAM INLET DIOE LEELSIDEE",
+          "edit_distance": 3,
+          "ink_iou": 0.9160323501427212,
+          "rgb_mae": 9.933534895439657
+        }
+      }
+    },
+    {
+      "id": 9,
+      "bbox": [
+        2619,
+        132,
+        2915,
+        161
+      ],
+      "reference": "DOME PILOTYALYE",
+      "variants": {
+        "original": {
+          "text": "OOEDILOYYE",
+          "edit_distance": 6,
+          "ink_iou": 0.6415574963609898,
+          "rgb_mae": 31.072227399813606
+        },
+        "previous": {
+          "text": "DOMEPILOIYALYE",
+          "edit_distance": 1,
+          "ink_iou": 0.815049504950495,
+          "rgb_mae": 18.526677539608574
+        },
+        "revised": {
+          "text": "DOMEPILOTVALYE",
+          "edit_distance": 1,
+          "ink_iou": 0.9461706783369803,
+          "rgb_mae": 9.976817334575955
+        }
+      }
+    },
+    {
+      "id": 10,
+      "bbox": [
+        2834,
+        189,
+        3056,
+        218
+      ],
+      "reference": "COPPERPIPE",
+      "variants": {
+        "original": {
+          "text": "OFPERDISE",
+          "edit_distance": 4,
+          "ink_iou": 0.707807386629266,
+          "rgb_mae": 27.731283007145077
+        },
+        "previous": {
+          "text": "COPPERPIRE",
+          "edit_distance": 1,
+          "ink_iou": 0.8555844155844156,
+          "rgb_mae": 16.86579683131407
+        },
+        "revised": {
+          "text": "COPPERPIPE",
+          "edit_distance": 0,
+          "ink_iou": 0.9270315091210614,
+          "rgb_mae": 12.333333333333334
+        }
+      }
+    },
+    {
+      "id": 11,
+      "bbox": [
+        2965,
+        248,
+        3252,
+        276
+      ],
+      "reference": "BOOSTERTHROTT",
+      "variants": {
+        "original": {
+          "text": "BOOSTEYNRON",
+          "edit_distance": 5,
+          "ink_iou": 0.7057965730951513,
+          "rgb_mae": 28.928073668491788
+        },
+        "previous": {
+          "text": "BOOSTETRON",
+          "edit_distance": 4,
+          "ink_iou": 0.7650954421503701,
+          "rgb_mae": 25.729467396714785
+        },
+        "revised": {
+          "text": "BOOSTERTHROT",
+          "edit_distance": 1,
+          "ink_iou": 0.9282511210762332,
+          "rgb_mae": 12.791936286709806
+        }
+      }
+    },
+    {
+      "id": 12,
+      "bbox": [
+        3138,
+        317,
+        3248,
+        342
+      ],
+      "reference": "PRELIA",
+      "variants": {
+        "original": {
+          "text": "HRELI",
+          "edit_distance": 2,
+          "ink_iou": 0.6430041152263375,
+          "rgb_mae": 33.911272727272724
+        },
+        "previous": {
+          "text": "PPELI",
+          "edit_distance": 2,
+          "ink_iou": 0.8027867095391211,
+          "rgb_mae": 21.193454545454546
+        },
+        "revised": {
+          "text": "PRELI",
+          "edit_distance": 1,
+          "ink_iou": 0.943577430972389,
+          "rgb_mae": 11.561818181818182
+        }
+      }
+    },
+    {
+      "id": 13,
+      "bbox": [
+        2730,
+        347,
+        2748,
+        368
+      ],
+      "reference": "0",
+      "variants": {
+        "original": {
+          "text": "n",
+          "edit_distance": 1,
+          "ink_iou": 0.7699115044247787,
+          "rgb_mae": 21.25925925925926
+        },
+        "previous": {
+          "text": "",
+          "edit_distance": 1,
+          "ink_iou": 0.9696969696969697,
+          "rgb_mae": 15.563492063492063
+        },
+        "revised": {
+          "text": "",
+          "edit_distance": 1,
+          "ink_iou": 0.9504950495049505,
+          "rgb_mae": 13.16931216931217
+        }
+      }
+    },
+    {
+      "id": 14,
+      "bbox": [
+        3154,
+        349,
+        3257,
+        379
+      ],
+      "reference": "VALVE",
+      "variants": {
+        "original": {
+          "text": "VAL/E",
+          "edit_distance": 1,
+          "ink_iou": 0.6483516483516484,
+          "rgb_mae": 35.97508090614887
+        },
+        "previous": {
+          "text": "VALVE",
+          "edit_distance": 0,
+          "ink_iou": 0.8181818181818182,
+          "rgb_mae": 20.37831715210356
+        },
+        "revised": {
+          "text": "VALVE",
+          "edit_distance": 0,
+          "ink_iou": 0.9429569266589057,
+          "rgb_mae": 10.458899676375404
+        }
+      }
+    },
+    {
+      "id": 15,
+      "bbox": [
+        2907,
+        379,
+        2924,
+        396
+      ],
+      "reference": "",
+      "variants": {
+        "original": {
+          "text": "",
+          "edit_distance": null,
+          "ink_iou": 0.6567164179104478,
+          "rgb_mae": 32.67820069204152
+        },
+        "previous": {
+          "text": "",
+          "edit_distance": null,
+          "ink_iou": 0.7741935483870968,
+          "rgb_mae": 26.60553633217993
+        },
+        "revised": {
+          "text": "",
+          "edit_distance": null,
+          "ink_iou": 0.6567164179104478,
+          "rgb_mae": 32.67820069204152
+        }
+      }
+    },
+    {
+      "id": 16,
+      "bbox": [
+        2916,
+        379,
+        2938,
+        400
+      ],
+      "reference": "",
+      "variants": {
+        "original": {
+          "text": "办",
+          "edit_distance": null,
+          "ink_iou": 0.6396761133603239,
+          "rgb_mae": 57.9025974025974
+        },
+        "previous": {
+          "text": "",
+          "edit_distance": null,
+          "ink_iou": 0.6051660516605166,
+          "rgb_mae": 49.268398268398265
+        },
+        "revised": {
+          "text": "办",
+          "edit_distance": null,
+          "ink_iou": 0.6396761133603239,
+          "rgb_mae": 57.9025974025974
+        }
+      }
+    },
+    {
+      "id": 17,
+      "bbox": [
+        3140,
+        609,
+        3179,
+        656
+      ],
+      "reference": "e",
+      "variants": {
+        "original": {
+          "text": "e",
+          "edit_distance": 0,
+          "ink_iou": 0.7316076294277929,
+          "rgb_mae": 30.624659028914348
+        },
+        "previous": {
+          "text": "",
+          "edit_distance": 1,
+          "ink_iou": 0.7900709219858156,
+          "rgb_mae": 27.366612111292962
+        },
+        "revised": {
+          "text": "e",
+          "edit_distance": 0,
+          "ink_iou": 0.9539473684210527,
+          "rgb_mae": 11.990725586470267
+        }
+      }
+    },
+    {
+      "id": 18,
+      "bbox": [
+        3262,
+        795,
+        3288,
+        820
+      ],
+      "reference": "",
+      "variants": {
+        "original": {
+          "text": "年",
+          "edit_distance": null,
+          "ink_iou": 0.6518987341772152,
+          "rgb_mae": 5.04
+        },
+        "previous": {
+          "text": "年",
+          "edit_distance": null,
+          "ink_iou": 0.6774193548387096,
+          "rgb_mae": 5.006153846153846
+        },
+        "revised": {
+          "text": "年",
+          "edit_distance": null,
+          "ink_iou": 0.6518987341772152,
+          "rgb_mae": 5.04
+        }
+      }
+    },
+    {
+      "id": 19,
+      "bbox": [
+        3081,
+        245,
+        3468,
+        273
+      ],
+      "reference": "ERTHROTTLEVALVEE",
+      "variants": {
+        "original": {
+          "text": "THROTTLEVALNEE",
+          "edit_distance": 3,
+          "ink_iou": 0.7134281200631911,
+          "rgb_mae": 25.53737541528239
+        },
+        "previous": {
+          "text": "FOIAROITLEVALVEE",
+          "edit_distance": 5,
+          "ink_iou": 0.7448573324485733,
+          "rgb_mae": 23.258767072720563
+        },
+        "revised": {
+          "text": "&IHROTTLEVALVEE",
+          "edit_distance": 3,
+          "ink_iou": 0.9289783516900874,
+          "rgb_mae": 11.596068660022148
+        }
+      }
+    },
+    {
+      "id": 20,
+      "bbox": [
+        5310,
+        979,
+        5326,
+        994
+      ],
+      "reference": "",
+      "variants": {
+        "original": {
+          "text": "",
+          "edit_distance": null,
+          "ink_iou": 0.0,
+          "rgb_mae": 3.4541666666666666
+        },
+        "previous": {
+          "text": "",
+          "edit_distance": null,
+          "ink_iou": 0.0,
+          "rgb_mae": 3.4541666666666666
+        },
+        "revised": {
+          "text": "",
+          "edit_distance": null,
+          "ink_iou": 0.0,
+          "rgb_mae": 3.4541666666666666
+        }
+      }
+    },
+    {
+      "id": 21,
+      "bbox": [
+        5363,
+        379,
+        5408,
+        424
+      ],
+      "reference": "",
+      "variants": {
+        "original": {
+          "text": "",
+          "edit_distance": null,
+          "ink_iou": 0.0,
+          "rgb_mae": 0.09037037037037036
+        },
+        "previous": {
+          "text": "",
+          "edit_distance": null,
+          "ink_iou": 0.0,
+          "rgb_mae": 0.09037037037037036
+        },
+        "revised": {
+          "text": "",
+          "edit_distance": null,
+          "ink_iou": 0.0,
+          "rgb_mae": 0.09037037037037036
+        }
+      }
+    },
+    {
+      "id": 22,
+      "bbox": [
+        5260,
+        482,
+        5320,
+        513
+      ],
+      "reference": "",
+      "variants": {
+        "original": {
+          "text": "",
+          "edit_distance": null,
+          "ink_iou": 0.8565400843881856,
+          "rgb_mae": 9.137096774193548
+        },
+        "previous": {
+          "text": "",
+          "edit_distance": null,
+          "ink_iou": 0.7941176470588235,
+          "rgb_mae": 8.914516129032258
+        },
+        "revised": {
+          "text": "",
+          "edit_distance": null,
+          "ink_iou": 0.8565400843881856,
+          "rgb_mae": 9.137096774193548
+        }
+      }
+    },
+    {
+      "id": 23,
+      "bbox": [
+        5276,
+        937,
+        5297,
+        957
+      ],
+      "reference": "",
+      "variants": {
+        "original": {
+          "text": "",
+          "edit_distance": null,
+          "ink_iou": 0.125,
+          "rgb_mae": 3.123809523809524
+        },
+        "previous": {
+          "text": "",
+          "edit_distance": null,
+          "ink_iou": 0.5,
+          "rgb_mae": 2.4857142857142858
+        },
+        "revised": {
+          "text": "",
+          "edit_distance": null,
+          "ink_iou": 0.125,
+          "rgb_mae": 3.123809523809524
+        }
+      }
+    },
+    {
+      "id": 24,
+      "bbox": [
+        651,
+        1008,
+        894,
+        1036
+      ],
+      "reference": "TO ATMOSPHEREI",
+      "variants": {
+        "original": {
+          "text": "AYNOSANCAE",
+          "edit_distance": 9,
+          "ink_iou": 0.6359573736679272,
+          "rgb_mae": 42.90917107583774
+        },
+        "previous": {
+          "text": "TOATNOSSSI",
+          "edit_distance": 6,
+          "ink_iou": 0.6906523201075991,
+          "rgb_mae": 38.53424456202234
+        },
+        "revised": {
+          "text": "TOATNOSANERE",
+          "edit_distance": 4,
+          "ink_iou": 0.864297253634895,
+          "rgb_mae": 19.484714873603764
+        }
+      }
+    },
+    {
+      "id": 25,
+      "bbox": [
+        950,
+        1131,
+        965,
+        1150
+      ],
+      "reference": "",
+      "variants": {
+        "original": {
+          "text": "`",
+          "edit_distance": null,
+          "ink_iou": 0.6648351648351648,
+          "rgb_mae": 54.99298245614035
+        },
+        "previous": {
+          "text": "",
+          "edit_distance": null,
+          "ink_iou": 0.9848484848484849,
+          "rgb_mae": 14.333333333333334
+        },
+        "revised": {
+          "text": "",
+          "edit_distance": null,
+          "ink_iou": 0.9621212121212122,
+          "rgb_mae": 14.733333333333333
+        }
+      }
+    },
+    {
+      "id": 26,
+      "bbox": [
+        417,
+        1134,
+        611,
+        1163
+      ],
+      "reference": "CHECN YALVE",
+      "variants": {
+        "original": {
+          "text": "CHECM",
+          "edit_distance": 6,
+          "ink_iou": 0.6573233320173707,
+          "rgb_mae": 41.86402417348027
+        },
+        "previous": {
+          "text": "OHC VLVE",
+          "edit_distance": 5,
+          "ink_iou": 0.6905754795663053,
+          "rgb_mae": 35.409171702808386
+        },
+        "revised": {
+          "text": "CYHECYILVE",
+          "edit_distance": 3,
+          "ink_iou": 0.8233151183970856,
+          "rgb_mae": 23.11464628510487
+        }
+      }
+    },
+    {
+      "id": 27,
+      "bbox": [
+        809,
+        1416,
+        930,
+        1441
+      ],
+      "reference": "CUTOUT",
+      "variants": {
+        "original": {
+          "text": "CON",
+          "edit_distance": 4,
+          "ink_iou": 0.6870876531573987,
+          "rgb_mae": 32.40066115702479
+        },
+        "previous": {
+          "text": "CL.TOL",
+          "edit_distance": 4,
+          "ink_iou": 0.7382892057026477,
+          "rgb_mae": 26.759338842975207
+        },
+        "revised": {
+          "text": "CUTOU",
+          "edit_distance": 1,
+          "ink_iou": 0.9540106951871657,
+          "rgb_mae": 11.729917355371901
+        }
+      }
+    },
+    {
+      "id": 28,
+      "bbox": [
+        810,
+        1464,
+        918,
+        1491
+      ],
+      "reference": "TOCLU",
+      "variants": {
+        "original": {
+          "text": "DLLU",
+          "edit_distance": 3,
+          "ink_iou": 0.5522222222222222,
+          "rgb_mae": 36.79766803840878
+        },
+        "previous": {
+          "text": "OCLU",
+          "edit_distance": 1,
+          "ink_iou": 0.6688453159041394,
+          "rgb_mae": 29.974279835390945
+        },
+        "revised": {
+          "text": "TOCLU",
+          "edit_distance": 0,
+          "ink_iou": 0.9456521739130435,
+          "rgb_mae": 11.098765432098766
+        }
+      }
+    },
+    {
+      "id": 29,
+      "bbox": [
+        155,
+        1514,
+        423,
+        1540
+      ],
+      "reference": "MMING RESERVOIR",
+      "variants": {
+        "original": {
+          "text": "R",
+          "edit_distance": 13,
+          "ink_iou": 0.5774804905239688,
+          "rgb_mae": 57.29477611940298
+        },
+        "previous": {
+          "text": "MNGNO",
+          "edit_distance": 10,
+          "ink_iou": 0.6751054852320675,
+          "rgb_mae": 43.62313432835821
+        },
+        "revised": {
+          "text": "YMNG RENOI",
+          "edit_distance": 7,
+          "ink_iou": 0.7634169577643697,
+          "rgb_mae": 33.762916188289324
+        }
+      }
+    },
+    {
+      "id": 30,
+      "bbox": [
+        801,
+        1518,
+        1009,
+        1544
+      ],
+      "reference": "FROMCLUTC",
+      "variants": {
+        "original": {
+          "text": "COCLUN",
+          "edit_distance": 5,
+          "ink_iou": 0.6727521679598357,
+          "rgb_mae": 37.581176035502956
+        },
+        "previous": {
+          "text": "EROMCLUTC",
+          "edit_distance": 1,
+          "ink_iou": 0.9017713365539453,
+          "rgb_mae": 14.763683431952662
+        },
+        "revised": {
+          "text": "FROMCLUTC",
+          "edit_distance": 0,
+          "ink_iou": 0.9553571428571429,
+          "rgb_mae": 11.17289201183432
+        }
+      }
+    },
+    {
+      "id": 31,
+      "bbox": [
+        153,
+        1570,
+        342,
+        1597
+      ],
+      "reference": "MOICYLINDER",
+      "variants": {
+        "original": {
+          "text": "MCYNDY",
+          "edit_distance": 6,
+          "ink_iou": 0.6400966183574879,
+          "rgb_mae": 38.952184989222026
+        },
+        "previous": {
+          "text": "MCYLDER",
+          "edit_distance": 4,
+          "ink_iou": 0.8428270042194093,
+          "rgb_mae": 20.1965510484029
+        },
+        "revised": {
+          "text": "MCYLINDY",
+          "edit_distance": 4,
+          "ink_iou": 0.7673810768426556,
+          "rgb_mae": 27.46796002351558
+        }
+      }
+    },
+    {
+      "id": 32,
+      "bbox": [
+        139,
+        1604,
+        397,
+        1630
+      ],
+      "reference": "COCK OPERATING",
+      "variants": {
+        "original": {
+          "text": "OPSFAING",
+          "edit_distance": 7,
+          "ink_iou": 0.6086956521739131,
+          "rgb_mae": 44.30038759689923
+        },
+        "previous": {
+          "text": "CKPRATING",
+          "edit_distance": 4,
+          "ink_iou": 0.6933139534883721,
+          "rgb_mae": 35.970184853905785
+        },
+        "revised": {
+          "text": "COKOPERATING",
+          "edit_distance": 1,
+          "ink_iou": 0.8441458733205375,
+          "rgb_mae": 20.679039952295767
+        }
+      }
+    },
+    {
+      "id": 33,
+      "bbox": [
+        145,
+        1639,
+        310,
+        1666
+      ],
+      "reference": "CYLINDER",
+      "variants": {
+        "original": {
+          "text": "",
+          "edit_distance": 8,
+          "ink_iou": 0.6436260623229462,
+          "rgb_mae": 39.04175084175084
+        },
+        "previous": {
+          "text": "CYAXT",
+          "edit_distance": 6,
+          "ink_iou": 0.6097099621689785,
+          "rgb_mae": 38.976430976430976
+        },
+        "revised": {
+          "text": "CYLIN",
+          "edit_distance": 3,
+          "ink_iou": 0.8219264892268695,
+          "rgb_mae": 22.32996632996633
+        }
+      }
+    },
+    {
+      "id": 34,
+      "bbox": [
+        942,
+        852,
+        964,
+        874
+      ],
+      "reference": "",
+      "variants": {
+        "original": {
+          "text": "",
+          "edit_distance": null,
+          "ink_iou": 0.5351681957186545,
+          "rgb_mae": 77.96900826446281
+        },
+        "previous": {
+          "text": "都",
+          "edit_distance": null,
+          "ink_iou": 0.2723404255319149,
+          "rgb_mae": 82.29132231404958
+        },
+        "revised": {
+          "text": "",
+          "edit_distance": null,
+          "ink_iou": 0.5351681957186545,
+          "rgb_mae": 77.96900826446281
+        }
+      }
+    },
+    {
+      "id": 35,
+      "bbox": [
+        1172,
+        1463,
+        1252,
+        1489
+      ],
+      "reference": "PIPE",
+      "variants": {
+        "original": {
+          "text": "PLPE",
+          "edit_distance": 1,
+          "ink_iou": 0.7245989304812834,
+          "rgb_mae": 29.89519230769231
+        },
+        "previous": {
+          "text": "PIPE",
+          "edit_distance": 0,
+          "ink_iou": 0.8428184281842819,
+          "rgb_mae": 20.61875
+        },
+        "revised": {
+          "text": "PIPE",
+          "edit_distance": 0,
+          "ink_iou": 0.9551569506726457,
+          "rgb_mae": 11.75576923076923
+        }
+      }
+    },
+    {
+      "id": 36,
+      "bbox": [
+        1067,
+        1464,
+        1155,
+        1489
+      ],
+      "reference": "NOER",
+      "variants": {
+        "original": {
+          "text": "",
+          "edit_distance": 4,
+          "ink_iou": 0.49781181619256015,
+          "rgb_mae": 54.99318181818182
+        },
+        "previous": {
+          "text": "2",
+          "edit_distance": 4,
+          "ink_iou": 0.5850574712643678,
+          "rgb_mae": 44.18363636363637
+        },
+        "revised": {
+          "text": "NDE",
+          "edit_distance": 2,
+          "ink_iou": 0.8488095238095238,
+          "rgb_mae": 21.305454545454545
+        }
+      }
+    },
+    {
+      "id": 37,
+      "bbox": [
+        1276,
+        1469,
+        1295,
+        1485
+      ],
+      "reference": "",
+      "variants": {
+        "original": {
+          "text": "0",
+          "edit_distance": null,
+          "ink_iou": 0.7374301675977654,
+          "rgb_mae": 43.43092105263158
+        },
+        "previous": {
+          "text": "0",
+          "edit_distance": null,
+          "ink_iou": 0.7796610169491526,
+          "rgb_mae": 32.17434210526316
+        },
+        "revised": {
+          "text": "-",
+          "edit_distance": null,
+          "ink_iou": 0.9673202614379085,
+          "rgb_mae": 12.74671052631579
+        }
+      }
+    },
+    {
+      "id": 38,
+      "bbox": [
+        1793,
+        1066,
+        1847,
+        1118
+      ],
+      "reference": "4",
+      "variants": {
+        "original": {
+          "text": "",
+          "edit_distance": 1,
+          "ink_iou": 0.74726609963548,
+          "rgb_mae": 23.969729344729345
+        },
+        "previous": {
+          "text": "",
+          "edit_distance": 1,
+          "ink_iou": 0.5782967032967034,
+          "rgb_mae": 29.83974358974359
+        },
+        "revised": {
+          "text": "",
+          "edit_distance": 1,
+          "ink_iou": 0.74726609963548,
+          "rgb_mae": 23.969729344729345
+        }
+      }
+    },
+    {
+      "id": 39,
+      "bbox": [
+        2350,
+        1119,
+        2372,
+        1138
+      ],
+      "reference": "",
+      "variants": {
+        "original": {
+          "text": "",
+          "edit_distance": null,
+          "ink_iou": 0.41379310344827586,
+          "rgb_mae": 25.028708133971293
+        },
+        "previous": {
+          "text": "",
+          "edit_distance": null,
+          "ink_iou": 0.45977011494252873,
+          "rgb_mae": 24.076555023923444
+        },
+        "revised": {
+          "text": "",
+          "edit_distance": null,
+          "ink_iou": 0.41379310344827586,
+          "rgb_mae": 25.028708133971293
+        }
+      }
+    },
+    {
+      "id": 40,
+      "bbox": [
+        2663,
+        1332,
+        2928,
+        1365
+      ],
+      "reference": "EXHAUST PIPE",
+      "variants": {
+        "original": {
+          "text": "EXNAUS DIPE",
+          "edit_distance": 3,
+          "ink_iou": 0.7099820143884892,
+          "rgb_mae": 22.285648942252717
+        },
+        "previous": {
+          "text": "FMAUSTQIPE",
+          "edit_distance": 4,
+          "ink_iou": 0.7464203233256351,
+          "rgb_mae": 20.71355060034305
+        },
+        "revised": {
+          "text": "EXHAUSTPIPE",
+          "edit_distance": 0,
+          "ink_iou": 0.9199355185384201,
+          "rgb_mae": 9.725214408233276
+        }
+      }
+    },
+    {
+      "id": 41,
+      "bbox": [
+        2941,
+        1339,
+        2962,
+        1359
+      ],
+      "reference": "",
+      "variants": {
+        "original": {
+          "text": "",
+          "edit_distance": null,
+          "ink_iou": 0.8278688524590164,
+          "rgb_mae": 19.56904761904762
+        },
+        "previous": {
+          "text": "",
+          "edit_distance": null,
+          "ink_iou": 0.819672131147541,
+          "rgb_mae": 19.833333333333332
+        },
+        "revised": {
+          "text": "",
+          "edit_distance": null,
+          "ink_iou": 0.8278688524590164,
+          "rgb_mae": 19.56904761904762
+        }
+      }
+    },
+    {
+      "id": 42,
+      "bbox": [
+        3737,
+        1070,
+        3795,
+        1128
+      ],
+      "reference": "A",
+      "variants": {
+        "original": {
+          "text": "",
+          "edit_distance": 1,
+          "ink_iou": 0.6823935558112774,
+          "rgb_mae": 24.69797859690844
+        },
+        "previous": {
+          "text": "A",
+          "edit_distance": 0,
+          "ink_iou": 0.8257142857142857,
+          "rgb_mae": 12.90011890606421
+        },
+        "revised": {
+          "text": "",
+          "edit_distance": 1,
+          "ink_iou": 0.9421364985163204,
+          "rgb_mae": 8.921224732461356
+        }
+      }
+    },
+    {
+      "id": 43,
+      "bbox": [
+        4017,
+        1140,
+        4090,
+        1169
+      ],
+      "reference": "AIR",
+      "variants": {
+        "original": {
+          "text": "A/R",
+          "edit_distance": 1,
+          "ink_iou": 0.703125,
+          "rgb_mae": 24.968823807274443
+        },
+        "previous": {
+          "text": "A/R",
+          "edit_distance": 1,
+          "ink_iou": 0.8076923076923077,
+          "rgb_mae": 17.452999527633445
+        },
+        "revised": {
+          "text": "AIR",
+          "edit_distance": 0,
+          "ink_iou": 0.9405286343612335,
+          "rgb_mae": 9.461974492205952
+        }
+      }
+    },
+    {
+      "id": 44,
+      "bbox": [
+        5329,
+        1205,
+        5355,
+        1233
+      ],
+      "reference": "",
+      "variants": {
+        "original": {
+          "text": "",
+          "edit_distance": null,
+          "ink_iou": 0.8260869565217391,
+          "rgb_mae": 19.01098901098901
+        },
+        "previous": {
+          "text": "",
+          "edit_distance": null,
+          "ink_iou": 0.8854625550660793,
+          "rgb_mae": 15.06043956043956
+        },
+        "revised": {
+          "text": "",
+          "edit_distance": null,
+          "ink_iou": 0.8260869565217391,
+          "rgb_mae": 19.01098901098901
+        }
+      }
+    },
+    {
+      "id": 45,
+      "bbox": [
+        5197,
+        1257,
+        5351,
+        1306
+      ],
+      "reference": "cam",
+      "variants": {
+        "original": {
+          "text": "cYne",
+          "edit_distance": 3,
+          "ink_iou": 0.8412073490813649,
+          "rgb_mae": 5.4297641134375825
+        },
+        "previous": {
+          "text": "cYane",
+          "edit_distance": 3,
+          "ink_iou": 0.8272727272727273,
+          "rgb_mae": 5.587993639014047
+        },
+        "revised": {
+          "text": "cYne",
+          "edit_distance": 3,
+          "ink_iou": 0.8412073490813649,
+          "rgb_mae": 5.4297641134375825
+        }
+      }
+    },
+    {
+      "id": 46,
+      "bbox": [
+        5166,
+        1300,
+        5187,
+        1321
+      ],
+      "reference": "",
+      "variants": {
+        "original": {
+          "text": "",
+          "edit_distance": null,
+          "ink_iou": 0.7721518987341772,
+          "rgb_mae": 10.850340136054422
+        },
+        "previous": {
+          "text": "",
+          "edit_distance": null,
+          "ink_iou": 0.7530864197530864,
+          "rgb_mae": 11.684807256235828
+        },
+        "revised": {
+          "text": "",
+          "edit_distance": null,
+          "ink_iou": 0.7721518987341772,
+          "rgb_mae": 10.850340136054422
+        }
+      }
+    },
+    {
+      "id": 47,
+      "bbox": [
+        5132,
+        1751,
+        5149,
+        1769
+      ],
+      "reference": "",
+      "variants": {
+        "original": {
+          "text": "",
+          "edit_distance": null,
+          "ink_iou": 0.8571428571428571,
+          "rgb_mae": 6.238562091503268
+        },
+        "previous": {
+          "text": "",
+          "edit_distance": null,
+          "ink_iou": 0.8571428571428571,
+          "rgb_mae": 6.218954248366013
+        },
+        "revised": {
+          "text": "",
+          "edit_distance": null,
+          "ink_iou": 0.8571428571428571,
+          "rgb_mae": 6.238562091503268
+        }
+      }
+    },
+    {
+      "id": 48,
+      "bbox": [
+        647,
+        1958,
+        951,
+        1985
+      ],
+      "reference": "BOOSTERENGINA",
+      "variants": {
+        "original": {
+          "text": "ACOSINGINL",
+          "edit_distance": 7,
+          "ink_iou": 0.6864035087719298,
+          "rgb_mae": 30.39656432748538
+        },
+        "previous": {
+          "text": "BCOSYRNGINE",
+          "edit_distance": 5,
+          "ink_iou": 0.7951515151515152,
+          "rgb_mae": 21.468810916179336
+        },
+        "revised": {
+          "text": "ACOSIERNGINE",
+          "edit_distance": 5,
+          "ink_iou": 0.8826031475967673,
+          "rgb_mae": 16.087231968810915
+        }
+      }
+    },
+    {
+      "id": 49,
+      "bbox": [
+        1142,
+        1802,
+        1168,
+        1826
+      ],
+      "reference": "",
+      "variants": {
+        "original": {
+          "text": "",
+          "edit_distance": null,
+          "ink_iou": 0.8177966101694916,
+          "rgb_mae": 29.266025641025642
+        },
+        "previous": {
+          "text": "",
+          "edit_distance": null,
+          "ink_iou": 0.8478260869565217,
+          "rgb_mae": 21.40705128205128
+        },
+        "revised": {
+          "text": "",
+          "edit_distance": null,
+          "ink_iou": 0.8177966101694916,
+          "rgb_mae": 29.266025641025642
+        }
+      }
+    },
+    {
+      "id": 50,
+      "bbox": [
+        1162,
+        1851,
+        1181,
+        1877
+      ],
+      "reference": "",
+      "variants": {
+        "original": {
+          "text": "",
+          "edit_distance": null,
+          "ink_iou": 0.07236842105263158,
+          "rgb_mae": 76.67813765182186
+        },
+        "previous": {
+          "text": "",
+          "edit_distance": null,
+          "ink_iou": 0.0967741935483871,
+          "rgb_mae": 76.2672064777328
+        },
+        "revised": {
+          "text": "",
+          "edit_distance": null,
+          "ink_iou": 0.07236842105263158,
+          "rgb_mae": 76.67813765182186
+        }
+      }
+    },
+    {
+      "id": 51,
+      "bbox": [
+        1194,
+        1936,
+        1228,
+        1972
+      ],
+      "reference": "",
+      "variants": {
+        "original": {
+          "text": "",
+          "edit_distance": null,
+          "ink_iou": 0.8316151202749141,
+          "rgb_mae": 15.52450980392157
+        },
+        "previous": {
+          "text": "",
+          "edit_distance": null,
+          "ink_iou": 0.7745098039215687,
+          "rgb_mae": 18.887254901960784
+        },
+        "revised": {
+          "text": "",
+          "edit_distance": null,
+          "ink_iou": 0.8316151202749141,
+          "rgb_mae": 15.52450980392157
+        }
+      }
+    },
+    {
+      "id": 52,
+      "bbox": [
+        2178,
+        1079,
+        2199,
+        1100
+      ],
+      "reference": "",
+      "variants": {
+        "original": {
+          "text": "",
+          "edit_distance": null,
+          "ink_iou": 0.76,
+          "rgb_mae": 38.1156462585034
+        },
+        "previous": {
+          "text": "-",
+          "edit_distance": null,
+          "ink_iou": 0.7974137931034483,
+          "rgb_mae": 28.94331065759637
+        },
+        "revised": {
+          "text": "",
+          "edit_distance": null,
+          "ink_iou": 0.76,
+          "rgb_mae": 38.1156462585034
+        }
+      }
+    },
+    {
+      "id": 53,
+      "bbox": [
+        4468,
+        1308,
+        4518,
+        1370
+      ],
+      "reference": "",
+      "variants": {
+        "original": {
+          "text": "",
+          "edit_distance": null,
+          "ink_iou": 0.6758767268862912,
+          "rgb_mae": 52.865806451612904
+        },
+        "previous": {
+          "text": "",
+          "edit_distance": null,
+          "ink_iou": 0.6916802610114192,
+          "rgb_mae": 50.22838709677419
+        },
+        "revised": {
+          "text": "",
+          "edit_distance": null,
+          "ink_iou": 0.6758767268862912,
+          "rgb_mae": 52.865806451612904
+        }
+      }
+    }
+  ]
+}

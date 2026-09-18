@@ -1,5 +1,9 @@
 # Small-detail evaluation
 
+Historical results for `e14f1d9`. The current sample SVGs use the subsequent
+[validated local repair](../local-ink/README.md); the figures and metrics here
+remain a record of the previous approach.
+
 The subsequent [all-sample regression check](../regression/README.md) found
 local quality regressions, including non-text details. The improvements below
 must not be interpreted as a guarantee that other regions are unchanged.

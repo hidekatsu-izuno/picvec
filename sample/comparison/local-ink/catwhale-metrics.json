@@ -1,0 +1,1282 @@
+{
+  "source": "sample/input/catwhale.png",
+  "image_size": [
+    1370,
+    1148
+  ],
+  "ocrs_cjk_revision": "2f72f76ac2152ee1112ee6b6e36048bab069f391",
+  "regions": 41,
+  "totals": {
+    "original": {
+      "error": 66,
+      "characters": 203,
+      "exact": 6,
+      "recognized_regions": 35,
+      "ink_intersection": 18081,
+      "ink_union": 24238,
+      "absolute_rgb_error": 4119918.0,
+      "samples": 420930,
+      "source_ocr_disagreement": 0.3251231527093596,
+      "ink_iou": 0.7459773908738345,
+      "rgb_mae": 9.787655904782268
+    },
+    "previous": {
+      "error": 35,
+      "characters": 203,
+      "exact": 12,
+      "recognized_regions": 35,
+      "ink_intersection": 18973,
+      "ink_union": 22396,
+      "absolute_rgb_error": 2880154.0,
+      "samples": 420930,
+      "source_ocr_disagreement": 0.1724137931034483,
+      "ink_iou": 0.8471602071798535,
+      "rgb_mae": 6.842358586938446
+    },
+    "revised": {
+      "error": 33,
+      "characters": 203,
+      "exact": 12,
+      "recognized_regions": 35,
+      "ink_intersection": 19029,
+      "ink_union": 22396,
+      "absolute_rgb_error": 2928781.0,
+      "samples": 420930,
+      "source_ocr_disagreement": 0.1625615763546798,
+      "ink_iou": 0.8496606536881586,
+      "rgb_mae": 6.957881357945501
+    }
+  },
+  "details": [
+    {
+      "id": 0,
+      "bbox": [
+        185,
+        166,
+        409,
+        186
+      ],
+      "reference": "NEKOKUJIRA",
+      "variants": {
+        "original": {
+          "text": "NEKOKUJIRA",
+          "edit_distance": 0,
+          "ink_iou": 0.7922868741542625,
+          "rgb_mae": 15.230952380952381
+        },
+        "previous": {
+          "text": "NEKOKUJIRA",
+          "edit_distance": 0,
+          "ink_iou": 0.853589196872779,
+          "rgb_mae": 11.891815476190477
+        },
+        "revised": {
+          "text": "NEKOKUJIRA",
+          "edit_distance": 0,
+          "ink_iou": 0.8324137931034483,
+          "rgb_mae": 13.595610119047619
+        }
+      }
+    },
+    {
+      "id": 1,
+      "bbox": [
+        773,
+        388,
+        797,
+        410
+      ],
+      "reference": "",
+      "variants": {
+        "original": {
+          "text": "",
+          "edit_distance": null,
+          "ink_iou": 0.8333333333333334,
+          "rgb_mae": 5.566287878787879
+        },
+        "previous": {
+          "text": "",
+          "edit_distance": null,
+          "ink_iou": 0.8333333333333334,
+          "rgb_mae": 5.529040404040404
+        },
+        "revised": {
+          "text": "",
+          "edit_distance": null,
+          "ink_iou": 0.8333333333333334,
+          "rgb_mae": 5.566287878787879
+        }
+      }
+    },
+    {
+      "id": 2,
+      "bbox": [
+        40,
+        473,
+        177,
+        514
+      ],
+      "reference": "ねこみたいに",
+      "variants": {
+        "original": {
+          "text": "ねこみたいに",
+          "edit_distance": 0,
+          "ink_iou": 0.7365356622998545,
+          "rgb_mae": 7.254168892053884
+        },
+        "previous": {
+          "text": "ねこみたいに",
+          "edit_distance": 0,
+          "ink_iou": 0.7364568081991215,
+          "rgb_mae": 6.815619251083022
+        },
+        "revised": {
+          "text": "ねこみたいに",
+          "edit_distance": 0,
+          "ink_iou": 0.7826747720364742,
+          "rgb_mae": 6.487567503412261
+        }
+      }
+    },
+    {
+      "id": 3,
+      "bbox": [
+        60,
+        507,
+        170,
+        544
+      ],
+      "reference": "きまぐれで",
+      "variants": {
+        "original": {
+          "text": "うまくれて",
+          "edit_distance": 3,
+          "ink_iou": 0.6789137380191693,
+          "rgb_mae": 9.45945945945946
+        },
+        "previous": {
+          "text": "うまぐれて",
+          "edit_distance": 2,
+          "ink_iou": 0.7586206896551724,
+          "rgb_mae": 7.652661752661753
+        },
+        "revised": {
+          "text": "うまくれて",
+          "edit_distance": 3,
+          "ink_iou": 0.6789137380191693,
+          "rgb_mae": 9.465929565929565
+        }
+      }
+    },
+    {
+      "id": 4,
+      "bbox": [
+        49,
+        538,
+        196,
+        580
+      ],
+      "reference": "くじらみたいに",
+      "variants": {
+        "original": {
+          "text": "くじらみん",
+          "edit_distance": 3,
+          "ink_iou": 0.7110311750599521,
+          "rgb_mae": 8.497732426303855
+        },
+        "previous": {
+          "text": "くじらみたい",
+          "edit_distance": 1,
+          "ink_iou": 0.6864608076009501,
+          "rgb_mae": 7.888133030990174
+        },
+        "revised": {
+          "text": "くじらみたい",
+          "edit_distance": 1,
+          "ink_iou": 0.7334152334152334,
+          "rgb_mae": 8.197872799913617
+        }
+      }
+    },
+    {
+      "id": 5,
+      "bbox": [
+        68,
+        578,
+        161,
+        612
+      ],
+      "reference": "おおらか",
+      "variants": {
+        "original": {
+          "text": "おぉっか",
+          "edit_distance": 2,
+          "ink_iou": 0.7180952380952381,
+          "rgb_mae": 9.094982078853047
+        },
+        "previous": {
+          "text": "おおらか",
+          "edit_distance": 0,
+          "ink_iou": 0.6691729323308271,
+          "rgb_mae": 10.287476280834914
+        },
+        "revised": {
+          "text": "おぉっか",
+          "edit_distance": 2,
+          "ink_iou": 0.7180952380952381,
+          "rgb_mae": 9.094982078853047
+        }
+      }
+    },
+    {
+      "id": 6,
+      "bbox": [
+        701,
+        595,
+        727,
+        615
+      ],
+      "reference": "",
+      "variants": {
+        "original": {
+          "text": "",
+          "edit_distance": null,
+          "ink_iou": 0.6271186440677966,
+          "rgb_mae": 4.5115384615384615
+        },
+        "previous": {
+          "text": "",
+          "edit_distance": null,
+          "ink_iou": 0.6271186440677966,
+          "rgb_mae": 4.337179487179487
+        },
+        "revised": {
+          "text": "",
+          "edit_distance": null,
+          "ink_iou": 0.6271186440677966,
+          "rgb_mae": 4.5115384615384615
+        }
+      }
+    },
+    {
+      "id": 7,
+      "bbox": [
+        32,
+        672,
+        245,
+        700
+      ],
+      "reference": "いろいろな猫くじ",
+      "variants": {
+        "original": {
+          "text": "いろいろな猫くじ",
+          "edit_distance": 0,
+          "ink_iou": 0.8367875647668394,
+          "rgb_mae": 10.023977196512408
+        },
+        "previous": {
+          "text": "いろいろな猫くじ",
+          "edit_distance": 0,
+          "ink_iou": 0.9520057306590258,
+          "rgb_mae": 5.7035546613011405
+        },
+        "revised": {
+          "text": "いろいろな猫くじ",
+          "edit_distance": 0,
+          "ink_iou": 0.9444048467569494,
+          "rgb_mae": 5.908171249720546
+        }
+      }
+    },
+    {
+      "id": 8,
+      "bbox": [
+        497,
+        728,
+        560,
+        754
+      ],
+      "reference": "ZzZ",
+      "variants": {
+        "original": {
+          "text": "2z2",
+          "edit_distance": 2,
+          "ink_iou": 0.8928571428571429,
+          "rgb_mae": 4.968253968253968
+        },
+        "previous": {
+          "text": "222",
+          "edit_distance": 3,
+          "ink_iou": 0.9485981308411215,
+          "rgb_mae": 3.889092389092389
+        },
+        "revised": {
+          "text": "2zz",
+          "edit_distance": 2,
+          "ink_iou": 0.9485981308411215,
+          "rgb_mae": 3.8264143264143264
+        }
+      }
+    },
+    {
+      "id": 9,
+      "bbox": [
+        720,
+        742,
+        740,
+        765
+      ],
+      "reference": "",
+      "variants": {
+        "original": {
+          "text": "",
+          "edit_distance": null,
+          "ink_iou": 0.8447488584474886,
+          "rgb_mae": 12.066666666666666
+        },
+        "previous": {
+          "text": "",
+          "edit_distance": null,
+          "ink_iou": 0.9849246231155779,
+          "rgb_mae": 6.452173913043478
+        },
+        "revised": {
+          "text": "",
+          "edit_distance": null,
+          "ink_iou": 0.9849246231155779,
+          "rgb_mae": 6.527536231884058
+        }
+      }
+    },
+    {
+      "id": 10,
+      "bbox": [
+        430,
+        870,
+        487,
+        890
+      ],
+      "reference": "む",
+      "variants": {
+        "original": {
+          "text": "ねむ",
+          "edit_distance": 1,
+          "ink_iou": 0.792332268370607,
+          "rgb_mae": 15.326900584795322
+        },
+        "previous": {
+          "text": "ねむ",
+          "edit_distance": 1,
+          "ink_iou": 0.8776223776223776,
+          "rgb_mae": 8.854970760233918
+        },
+        "revised": {
+          "text": "ねむ",
+          "edit_distance": 1,
+          "ink_iou": 0.8908450704225352,
+          "rgb_mae": 8.839181286549708
+        }
+      }
+    },
+    {
+      "id": 11,
+      "bbox": [
+        723,
+        885,
+        779,
+        908
+      ],
+      "reference": "のぞ<",
+      "variants": {
+        "original": {
+          "text": "ぞ<",
+          "edit_distance": 1,
+          "ink_iou": 0.7831858407079646,
+          "rgb_mae": 9.914596273291925
+        },
+        "previous": {
+          "text": "のぞ<",
+          "edit_distance": 0,
+          "ink_iou": 0.9333333333333333,
+          "rgb_mae": 6.2937370600414075
+        },
+        "revised": {
+          "text": "のぞ<",
+          "edit_distance": 0,
+          "ink_iou": 0.9420289855072463,
+          "rgb_mae": 6.541407867494824
+        }
+      }
+    },
+    {
+      "id": 12,
+      "bbox": [
+        111,
+        891,
+        187,
+        910
+      ],
+      "reference": "よこぶ",
+      "variants": {
+        "original": {
+          "text": "よろこぶ",
+          "edit_distance": 1,
+          "ink_iou": 0.6643598615916955,
+          "rgb_mae": 13.791320406278855
+        },
+        "previous": {
+          "text": "よろこぶ",
+          "edit_distance": 1,
+          "ink_iou": 0.8969465648854962,
+          "rgb_mae": 6.858264081255771
+        },
+        "revised": {
+          "text": "よろこぶ",
+          "edit_distance": 1,
+          "ink_iou": 0.8992248062015504,
+          "rgb_mae": 7.231071098799631
+        }
+      }
+    },
+    {
+      "id": 13,
+      "bbox": [
+        969,
+        975,
+        1007,
+        995
+      ],
+      "reference": "ゆめ",
+      "variants": {
+        "original": {
+          "text": "内め",
+          "edit_distance": 1,
+          "ink_iou": 0.7384615384615385,
+          "rgb_mae": 14.187719298245614
+        },
+        "previous": {
+          "text": "ゆめ",
+          "edit_distance": 0,
+          "ink_iou": 0.9041916167664671,
+          "rgb_mae": 6.960964912280701
+        },
+        "revised": {
+          "text": "ゆめ",
+          "edit_distance": 0,
+          "ink_iou": 0.9221556886227545,
+          "rgb_mae": 6.864473684210527
+        }
+      }
+    },
+    {
+      "id": 14,
+      "bbox": [
+        1133,
+        171,
+        1276,
+        213
+      ],
+      "reference": "やさしい海て",
+      "variants": {
+        "original": {
+          "text": "やさしい海て",
+          "edit_distance": 0,
+          "ink_iou": 0.7093023255813954,
+          "rgb_mae": 8.7004107004107
+        },
+        "previous": {
+          "text": "やさしい海で",
+          "edit_distance": 1,
+          "ink_iou": 0.7555555555555555,
+          "rgb_mae": 7.326617826617826
+        },
+        "revised": {
+          "text": "やさしい海て",
+          "edit_distance": 0,
+          "ink_iou": 0.7093023255813954,
+          "rgb_mae": 8.7004107004107
+        }
+      }
+    },
+    {
+      "id": 15,
+      "bbox": [
+        1140,
+        207,
+        1284,
+        247
+      ],
+      "reference": "っながってる。",
+      "variants": {
+        "original": {
+          "text": "っなかってる。",
+          "edit_distance": 1,
+          "ink_iou": 0.7597684515195369,
+          "rgb_mae": 6.897974537037037
+        },
+        "previous": {
+          "text": "っながってる。",
+          "edit_distance": 0,
+          "ink_iou": 0.7595307917888563,
+          "rgb_mae": 6.742650462962963
+        },
+        "revised": {
+          "text": "っながってる。",
+          "edit_distance": 0,
+          "ink_iou": 0.7810650887573964,
+          "rgb_mae": 6.499189814814815
+        }
+      }
+    },
+    {
+      "id": 16,
+      "bbox": [
+        1106,
+        232,
+        1342,
+        285
+      ],
+      "reference": "どこまでも、いっしょに",
+      "variants": {
+        "original": {
+          "text": "とこまでも。いっしょに",
+          "edit_distance": 2,
+          "ink_iou": 0.7362240289069557,
+          "rgb_mae": 5.965009060867711
+        },
+        "previous": {
+          "text": "こまでも、いっしょ",
+          "edit_distance": 2,
+          "ink_iou": 0.7583025830258303,
+          "rgb_mae": 5.791466794584799
+        },
+        "revised": {
+          "text": "とこまでも、いっしょに",
+          "edit_distance": 1,
+          "ink_iou": 0.7434030937215651,
+          "rgb_mae": 5.845192410190811
+        }
+      }
+    },
+    {
+      "id": 17,
+      "bbox": [
+        1144,
+        376,
+        1166,
+        400
+      ],
+      "reference": "",
+      "variants": {
+        "original": {
+          "text": "",
+          "edit_distance": null,
+          "ink_iou": 0.975,
+          "rgb_mae": 3.952651515151515
+        },
+        "previous": {
+          "text": "",
+          "edit_distance": null,
+          "ink_iou": 0.9433198380566802,
+          "rgb_mae": 4.655934343434343
+        },
+        "revised": {
+          "text": "",
+          "edit_distance": null,
+          "ink_iou": 0.975,
+          "rgb_mae": 3.952651515151515
+        }
+      }
+    },
+    {
+      "id": 18,
+      "bbox": [
+        1191,
+        479,
+        1329,
+        520
+      ],
+      "reference": "小さな幸せを",
+      "variants": {
+        "original": {
+          "text": "小さな幸せた",
+          "edit_distance": 1,
+          "ink_iou": 0.7365269461077845,
+          "rgb_mae": 8.728525980911982
+        },
+        "previous": {
+          "text": "小さな幸せた",
+          "edit_distance": 1,
+          "ink_iou": 0.7387606318347509,
+          "rgb_mae": 8.200306350889596
+        },
+        "revised": {
+          "text": "小さな幸せた",
+          "edit_distance": 1,
+          "ink_iou": 0.7536585365853659,
+          "rgb_mae": 8.335218569577
+        }
+      }
+    },
+    {
+      "id": 19,
+      "bbox": [
+        1199,
+        512,
+        1332,
+        555
+      ],
+      "reference": "大きく運ぶ",
+      "variants": {
+        "original": {
+          "text": "大子く運",
+          "edit_distance": 2,
+          "ink_iou": 0.7728706624605678,
+          "rgb_mae": 9.381418662936412
+        },
+        "previous": {
+          "text": "大き（運",
+          "edit_distance": 2,
+          "ink_iou": 0.8097826086956522,
+          "rgb_mae": 8.25389054030425
+        },
+        "revised": {
+          "text": "大子く運",
+          "edit_distance": 2,
+          "ink_iou": 0.7857900318133616,
+          "rgb_mae": 9.142624001865128
+        }
+      }
+    },
+    {
+      "id": 20,
+      "bbox": [
+        1214,
+        549,
+        1337,
+        588
+      ],
+      "reference": "猫くじら。",
+      "variants": {
+        "original": {
+          "text": "猫くじら。",
+          "edit_distance": 0,
+          "ink_iou": 0.7973421926910299,
+          "rgb_mae": 8.56347717323327
+        },
+        "previous": {
+          "text": "猫くじら。",
+          "edit_distance": 0,
+          "ink_iou": 0.8571428571428571,
+          "rgb_mae": 6.809255784865541
+        },
+        "revised": {
+          "text": "猫くじら。",
+          "edit_distance": 0,
+          "ink_iou": 0.8685782556750299,
+          "rgb_mae": 6.873115141407824
+        }
+      }
+    },
+    {
+      "id": 21,
+      "bbox": [
+        973,
+        697,
+        1072,
+        722
+      ],
+      "reference": "猫くじ",
+      "variants": {
+        "original": {
+          "text": "猫くじ",
+          "edit_distance": 0,
+          "ink_iou": 0.8369351669941061,
+          "rgb_mae": 14.357710437710438
+        },
+        "previous": {
+          "text": "猫くじら",
+          "edit_distance": 1,
+          "ink_iou": 0.9577754891864058,
+          "rgb_mae": 8.35892255892256
+        },
+        "revised": {
+          "text": "猫くじら",
+          "edit_distance": 1,
+          "ink_iou": 0.9618949536560247,
+          "rgb_mae": 8.26895622895623
+        }
+      }
+    },
+    {
+      "id": 22,
+      "bbox": [
+        1099,
+        697,
+        1220,
+        721
+      ],
+      "reference": "フィル",
+      "variants": {
+        "original": {
+          "text": "プ0フィール",
+          "edit_distance": 3,
+          "ink_iou": 0.8059701492537313,
+          "rgb_mae": 8.05188246097337
+        },
+        "previous": {
+          "text": "プ0フィル",
+          "edit_distance": 2,
+          "ink_iou": 0.8577586206896551,
+          "rgb_mae": 6.122245179063361
+        },
+        "revised": {
+          "text": "プロフィル",
+          "edit_distance": 2,
+          "ink_iou": 0.8874172185430463,
+          "rgb_mae": 5.755624426078971
+        }
+      }
+    },
+    {
+      "id": 23,
+      "bbox": [
+        968,
+        746,
+        1023,
+        770
+      ],
+      "reference": "",
+      "variants": {
+        "original": {
+          "text": "まえ",
+          "edit_distance": null,
+          "ink_iou": 0.7136363636363636,
+          "rgb_mae": 11.287121212121212
+        },
+        "previous": {
+          "text": "え",
+          "edit_distance": null,
+          "ink_iou": 0.8542713567839196,
+          "rgb_mae": 6.421969696969697
+        },
+        "revised": {
+          "text": "え",
+          "edit_distance": null,
+          "ink_iou": 0.8717948717948718,
+          "rgb_mae": 5.97020202020202
+        }
+      }
+    },
+    {
+      "id": 24,
+      "bbox": [
+        1076,
+        747,
+        1148,
+        770
+      ],
+      "reference": "猫じ",
+      "variants": {
+        "original": {
+          "text": "じ",
+          "edit_distance": 1,
+          "ink_iou": 0.7714285714285715,
+          "rgb_mae": 13.985104669887278
+        },
+        "previous": {
+          "text": "猫くじ",
+          "edit_distance": 1,
+          "ink_iou": 0.9365994236311239,
+          "rgb_mae": 7.0783011272141705
+        },
+        "revised": {
+          "text": "猫くじ",
+          "edit_distance": 1,
+          "ink_iou": 0.9197707736389685,
+          "rgb_mae": 7.351247987117552
+        }
+      }
+    },
+    {
+      "id": 25,
+      "bbox": [
+        969,
+        781,
+        1023,
+        799
+      ],
+      "reference": "すみか",
+      "variants": {
+        "original": {
+          "text": "まみか",
+          "edit_distance": 1,
+          "ink_iou": 0.6852589641434262,
+          "rgb_mae": 17.361796982167352
+        },
+        "previous": {
+          "text": "すみか",
+          "edit_distance": 0,
+          "ink_iou": 0.8743961352657005,
+          "rgb_mae": 9.036008230452675
+        },
+        "revised": {
+          "text": "すみか",
+          "edit_distance": 0,
+          "ink_iou": 0.9211822660098522,
+          "rgb_mae": 7.226337448559671
+        }
+      }
+    },
+    {
+      "id": 26,
+      "bbox": [
+        1080,
+        782,
+        1237,
+        800
+      ],
+      "reference": "どこかのやさしい海",
+      "variants": {
+        "original": {
+          "text": "とこかのやさしい海",
+          "edit_distance": 1,
+          "ink_iou": 0.7072,
+          "rgb_mae": 13.94692144373673
+        },
+        "previous": {
+          "text": "どこかのやさしい海",
+          "edit_distance": 0,
+          "ink_iou": 0.885036496350365,
+          "rgb_mae": 7.507430997876858
+        },
+        "revised": {
+          "text": "どこかのやさしい海",
+          "edit_distance": 0,
+          "ink_iou": 0.8882783882783882,
+          "rgb_mae": 7.430761972163246
+        }
+      }
+    },
+    {
+      "id": 27,
+      "bbox": [
+        970,
+        815,
+        1035,
+        833
+      ],
+      "reference": "せか<",
+      "variants": {
+        "original": {
+          "text": "せかく",
+          "edit_distance": 1,
+          "ink_iou": 0.7107438016528925,
+          "rgb_mae": 13.208547008547008
+        },
+        "previous": {
+          "text": "せかく",
+          "edit_distance": 1,
+          "ink_iou": 0.9019607843137255,
+          "rgb_mae": 6.573504273504273
+        },
+        "revised": {
+          "text": "せかく",
+          "edit_distance": 1,
+          "ink_iou": 0.916256157635468,
+          "rgb_mae": 6.295726495726496
+        }
+      }
+    },
+    {
+      "id": 28,
+      "bbox": [
+        1079,
+        815,
+        1271,
+        833
+      ],
+      "reference": "きまれけやしい",
+      "variants": {
+        "original": {
+          "text": "まれたけどやしい",
+          "edit_distance": 3,
+          "ink_iou": 0.6986301369863014,
+          "rgb_mae": 13.849247685185185
+        },
+        "previous": {
+          "text": "きまれけどやさしい",
+          "edit_distance": 2,
+          "ink_iou": 0.878125,
+          "rgb_mae": 8.181327160493828
+        },
+        "revised": {
+          "text": "きまれけどやさしい",
+          "edit_distance": 2,
+          "ink_iou": 0.8876582278481012,
+          "rgb_mae": 7.641782407407407
+        }
+      }
+    },
+    {
+      "id": 29,
+      "bbox": [
+        1078,
+        841,
+        1334,
+        862
+      ],
+      "reference": "のんびりで、みんなのそばにいたい",
+      "variants": {
+        "original": {
+          "text": "のんびりで、みんなの平ばにいたし",
+          "edit_distance": 2,
+          "ink_iou": 0.6764397905759162,
+          "rgb_mae": 11.974702380952381
+        },
+        "previous": {
+          "text": "のんびりでみんなのそばにいたい",
+          "edit_distance": 1,
+          "ink_iou": 0.8928136419001218,
+          "rgb_mae": 6.262834821428571
+        },
+        "revised": {
+          "text": "のんびりで、みんなのそばにいたい",
+          "edit_distance": 0,
+          "ink_iou": 0.8854041013268998,
+          "rgb_mae": 6.55828373015873
+        }
+      }
+    },
+    {
+      "id": 30,
+      "bbox": [
+        968,
+        876,
+        1047,
+        897
+      ],
+      "reference": "すきなもの",
+      "variants": {
+        "original": {
+          "text": "すの",
+          "edit_distance": 3,
+          "ink_iou": 0.6528925619834711,
+          "rgb_mae": 14.174603174603174
+        },
+        "previous": {
+          "text": "すきもの",
+          "edit_distance": 1,
+          "ink_iou": 0.8544303797468354,
+          "rgb_mae": 7.900944343982319
+        },
+        "revised": {
+          "text": "すもの",
+          "edit_distance": 2,
+          "ink_iou": 0.8954248366013072,
+          "rgb_mae": 6.467751657625075
+        }
+      }
+    },
+    {
+      "id": 31,
+      "bbox": [
+        1078,
+        878,
+        1257,
+        896
+      ],
+      "reference": "おひね·小さな魚",
+      "variants": {
+        "original": {
+          "text": "おひるわ、小さな",
+          "edit_distance": 4,
+          "ink_iou": 0.6797752808988764,
+          "rgb_mae": 15.353920960066212
+        },
+        "previous": {
+          "text": "おひるね・小さ魚",
+          "edit_distance": 3,
+          "ink_iou": 0.8797996661101837,
+          "rgb_mae": 8.284502379474446
+        },
+        "revised": {
+          "text": "おひるね·小さな魚",
+          "edit_distance": 1,
+          "ink_iou": 0.8927973199329984,
+          "rgb_mae": 8.13935443823712
+        }
+      }
+    },
+    {
+      "id": 32,
+      "bbox": [
+        1077,
+        903,
+        1301,
+        925
+      ],
+      "reference": "ぼこやしいひと",
+      "variants": {
+        "original": {
+          "text": "ひたはっこ・やさしいひと",
+          "edit_distance": 6,
+          "ink_iou": 0.7068062827225131,
+          "rgb_mae": 10.276176948051948
+        },
+        "previous": {
+          "text": "ばこ・やしいひと",
+          "edit_distance": 2,
+          "ink_iou": 0.8594674556213018,
+          "rgb_mae": 6.789840367965368
+        },
+        "revised": {
+          "text": "ぼこ・やしいひと",
+          "edit_distance": 1,
+          "ink_iou": 0.8842105263157894,
+          "rgb_mae": 6.197375541125541
+        }
+      }
+    },
+    {
+      "id": 33,
+      "bbox": [
+        971,
+        939,
+        1060,
+        958
+      ],
+      "reference": "と<いこと",
+      "variants": {
+        "original": {
+          "text": "とくいなこと",
+          "edit_distance": 2,
+          "ink_iou": 0.706959706959707,
+          "rgb_mae": 10.50581509954662
+        },
+        "previous": {
+          "text": "とくいなこと",
+          "edit_distance": 2,
+          "ink_iou": 0.8666666666666667,
+          "rgb_mae": 6.264537748866548
+        },
+        "revised": {
+          "text": "とくいなこと",
+          "edit_distance": 2,
+          "ink_iou": 0.8808510638297873,
+          "rgb_mae": 6.082594125763848
+        }
+      }
+    },
+    {
+      "id": 34,
+      "bbox": [
+        1077,
+        940,
+        1277,
+        958
+      ],
+      "reference": "海でみんこと",
+      "variants": {
+        "original": {
+          "text": "みんをつなくこと",
+          "edit_distance": 6,
+          "ink_iou": 0.6716604244694132,
+          "rgb_mae": 14.558981481481482
+        },
+        "previous": {
+          "text": "海でみんをっこと",
+          "edit_distance": 2,
+          "ink_iou": 0.8596237337192475,
+          "rgb_mae": 7.526944444444444
+        },
+        "revised": {
+          "text": "海でみんをこと",
+          "edit_distance": 1,
+          "ink_iou": 0.88,
+          "rgb_mae": 7.229259259259259
+        }
+      }
+    },
+    {
+      "id": 35,
+      "bbox": [
+        1079,
+        977,
+        1303,
+        995
+      ],
+      "reference": "もっとたくんのやしさで",
+      "variants": {
+        "original": {
+          "text": "つとたくさんのやしさて",
+          "edit_distance": 4,
+          "ink_iou": 0.7322623828647925,
+          "rgb_mae": 12.284143518518519
+        },
+        "previous": {
+          "text": "もっとたくんのやしで",
+          "edit_distance": 1,
+          "ink_iou": 0.8883928571428571,
+          "rgb_mae": 7.0777943121693125
+        },
+        "revised": {
+          "text": "もっとたくさんのやしさて",
+          "edit_distance": 2,
+          "ink_iou": 0.8977443609022556,
+          "rgb_mae": 6.831431878306878
+        }
+      }
+    },
+    {
+      "id": 36,
+      "bbox": [
+        117,
+        1087,
+        193,
+        1108
+      ],
+      "reference": "ごごろ",
+      "variants": {
+        "original": {
+          "text": "33",
+          "edit_distance": 3,
+          "ink_iou": 0.6148648648648649,
+          "rgb_mae": 13.90998329156224
+        },
+        "previous": {
+          "text": "ごろごろ",
+          "edit_distance": 1,
+          "ink_iou": 0.8875968992248062,
+          "rgb_mae": 6.777568922305765
+        },
+        "revised": {
+          "text": "ごろごろ",
+          "edit_distance": 1,
+          "ink_iou": 0.8853754940711462,
+          "rgb_mae": 6.661862990810359
+        }
+      }
+    },
+    {
+      "id": 37,
+      "bbox": [
+        438,
+        1089,
+        493,
+        1111
+      ],
+      "reference": "",
+      "variants": {
+        "original": {
+          "text": "もぐる",
+          "edit_distance": null,
+          "ink_iou": 0.7399103139013453,
+          "rgb_mae": 11.356749311294767
+        },
+        "previous": {
+          "text": "もぐる",
+          "edit_distance": null,
+          "ink_iou": 0.9253731343283582,
+          "rgb_mae": 6.520661157024794
+        },
+        "revised": {
+          "text": "もぐる",
+          "edit_distance": null,
+          "ink_iou": 0.9310344827586207,
+          "rgb_mae": 6.477685950413223
+        }
+      }
+    },
+    {
+      "id": 38,
+      "bbox": [
+        699,
+        1088,
+        774,
+        1114
+      ],
+      "reference": "なし",
+      "variants": {
+        "original": {
+          "text": "なかよし",
+          "edit_distance": 2,
+          "ink_iou": 0.7329192546583851,
+          "rgb_mae": 9.751452991452991
+        },
+        "previous": {
+          "text": "なし",
+          "edit_distance": 0,
+          "ink_iou": 0.8591549295774648,
+          "rgb_mae": 5.922051282051282
+        },
+        "revised": {
+          "text": "し",
+          "edit_distance": 1,
+          "ink_iou": 0.8861209964412812,
+          "rgb_mae": 5.495555555555556
+        }
+      }
+    },
+    {
+      "id": 39,
+      "bbox": [
+        1076,
+        1002,
+        1202,
+        1023
+      ],
+      "reference": "海こと",
+      "variants": {
+        "original": {
+          "text": "海を",
+          "edit_distance": 2,
+          "ink_iou": 0.7417027417027418,
+          "rgb_mae": 14.431594860166289
+        },
+        "previous": {
+          "text": "海こと",
+          "edit_distance": 0,
+          "ink_iou": 0.8837209302325582,
+          "rgb_mae": 8.120307382212145
+        },
+        "revised": {
+          "text": "海こと",
+          "edit_distance": 0,
+          "ink_iou": 0.8610169491525423,
+          "rgb_mae": 8.991181657848324
+        }
+      }
+    },
+    {
+      "id": 40,
+      "bbox": [
+        973,
+        1048,
+        1308,
+        1088
+      ],
+      "reference": "「きっと、どこかでまた会える。",
+      "variants": {
+        "original": {
+          "text": "きっと、どこかできた会える。",
+          "edit_distance": 2,
+          "ink_iou": 0.7529785544082606,
+          "rgb_mae": 5.572114427860696
+        },
+        "previous": {
+          "text": "きっと、どこかでまた会える。",
+          "edit_distance": 1,
+          "ink_iou": 0.9153297682709447,
+          "rgb_mae": 3.034179104477612
+        },
+        "revised": {
+          "text": "きっと、どこかでまた会える。",
+          "edit_distance": 1,
+          "ink_iou": 0.9135472370766489,
+          "rgb_mae": 3.069776119402985
+        }
+      }
+    }
+  ]
+}
