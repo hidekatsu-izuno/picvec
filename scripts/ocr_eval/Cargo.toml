@@ -1,0 +1,15 @@
+[package]
+name = "picvec-ocr-eval"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Deliberately separate from picvec's dependency graph (including WASM).
+[workspace]
+
+[dependencies]
+ocrs-cjk = { git = "https://github.com/kent-tokyo/ocrs-cjk", rev = "2f72f76ac2152ee1112ee6b6e36048bab069f391", default-features = false, features = ["onnx"] }
+rten = { version = "0.24.0", default-features = false, features = ["onnx_format"] }
+rten-imageproc = "0.24.0"
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
+serde_json = "1.0"

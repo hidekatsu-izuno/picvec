@@ -38,7 +38,7 @@ come from the final SVG, including accepted source refinements.
 | Option | Purpose and default |
 | --- | --- |
 | `--max-dimension <PX>` | Maximum automatic **base** processing dimension (1600). Source refinements may be larger. |
-| `--no-adaptive-refinement` | Disable source-resolution refinement. |
+| `--no-adaptive-refinement` | Disable adaptive refinement passes. |
 | `--adaptive-svg-budget-mib <MIB>` | Additional SVG byte budget for refinement (0: unlimited). Quality and efficiency checks still apply. |
 | `--remove-chroma-key-background` | Detect and remove a saturated red, green, blue, cyan, magenta or yellow backing. |
 | `--paint-merge-passes <N>` | Paint merge passes, 1–8 (1). |
@@ -86,6 +86,18 @@ whole picture. Checking the whole picture helps keep connected lines and gradual
 colour transitions consistent, but can take much longer. If no suitable
 improvement is found, picvec keeps the first result. You can limit the extra file
 size with `--adaptive-svg-budget-mib`.
+
+Small, thin shapes on a locally uniform opaque background can keep their
+source-resolution outlines before resizing. picvec estimates the two paint
+colours, reconstructs subpixel contours, and checks the rendered shape against
+the source, including small holes. Accepted ink is removed from the working
+raster before ordinary segmentation, so it is not fitted twice. This helps
+small lettering without recognizing characters or replacing them with fonts.
+Shaded backgrounds, larger shapes and images with transparency use the ordinary
+pipeline. OCR is used only by the optional [evaluation tool](scripts/ocr_eval/README.md).
+See the [sample comparison](sample/comparison/ocr/README.md) for measured results
+and remaining limitations. The [all-sample regression check](sample/comparison/regression/README.md)
+also documents local quality regressions outside text regions.
 
 ### Transparency and visible geometry
 

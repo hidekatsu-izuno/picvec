@@ -11,6 +11,7 @@ mod alpha_paint;
 pub mod chroma;
 pub mod color;
 mod colour_fields;
+mod compact_ink;
 pub mod config;
 pub mod edge;
 mod elementary;

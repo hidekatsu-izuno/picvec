@@ -74,6 +74,8 @@ pub struct Summary {
     pub source_alpha: AlphaTransparencySummary,
     pub chroma_key: ChromaKeySummary,
     pub adaptive_refinement: AdaptiveRefinementSummary,
+    /// Small two-colour silhouettes recovered at source resolution, without OCR.
+    pub compact_ink_components: usize,
     pub hierarchical_topology: HierarchicalTopologySummary,
     pub edge_roles: EdgeSummary,
     pub segmentation: SegmentationSummary,
@@ -1143,6 +1145,19 @@ fn vectorize_decoded(
     };
     let mut separators = Vec::new();
     let mut separator_quality_reference = None;
+    let mut compact_ink = crate::compact_ink::CompactInk::default();
+    if input_matte.is_none() {
+        let (ink, cleaned) = crate::compact_ink::extract(&source);
+        if let Some(cleaned) = cleaned {
+            if config.compute_quality_metrics {
+                separator_quality_reference =
+                    Some(source_reference.resize_max(complexity.selected_dimension.max(64)));
+            }
+            source = cleaned;
+            source_reference = source.clone();
+            compact_ink = ink;
+        }
+    }
     if config.adaptive_refinement && detected_key.is_some() {
         if let Some(matte) = &input_matte {
             let (bands, cleaned) =
@@ -1213,6 +1228,14 @@ fn vectorize_decoded(
         ],
     );
     core.svg.rect_elements += separators.len();
+    compact_ink.append(
+        &mut core.document,
+        [
+            processing_width as f32 / input_width as f32,
+            processing_height as f32 / input_height as f32,
+        ],
+    );
+    core.svg.path_elements += compact_ink.path_elements();
     core.svg.bytes = core.document.len();
     if let Some(reference) = separator_quality_reference {
         let rendered = render_svg_document_on(
@@ -1269,6 +1292,7 @@ fn vectorize_decoded(
             source_alpha,
             chroma_key,
             adaptive_refinement,
+            compact_ink_components: compact_ink.components,
             hierarchical_topology: core.hierarchical_topology,
             edge_roles: core.edge_roles,
             segmentation: core.segmentation,
@@ -1520,6 +1544,12 @@ fn vectorize_processing(
     // their raw alpha here blocks RGB material merging at those edges.
     // Native support is split explicitly by face_alpha::prepare below.
     let material_matte = chroma_matte.filter(|_| source_alpha && coverage.is_none());
+    save_label_diagnostic(
+        "antialias-labels",
+        &segmentation.labels,
+        processing.width,
+        processing.height,
+    );
     crate::segment::absorb_micro_regions(&paint_reference, &mut segmentation, material_matte);
     save_mask_diagnostic(
         "paint-samples",

@@ -3077,6 +3077,10 @@ fn fit_alpha_contour(points: &[Point]) -> (Vec<Point>, Vec<CurveSegment>) {
 }
 
 pub(crate) fn fitted_colour_contour_path_data(points: &[Point]) -> String {
+    fitted_colour_contour_with_smoothing(points, 0.7)
+}
+
+pub(crate) fn fitted_colour_contour_with_smoothing(points: &[Point], sigma: f32) -> String {
     let mut source = points.to_vec();
     if source.len() < 3 {
         return String::new();
@@ -3084,8 +3088,16 @@ pub(crate) fn fitted_colour_contour_path_data(points: &[Point]) -> String {
     if source.first() != source.last() {
         source.push(source[0]);
     }
-    let curves =
-        fit_shared_boundary_candidate(&source, true, 0.25, 0.7, 100.0, &HashSet::new(), None, None);
+    let curves = fit_shared_boundary_candidate(
+        &source,
+        true,
+        0.25,
+        sigma,
+        100.0,
+        &HashSet::new(),
+        None,
+        None,
+    );
     structural_curve_path_data(&curves, true)
 }
 

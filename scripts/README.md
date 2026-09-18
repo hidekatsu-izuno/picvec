@@ -19,5 +19,8 @@ Automated Rust regression tests and their fixtures live in `tests/`.
   mise exec -- cargo run --release --locked --example color_batch_performance
   ```
 
+- `ocr_eval/`: Optional [ocrs-cjk evaluation](ocr_eval/README.md) of fixed
+  source text regions. OCR and its models are not dependencies of picvec.
+
 Python and `uv` remain available for the optional Python tools. They are not
 required to run the Rust test suite.
